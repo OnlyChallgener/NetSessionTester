@@ -21,8 +21,14 @@ import kotlinx.coroutines.withContext
 import java.net.Inet4Address
 import java.net.Inet6Address
 import java.net.InetAddress
+import java.net.ConnectException
 import java.net.InetSocketAddress
+import java.net.NoRouteToHostException
+import java.net.PortUnreachableException
 import java.net.Socket
+import java.net.SocketException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
 import java.util.Collections
 
 class TcpTester {
@@ -146,7 +152,7 @@ class TcpTester {
                 startedAtEpochMs = started
             )
             onStats(stats)
-            onLog(LogLine(level = LogLevel.STAT, text = "${protocol.label} 统计 - 成功：$totalSuccess(+${batchResult.successSockets.size}) | 失败：$totalFailure(+${batchResult.errors.values.sum()}) | 活动：$active | 总计：$totalAttempts | 新增：$added | ${cps}/秒"))
+            onLog(LogLine(level = LogLevel.STAT, text = "${protocol.label} 统计 - 成功：$totalSuccess(+${batchResult.successSockets.size}) | 失败：$totalFailure(+${batchResult.errors.values.sum()}) | 活动：$active | 总计：$totalAttempts | 本批尝试：$added | 建连速率：${cps}/秒"))
 
             if (totalFailure >= config.failureLimit) {
                 onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 达到失败上限：${config.failureLimit}"))
@@ -208,7 +214,31 @@ class TcpTester {
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            OpenResult(error = e.javaClass.simpleName)
+            OpenResult(error = classifyError(e))
+        }
+    }
+
+    private fun classifyError(e: Exception): String {
+        val message = e.message.orEmpty().lowercase()
+        return when (e) {
+            is SocketTimeoutException -> "连接超时(SocketTimeoutException)"
+            is ConnectException -> when {
+                "refused" in message -> "连接被拒绝(ConnectException)"
+                "timed out" in message -> "连接超时(ConnectException)"
+                else -> "连接失败(ConnectException)"
+            }
+            is NoRouteToHostException -> "无路由到主机(NoRouteToHostException)"
+            is PortUnreachableException -> "端口不可达(PortUnreachableException)"
+            is UnknownHostException -> "DNS/主机解析失败(UnknownHostException)"
+            is SocketException -> when {
+                "too many open files" in message || "emfile" in message -> "安卓FD/Socket上限(Too many open files)"
+                "cannot assign requested address" in message -> "本地端口耗尽(Cannot assign requested address)"
+                "network is unreachable" in message -> "网络不可达(Network is unreachable)"
+                "connection reset" in message -> "连接被重置(Connection reset)"
+                "broken pipe" in message -> "连接已断开(Broken pipe)"
+                else -> "Socket异常(${e.message ?: e.javaClass.simpleName})"
+            }
+            else -> "${e.javaClass.simpleName}${e.message?.let { ":$it" } ?: ""}"
         }
     }
 

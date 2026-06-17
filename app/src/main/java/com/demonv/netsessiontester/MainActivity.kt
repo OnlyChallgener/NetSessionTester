@@ -1,6 +1,11 @@
 package com.demonv.netsessiontester
 
+import android.Manifest
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -16,7 +21,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -54,7 +58,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
+import androidx.core.view.WindowCompat
 import com.demonv.netsessiontester.data.HistoryStore
+import com.demonv.netsessiontester.data.SavedSettings
+import com.demonv.netsessiontester.data.SettingsStore
 import com.demonv.netsessiontester.model.AppUiState
 import com.demonv.netsessiontester.model.IpProtocol
 import com.demonv.netsessiontester.model.LogLevel
@@ -64,6 +72,7 @@ import com.demonv.netsessiontester.model.SessionConfig
 import com.demonv.netsessiontester.model.SessionSummary
 import com.demonv.netsessiontester.model.TestMode
 import com.demonv.netsessiontester.network.TcpTester
+import com.demonv.netsessiontester.service.TestForegroundService
 import com.demonv.netsessiontester.ui.theme.NetSessionTesterTheme
 import com.demonv.netsessiontester.util.CsvExporter
 import kotlinx.coroutines.Job
@@ -73,6 +82,13 @@ import java.io.OutputStreamWriter
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        WindowCompat.setDecorFitsSystemWindows(window, true)
+        window.statusBarColor = android.graphics.Color.rgb(255, 250, 255)
+        window.navigationBarColor = android.graphics.Color.rgb(255, 250, 255)
+        WindowCompat.getInsetsController(window, window.decorView).apply {
+            isAppearanceLightStatusBars = true
+            isAppearanceLightNavigationBars = true
+        }
         setContent {
             NetSessionTesterTheme {
                 NetSessionTesterApp()
@@ -89,20 +105,26 @@ private fun NetSessionTesterApp() {
     val snackbarHostState = remember { SnackbarHostState() }
     val tester = remember { TcpTester() }
     val historyStore = remember { HistoryStore(context.applicationContext) }
+    val settingsStore = remember { SettingsStore(context.applicationContext) }
     var runningJob by remember { mutableStateOf<Job?>(null) }
     var state by remember { mutableStateOf(AppUiState()) }
     var pendingCsv by remember { mutableStateOf<String?>(null) }
+    var settingsLoaded by remember { mutableStateOf(false) }
 
     var host by remember { mutableStateOf("") }
     var port by remember { mutableStateOf("80") }
     var mode by remember { mutableStateOf(TestMode.IPV4_THEN_IPV6) }
-    var batchSize by remember { mutableStateOf("16") }
-    var intervalMs by remember { mutableStateOf("1000") }
+    var batchSize by remember { mutableStateOf("100") }
+    var intervalMs by remember { mutableStateOf("500") }
     var timeoutMs by remember { mutableStateOf("3000") }
     var successLimit by remember { mutableStateOf("65535") }
     var failureLimit by remember { mutableStateOf("200") }
     var keepConnections by remember { mutableStateOf(true) }
-    var authorizedTarget by remember { mutableStateOf(false) }
+    var maskPrivacy by remember { mutableStateOf(false) }
+
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { }
 
     val exportLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument("text/csv")
@@ -115,7 +137,7 @@ private fun NetSessionTesterApp() {
                         OutputStreamWriter(stream, Charsets.UTF_8).use { it.write(csv) }
                     } ?: error("无法打开导出文件")
                 }.onSuccess {
-                    snackbarHostState.showSnackbar("CSV 已导出")
+                    snackbarHostState.showSnackbar("CSV / 日志已导出")
                 }.onFailure {
                     snackbarHostState.showSnackbar("导出失败：${it.message}")
                 }
@@ -128,17 +150,55 @@ private fun NetSessionTesterApp() {
 
     LaunchedEffect(Unit) {
         state = state.copy(history = historyStore.load())
+        val saved = settingsStore.load()
+        host = saved.host
+        port = saved.port
+        mode = saved.mode
+        batchSize = saved.batchSize
+        intervalMs = saved.intervalMs
+        timeoutMs = saved.timeoutMs
+        successLimit = saved.successLimit
+        failureLimit = saved.failureLimit
+        keepConnections = saved.keepConnections
+        maskPrivacy = saved.maskPrivacy
+        settingsLoaded = true
+    }
+
+    LaunchedEffect(
+        settingsLoaded, host, port, mode, batchSize, intervalMs, timeoutMs,
+        successLimit, failureLimit, keepConnections, maskPrivacy
+    ) {
+        if (settingsLoaded) {
+            settingsStore.save(
+                SavedSettings(
+                    host = host,
+                    port = port,
+                    mode = mode,
+                    batchSize = batchSize,
+                    intervalMs = intervalMs,
+                    timeoutMs = timeoutMs,
+                    successLimit = successLimit,
+                    failureLimit = failureLimit,
+                    keepConnections = keepConnections,
+                    maskPrivacy = maskPrivacy
+                )
+            )
+        }
     }
 
     fun appendLog(line: LogLine) {
-        state = state.copy(logs = (state.logs + line).takeLast(500))
+        state = state.copy(logs = (state.logs + line).takeLast(800))
+    }
+
+    fun ensureNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
     }
 
     fun buildConfig(): SessionConfig? {
-        if (!authorizedTarget) {
-            scope.launch { snackbarHostState.showSnackbar("请先勾选：确认目标是自有或已授权服务器") }
-            return null
-        }
         val config = runCatching {
             SessionConfig(
                 host = host,
@@ -183,8 +243,10 @@ private fun NetSessionTesterApp() {
 
     fun startTest() {
         val config = buildConfig() ?: return
+        ensureNotificationPermission()
         runningJob?.cancel()
         scope.launch { tester.release() }
+        startForegroundNotice(context, "建连中：${config.mode.label}，目标会话 ${config.successLimit}")
         val startedAt = System.currentTimeMillis()
         state = state.copy(
             isAdding = true,
@@ -195,8 +257,8 @@ private fun NetSessionTesterApp() {
             summary = null,
             error = null
         )
-        appendLog(LogLine(level = LogLevel.WARN, text = "本工具用于自有/已授权目标的宽带会话保持测试，不用于公共网站压测。"))
-        appendLog(LogLine(level = LogLevel.INFO, text = "目标：${config.host}:${config.port} | 模式：${config.mode.label} | 每批：${config.batchSize} | 间隔：${config.intervalMs}ms | 成功上限：${config.successLimit} | 失败停止：${config.failureLimit}"))
+        appendLog(LogLine(level = LogLevel.WARN, text = "仅限自有 VPS、内网设备、路由器或已授权服务器；不要对公共网站做高会话测试。"))
+        appendLog(LogLine(level = LogLevel.INFO, text = "目标：${config.host}:${config.port} | 模式：${config.mode.label} | 每批新增：${config.batchSize} | 间隔：${config.intervalMs}ms | 成功上限：${config.successLimit} | 失败停止：${config.failureLimit}"))
 
         runningJob = scope.launch {
             runCatching {
@@ -207,6 +269,7 @@ private fun NetSessionTesterApp() {
                             IpProtocol.IPV4 -> state.copy(ipv4Stats = stats, status = "${stats.protocol.label} ${stats.phase}")
                             IpProtocol.IPV6 -> state.copy(ipv6Stats = stats, status = "${stats.protocol.label} ${stats.phase}")
                         }
+                        updateForegroundNotice(context, "${stats.protocol.label} ${stats.phase}｜活动 ${stats.activeSessions}｜成功 ${stats.totalSuccess}｜失败 ${stats.totalFailure}")
                     },
                     onLog = { line -> appendLog(line) }
                 )
@@ -226,10 +289,16 @@ private fun NetSessionTesterApp() {
                     summary = summary,
                     history = historyStore.load()
                 )
+                if (config.keepConnectionsAfterStop) {
+                    updateForegroundNotice(context, "测试完成，连接保持中；需要关闭时请返回 APP 点击释放连接")
+                } else {
+                    stopForegroundNotice(context)
+                }
             }.onFailure { error ->
                 val msg = error.message ?: error.javaClass.simpleName
                 appendLog(LogLine(level = LogLevel.ERROR, text = "测试中断：$msg"))
                 state = state.copy(isAdding = false, status = "已停止新增", error = msg)
+                updateForegroundNotice(context, "测试中断：$msg；如有保持连接，请返回 APP 释放")
             }
         }
     }
@@ -239,6 +308,7 @@ private fun NetSessionTesterApp() {
         runningJob = null
         appendLog(LogLine(level = LogLevel.WARN, text = "已停止新增连接；已建立连接会继续保持，直到点击释放连接。"))
         state = state.copy(isAdding = false, status = "已停止新增，连接保持中")
+        updateForegroundNotice(context, "已停止新增，连接保持中；点击释放连接可关闭 socket")
     }
 
     fun releaseAll() {
@@ -253,6 +323,7 @@ private fun NetSessionTesterApp() {
                 ipv4Stats = state.ipv4Stats.copy(activeSessions = 0, phase = "已释放"),
                 ipv6Stats = state.ipv6Stats.copy(activeSessions = 0, phase = "已释放")
             )
+            stopForegroundNotice(context)
         }
     }
 
@@ -273,18 +344,18 @@ private fun NetSessionTesterApp() {
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .safeDrawingPadding()
                 .verticalScroll(rememberScrollState())
                 .padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            WarningCard(authorizedTarget, onAuthorizedChange = { authorizedTarget = it })
             TargetCard(
                 host = host,
                 onHostChange = { host = it },
                 port = port,
                 onPortChange = { port = it },
                 result = state.resolveResult,
+                maskPrivacy = maskPrivacy,
+                onMaskPrivacyChange = { maskPrivacy = it },
                 onResolve = { resolve() }
             )
             ModeCard(mode = mode, onModeChange = { mode = it })
@@ -309,30 +380,20 @@ private fun NetSessionTesterApp() {
                 onStopAdding = { stopAdding() },
                 onRelease = { releaseAll() },
                 onExport = {
-                    val csv = state.summary?.let { CsvExporter.summaryCsv(it, state.logs) } ?: CsvExporter.logsCsv(state.logs)
-                    pendingCsv = csv
-                    exportLauncher.launch("net-session-test.csv")
+                    val logs = if (maskPrivacy) maskedLogs(state.logs) else state.logs
+                    val summary = state.summary?.let { if (maskPrivacy) maskedSummary(it) else it }
+                    pendingCsv = summary?.let { CsvExporter.summaryCsv(it, logs) } ?: CsvExporter.logsCsv(logs)
+                    exportLauncher.launch("net-session-test-v03.csv")
                 }
             )
-            StatsCard(title = "IPv4 会话", stats = state.ipv4Stats)
-            StatsCard(title = "IPv6 会话", stats = state.ipv6Stats)
-            LogCard(logs = state.logs)
-            HistoryCard(history = state.history)
+            StatsCard(title = "IPv4 会话", stats = state.ipv4Stats, maskPrivacy = maskPrivacy)
+            StatsCard(title = "IPv6 会话", stats = state.ipv6Stats, maskPrivacy = maskPrivacy)
+            LogCard(logs = state.logs, maskPrivacy = maskPrivacy, onClear = {
+                state = state.copy(logs = emptyList())
+                scope.launch { snackbarHostState.showSnackbar("日志已清理") }
+            })
+            HistoryCard(history = state.history, maskPrivacy = maskPrivacy)
             Spacer(modifier = Modifier.height(16.dp))
-        }
-    }
-}
-
-@Composable
-private fun WarningCard(authorized: Boolean, onAuthorizedChange: (Boolean) -> Unit) {
-    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.55f))) {
-        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("使用提醒", fontWeight = FontWeight.Bold)
-            Text("这是宽带 TCP 会话保持测试，不是测速工具。请只测试自有 VPS、内网设备、路由器或已授权服务器；不要对公共网站做高会话测试。")
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Checkbox(checked = authorized, onCheckedChange = onAuthorizedChange)
-                Text("我确认目标服务器是自有或已授权测试目标")
-            }
         }
     }
 }
@@ -344,6 +405,8 @@ private fun TargetCard(
     port: String,
     onPortChange: (String) -> Unit,
     result: com.demonv.netsessiontester.model.ResolveResult,
+    maskPrivacy: Boolean,
+    onMaskPrivacyChange: (Boolean) -> Unit,
     onResolve: () -> Unit
 ) {
     Card {
@@ -368,9 +431,14 @@ private fun TargetCard(
                 )
                 Button(onClick = onResolve, modifier = Modifier.weight(1f)) { Text("解析 DNS") }
             }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Checkbox(checked = maskPrivacy, onCheckedChange = onMaskPrivacyChange)
+                Text("隐私保护：IP / 公网地址显示和导出时打码")
+            }
+            Text("提示：仅测试自有或已授权目标。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             HorizontalDivider()
-            Text("IPv4：${result.ipv4.joinToString(" / ").ifBlank { "未解析 / 无" }}", maxLines = 2, overflow = TextOverflow.Ellipsis)
-            Text("IPv6：${result.ipv6.joinToString(" / ").ifBlank { "未解析 / 无" }}", maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Text("IPv4：${displayIpList(result.ipv4, maskPrivacy)}", maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Text("IPv6：${displayIpList(result.ipv6, maskPrivacy)}", maxLines = 2, overflow = TextOverflow.Ellipsis)
             result.error?.let { Text("解析错误：$it", color = MaterialTheme.colorScheme.error) }
         }
     }
@@ -426,7 +494,7 @@ private fun ParamsCard(
                 Checkbox(checked = keepConnections, onCheckedChange = onKeepConnectionsChange)
                 Text("测试完成后保持连接，手动点击“释放连接”再关闭")
             }
-            Text("建议：每批 16-100，间隔 1000ms。测 65535 时不要一口气建立，慢慢累加更接近宽带会话数。", style = MaterialTheme.typography.bodySmall)
+            Text("建议默认：每批 100，间隔 500ms。测宽带会话数建议慢慢累加，避免变成瞬时压测。", style = MaterialTheme.typography.bodySmall)
         }
     }
 }
@@ -462,14 +530,14 @@ private fun ControlCard(
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(onClick = onRelease, modifier = Modifier.weight(1f)) { Text("释放连接") }
-                OutlinedButton(onClick = onExport, modifier = Modifier.weight(1f)) { Text("导出 CSV") }
+                OutlinedButton(onClick = onExport, modifier = Modifier.weight(1f)) { Text("导出日志/CSV") }
             }
         }
     }
 }
 
 @Composable
-private fun StatsCard(title: String, stats: ProtocolStats) {
+private fun StatsCard(title: String, stats: ProtocolStats, maskPrivacy: Boolean) {
     Card {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -491,10 +559,13 @@ private fun StatsCard(title: String, stats: ProtocolStats) {
                 StatItem("CPS", "${stats.cps}/秒", Modifier.weight(1f))
             }
             if (stats.resolvedAddresses.isNotEmpty()) {
-                Text("地址：${stats.resolvedAddresses.joinToString(" / ")}", maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall)
+                Text("地址：${displayIpList(stats.resolvedAddresses, maskPrivacy)}", maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall)
             }
             if (stats.errorSummary.isNotEmpty()) {
-                Text("错误：${stats.errorSummary.entries.joinToString(" | ") { "${it.key}:${it.value}" }}", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                Text("失败原因统计：", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodySmall)
+                stats.errorSummary.entries.sortedByDescending { it.value }.take(6).forEach { (name, count) ->
+                    Text("- $name：$count", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                }
             }
         }
     }
@@ -511,10 +582,14 @@ private fun StatItem(label: String, value: String, modifier: Modifier = Modifier
 }
 
 @Composable
-private fun LogCard(logs: List<LogLine>) {
+private fun LogCard(logs: List<LogLine>, maskPrivacy: Boolean, onClear: () -> Unit) {
     Card {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("日志输出", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                Text("日志输出", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.weight(1f))
+                OutlinedButton(onClick = onClear, enabled = logs.isNotEmpty()) { Text("清理日志") }
+            }
             Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF050505))) {
                 LazyColumn(
                     modifier = Modifier
@@ -524,7 +599,7 @@ private fun LogCard(logs: List<LogLine>) {
                 ) {
                     items(logs) { line ->
                         Text(
-                            text = "[${line.timeText}] ${line.text}",
+                            text = "[${line.timeText}] ${if (maskPrivacy) maskIpText(line.text) else line.text}",
                             color = when (line.level) {
                                 LogLevel.SUCCESS -> Color(0xFF00E676)
                                 LogLevel.ERROR -> Color(0xFFFF5252)
@@ -543,7 +618,7 @@ private fun LogCard(logs: List<LogLine>) {
 }
 
 @Composable
-private fun HistoryCard(history: List<SessionSummary>) {
+private fun HistoryCard(history: List<SessionSummary>, maskPrivacy: Boolean) {
     Card {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("历史记录", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
@@ -551,8 +626,9 @@ private fun HistoryCard(history: List<SessionSummary>) {
                 Text("暂无历史记录")
             } else {
                 history.take(5).forEach { item ->
+                    val shownHost = if (maskPrivacy) maskIpText(item.host) else item.host
                     Text(
-                        "${item.startedAtText}  ${item.host}:${item.port}  IPv4最大:${item.ipv4Stats?.maxStableSessions ?: 0}  IPv6最大:${item.ipv6Stats?.maxStableSessions ?: 0}",
+                        "${item.startedAtText}  $shownHost:${item.port}  IPv4最大:${item.ipv4Stats?.maxStableSessions ?: 0}  IPv6最大:${item.ipv6Stats?.maxStableSessions ?: 0}",
                         style = MaterialTheme.typography.bodySmall,
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis
@@ -562,3 +638,67 @@ private fun HistoryCard(history: List<SessionSummary>) {
         }
     }
 }
+
+private fun startForegroundNotice(context: Context, text: String) {
+    val intent = Intent(context, TestForegroundService::class.java)
+        .setAction(TestForegroundService.ACTION_START)
+        .putExtra(TestForegroundService.EXTRA_TEXT, text)
+    ContextCompat.startForegroundService(context, intent)
+}
+
+private fun updateForegroundNotice(context: Context, text: String) {
+    val intent = Intent(context, TestForegroundService::class.java)
+        .setAction(TestForegroundService.ACTION_UPDATE)
+        .putExtra(TestForegroundService.EXTRA_TEXT, text)
+    ContextCompat.startForegroundService(context, intent)
+}
+
+private fun stopForegroundNotice(context: Context) {
+    val intent = Intent(context, TestForegroundService::class.java)
+        .setAction(TestForegroundService.ACTION_STOP)
+    runCatching { context.startService(intent) }
+}
+
+private fun displayIpList(values: List<String>, maskPrivacy: Boolean): String {
+    if (values.isEmpty()) return "未解析 / 无"
+    return values.joinToString(" / ") { if (maskPrivacy) maskAddress(it) else it }
+}
+
+private fun maskedLogs(logs: List<LogLine>): List<LogLine> = logs.map { it.copy(text = maskIpText(it.text)) }
+
+private fun maskedSummary(summary: SessionSummary): SessionSummary = summary.copy(
+    host = maskIpText(summary.host),
+    ipv4Stats = summary.ipv4Stats?.let { maskStats(it) },
+    ipv6Stats = summary.ipv6Stats?.let { maskStats(it) }
+)
+
+private fun maskStats(stats: ProtocolStats): ProtocolStats = stats.copy(
+    resolvedAddresses = stats.resolvedAddresses.map { maskAddress(it) }
+)
+
+private fun maskIpText(text: String): String {
+    val ipv4Masked = IPV4_REGEX.replace(text) { match -> maskAddress(match.value) }
+    return IPV6_REGEX.replace(ipv4Masked) { match ->
+        // 避免把普通时间/比例误判成 IPv6：至少要含字母 a-f 或 ::
+        val value = match.value
+        if (value.contains("::") || value.any { it.lowercaseChar() in 'a'..'f' }) maskAddress(value) else value
+    }
+}
+
+private fun maskAddress(address: String): String {
+    val raw = address.removePrefix("[").removeSuffix("]")
+    return if (raw.contains(":")) {
+        val parts = raw.split(":").filter { it.isNotBlank() }
+        when {
+            parts.size >= 2 -> "${parts[0]}:${parts[1]}:****"
+            parts.size == 1 -> "${parts[0]}:****"
+            else -> "****"
+        }
+    } else {
+        val parts = raw.split(".")
+        if (parts.size == 4) "${parts[0]}.${parts[1]}.*.*" else "****"
+    }
+}
+
+private val IPV4_REGEX = Regex("""\b(?:\d{1,3}\.){3}\d{1,3}\b""")
+private val IPV6_REGEX = Regex("""(?i)(?<![\w.])(?:[0-9a-f]{1,4}:){2,}[0-9a-f]{0,4}(?:%[\w.]+)?(?![\w.])""")
