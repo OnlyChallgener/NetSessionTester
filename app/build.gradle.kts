@@ -13,7 +13,7 @@ android {
         minSdk = 26
         targetSdk = 35
         versionCode = 9
-        versionName = "0.7.0-compose-icons"
+        versionName = "0.6.1-compose-ui"
         vectorDrawables { useSupportLibrary = true }
     }
 

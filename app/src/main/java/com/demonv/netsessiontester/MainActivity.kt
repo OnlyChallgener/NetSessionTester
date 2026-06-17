@@ -53,6 +53,26 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Switch
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Article
+import androidx.compose.material.icons.filled.Assessment
+import androidx.compose.material.icons.filled.BugReport
+import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Save
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Shield
+import androidx.compose.material.icons.filled.SignalCellularAlt
+import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.WarningAmber
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -94,9 +114,9 @@ import kotlinx.coroutines.launch
 import java.io.OutputStreamWriter
 
 private enum class MainTab(val label: String, val mark: String) {
-    SETTINGS("设置", "●"),
-    TEST("测试", "▶"),
-    LOGS("日志", "■")
+    SETTINGS("设置", "settings"),
+    TEST("测试", "play"),
+    LOGS("日志", "logs")
 }
 
 class MainActivity : ComponentActivity() {
@@ -378,7 +398,7 @@ private fun NetSessionTesterApp() {
                         .verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    detailLines.forEach { Text(it, color = TextDark, fontSize = 14.sp) }
+                    detailLines.forEach { Text(it, color = TextDark, fontSize = 12.sp) }
                 }
             }
         )
@@ -494,8 +514,8 @@ private fun SettingsPage(
         modifier = Modifier
             .fillMaxSize()
             .statusBarsPadding()
-            .padding(horizontal = 20.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
+            .padding(horizontal = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         item { PageTitle("宽带会话测试器", "TCP 会话保持 · IPv4 / IPv6 分别测试") }
         item {
@@ -506,8 +526,8 @@ private fun SettingsPage(
                 FieldLabel("端口")
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
                     CleanField(port, { onPortChange(it.onlyDigits()) }, "80", Modifier.weight(1f), KeyboardType.Number)
-                    OutlinedButton(onClick = onResolve, shape = ShapeM, modifier = Modifier.height(56.dp).width(108.dp)) {
-                        Text("解析")
+                    OutlinedButton(onClick = onResolve, shape = ShapeM, modifier = Modifier.height(44.dp).width(96.dp)) {
+                        Icon(Icons.Filled.Search, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("解析")
                     }
                 }
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -555,15 +575,15 @@ private fun SettingsPage(
         }
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxWidth()) {
-                Button(onClick = onSave, modifier = Modifier.weight(1f).height(54.dp), shape = ShapeM) {
-                    Text("保存参数", fontWeight = FontWeight.Bold)
+                Button(onClick = onSave, modifier = Modifier.weight(1f).height(48.dp), shape = ShapeM) {
+                    Icon(Icons.Filled.Save, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("保存参数", fontWeight = FontWeight.Bold)
                 }
-                OutlinedButton(onClick = onRestoreDefault, modifier = Modifier.weight(1f).height(54.dp), shape = ShapeM) {
-                    Text("恢复默认")
+                OutlinedButton(onClick = onRestoreDefault, modifier = Modifier.weight(1f).height(48.dp), shape = ShapeM) {
+                    Icon(Icons.Filled.Refresh, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("恢复默认")
                 }
             }
         }
-        item { Spacer(Modifier.height(82.dp)) }
+        item { Spacer(Modifier.height(70.dp)) }
     }
 }
 
@@ -590,8 +610,8 @@ private fun TestPage(
         modifier = Modifier
             .fillMaxSize()
             .statusBarsPadding()
-            .padding(horizontal = 20.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
+            .padding(horizontal = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         item {
             PageTitle("宽带会话测试器", null)
@@ -606,20 +626,20 @@ private fun TestPage(
                 SectionTitle("∿", "测试控制", Blue)
                 Text(if (isAdding) "● 正在运行 · 已连接目标" else "状态：$status", color = if (isAdding) Green else Muted, fontWeight = FontWeight.Medium)
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Button(onClick = onStart, enabled = !isAdding, modifier = Modifier.weight(1f).height(54.dp), shape = ShapeM) {
-                        Text("开始")
+                    Button(onClick = onStart, enabled = !isAdding, modifier = Modifier.weight(1f).height(48.dp), shape = ShapeM) {
+                        Icon(Icons.Filled.PlayArrow, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("开始")
                     }
                     Button(
                         onClick = onStopAdding,
                         enabled = isAdding,
                         colors = ButtonDefaults.buttonColors(containerColor = RedSoft, contentColor = ErrorRed),
-                        modifier = Modifier.weight(1f).height(54.dp),
+                        modifier = Modifier.weight(1f).height(48.dp),
                         shape = ShapeM
-                    ) { Text("停止") }
+                    ) { Icon(Icons.Filled.Stop, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("停止") }
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    OutlinedButton(onClick = onRelease, modifier = Modifier.weight(1f).height(50.dp), shape = ShapeM) { Text("释放") }
-                    OutlinedButton(onClick = onExport, modifier = Modifier.weight(1f).height(50.dp), shape = ShapeM) { Text("导出") }
+                    OutlinedButton(onClick = onRelease, modifier = Modifier.weight(1f).height(44.dp), shape = ShapeM) { Icon(Icons.Filled.DeleteOutline, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("释放") }
+                    OutlinedButton(onClick = onExport, modifier = Modifier.weight(1f).height(44.dp), shape = ShapeM) { Icon(Icons.Filled.Download, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("导出") }
                 }
             }
         }
@@ -627,7 +647,7 @@ private fun TestPage(
         if (showIpv6) item { SessionStatsCard("IPv6 会话", ipv6Stats, maskPrivacy) }
         item { FailureReasonCard(listOf(ipv4Stats, ipv6Stats), onMoreFailure) }
         item { RecentLogCard(logs, maskPrivacy, onMoreLogs) }
-        item { Spacer(Modifier.height(82.dp)) }
+        item { Spacer(Modifier.height(70.dp)) }
     }
 }
 
@@ -644,12 +664,12 @@ private fun LogsPage(
         modifier = Modifier
             .fillMaxSize()
             .statusBarsPadding()
-            .padding(horizontal = 20.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
+            .padding(horizontal = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         item {
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 10.dp)) {
-                Text("日志与历史", fontSize = 30.sp, fontWeight = FontWeight.ExtraBold, color = TextDark, modifier = Modifier.weight(1f))
+                Text("日志与历史", fontSize = 26.sp, fontWeight = FontWeight.ExtraBold, color = TextDark, modifier = Modifier.weight(1f))
                 OutlinedButton(onClick = onClear, shape = ShapeM) { Text("清理") }
             }
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 12.dp)) {
@@ -662,13 +682,13 @@ private fun LogsPage(
         item {
             SoftCard {
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    OutlinedButton(onClick = onExport, modifier = Modifier.weight(1f), shape = ShapeM) { Text("导出日志") }
-                    OutlinedButton(onClick = onClear, modifier = Modifier.weight(1f), shape = ShapeM) { Text("清理日志") }
+                    OutlinedButton(onClick = onExport, modifier = Modifier.weight(1f), shape = ShapeM) { Icon(Icons.Filled.Download, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("导出日志") }
+                    OutlinedButton(onClick = onClear, modifier = Modifier.weight(1f), shape = ShapeM) { Icon(Icons.Filled.DeleteOutline, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("清理日志") }
                 }
             }
         }
         item { RecentLogCard(logs, maskPrivacy, onMore = {}, showMore = false) }
-        item { Text("检测历史", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = TextDark, modifier = Modifier.padding(top = 8.dp)) }
+        item { Text("检测历史", fontSize = 21.sp, fontWeight = FontWeight.Bold, color = TextDark, modifier = Modifier.padding(top = 8.dp)) }
         if (history.isEmpty()) {
             item { SoftCard { Text("暂无历史记录", color = TextDark) } }
         } else {
@@ -676,7 +696,7 @@ private fun LogsPage(
                 HistoryCard(item, maskPrivacy, onClick = { onHistoryDetail(item) })
             }
         }
-        item { Spacer(Modifier.height(82.dp)) }
+        item { Spacer(Modifier.height(70.dp)) }
     }
 }
 
@@ -684,9 +704,9 @@ private fun LogsPage(
 @Composable
 private fun PageTitle(title: String, subtitle: String?) {
     Column(modifier = Modifier.padding(top = 12.dp, bottom = 4.dp)) {
-        Text(title, fontSize = 32.sp, lineHeight = 36.sp, fontWeight = FontWeight.ExtraBold, color = TextDark)
+        Text(title, fontSize = 28.sp, lineHeight = 32.sp, fontWeight = FontWeight.ExtraBold, color = TextDark)
         subtitle?.let {
-            Text(it, fontSize = 15.sp, color = Muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(it, fontSize = 13.sp, color = Muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
     }
 }
@@ -700,8 +720,8 @@ private fun SoftCard(content: @Composable ColumnScope.() -> Unit) {
         elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
     ) {
         Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
             content = content
         )
     }
@@ -712,7 +732,7 @@ private fun SectionTitle(mark: String, title: String, color: Color) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         MarkBox(mark, color.copy(alpha = 0.12f), color)
         Spacer(Modifier.width(10.dp))
-        Text(title, fontSize = 22.sp, fontWeight = FontWeight.Bold, color = TextDark)
+        Text(title, fontSize = 18.sp, fontWeight = FontWeight.Bold, color = TextDark)
     }
 }
 
@@ -720,16 +740,17 @@ private fun SectionTitle(mark: String, title: String, color: Color) {
 private fun MarkBox(mark: String, bg: Color, fg: Color) {
     Box(
         modifier = Modifier
-            .background(bg, RoundedCornerShape(13.dp))
-            .padding(horizontal = 11.dp, vertical = 8.dp)
+            .background(bg, RoundedCornerShape(12.dp))
+            .padding(8.dp),
+        contentAlignment = Alignment.Center
     ) {
-        Text(mark, color = fg, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+        Icon(iconFor(mark), contentDescription = null, tint = fg, modifier = Modifier.width(18.dp).height(18.dp))
     }
 }
 
 @Composable
 private fun FieldLabel(label: String) {
-    Text(label, fontSize = 13.sp, color = Muted, fontWeight = FontWeight.SemiBold)
+    Text(label, fontSize = 12.sp, color = Muted, fontWeight = FontWeight.SemiBold)
 }
 
 @Composable
@@ -814,7 +835,7 @@ private fun SessionStatsCard(title: String, stats: ProtocolStats, maskPrivacy: B
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 color = Muted,
-                fontSize = 13.sp
+                fontSize = 12.sp
             )
         }
     }
@@ -830,7 +851,7 @@ private fun MetricTile(label: String, value: String, color: Color, modifier: Mod
     ) {
         Column(Modifier.padding(12.dp)) {
             Text(label, color = Muted, fontSize = 12.sp, maxLines = 1)
-            Text(value, color = color, fontSize = 24.sp, lineHeight = 27.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+            Text(value, color = color, fontSize = 20.sp, lineHeight = 23.sp, fontWeight = FontWeight.Bold, maxLines = 1)
         }
     }
 }
@@ -860,7 +881,7 @@ private fun ReasonChip(text: String) {
             .background(RedSoft, RoundedCornerShape(14.dp))
             .padding(horizontal = 12.dp, vertical = 8.dp)
     ) {
-        Text(text, color = ErrorRed, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+        Text(text, color = ErrorRed, fontWeight = FontWeight.Bold, fontSize = 12.sp)
     }
 }
 
@@ -901,7 +922,7 @@ private fun CompactLogLine(line: LogLine, maskPrivacy: Boolean) {
         LogLevel.INFO -> Muted
     }
     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-        Text(line.timeText, color = Muted, modifier = Modifier.width(72.dp), maxLines = 1)
+        Text(line.timeText, color = Muted, modifier = Modifier.width(74.dp), maxLines = 1)
         Box(
             modifier = Modifier
                 .background(color.copy(alpha = 0.12f), RoundedCornerShape(9.dp))
@@ -911,11 +932,11 @@ private fun CompactLogLine(line: LogLine, maskPrivacy: Boolean) {
         }
         Spacer(Modifier.width(8.dp))
         Text(
-            if (maskPrivacy) maskIpText(line.text) else line.text,
+            compactLogText(if (maskPrivacy) maskIpText(line.text) else line.text),
             color = TextDark,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
-            fontSize = 14.sp
+            fontSize = 12.sp
         )
     }
 }
@@ -930,7 +951,7 @@ private fun HistoryCard(item: SessionSummary, maskPrivacy: Boolean, onClick: () 
         else -> "完成"
     }
     SoftCard {
-        Column(Modifier.clickable(onClick = onClick), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Column(Modifier.clickable(onClick = onClick), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(item.startedAtText, color = Muted, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
                 StatusChip(protocol, GreenSoft, Green)
@@ -968,8 +989,8 @@ private fun MiniInfo(label: String, value: String, modifier: Modifier = Modifier
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
     ) {
         Row(Modifier.padding(horizontal = 10.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(label, color = Muted, modifier = Modifier.width(42.dp), fontSize = 13.sp, maxLines = 1)
-            Text(value, color = TextDark, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(label, color = Muted, modifier = Modifier.width(42.dp), fontSize = 12.sp, maxLines = 1)
+            Text(value, color = TextDark, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
     }
 }
@@ -981,15 +1002,27 @@ private fun StatusChip(text: String, bg: Color, fg: Color) {
             .background(bg, RoundedCornerShape(15.dp))
             .padding(horizontal = 13.dp, vertical = 8.dp)
     ) {
-        Text(text, color = fg, fontWeight = FontWeight.Bold, fontSize = 13.sp, maxLines = 1)
+        Text(text, color = fg, fontWeight = FontWeight.Bold, fontSize = 12.sp, maxLines = 1)
     }
+}
+
+
+@Composable
+private fun iconFor(mark: String) = when (mark) {
+    "◎" -> Icons.Filled.Assessment
+    "∿" -> Icons.Filled.SignalCellularAlt
+    "≡" -> Icons.Filled.Tune
+    "□" -> Icons.Filled.Article
+    "▮" -> Icons.Filled.SignalCellularAlt
+    "!" -> Icons.Filled.WarningAmber
+    else -> Icons.Filled.Info
 }
 
 @Composable
 private fun InfoLine(label: String, value: String, color: Color = TextDark) {
     Row {
-        Text("$label：", color = Muted, fontSize = 13.sp, modifier = Modifier.width(54.dp))
-        Text(value, color = color, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text("$label：", color = Muted, fontSize = 12.sp, modifier = Modifier.width(54.dp))
+        Text(value, color = color, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -1004,7 +1037,14 @@ private fun BottomNav(selectedTab: MainTab, onSelect: (MainTab) -> Unit) {
             NavigationBarItem(
                 selected = selectedTab == tab,
                 onClick = { onSelect(tab) },
-                icon = { Text(tab.mark, fontWeight = FontWeight.Bold, color = if (selectedTab == tab) Blue else Muted) },
+                icon = {
+                    val image = when (tab) {
+                        MainTab.SETTINGS -> Icons.Filled.Settings
+                        MainTab.TEST -> Icons.Filled.PlayArrow
+                        MainTab.LOGS -> Icons.Filled.Article
+                    }
+                    Icon(image, contentDescription = tab.label, tint = if (selectedTab == tab) Blue else Muted)
+                },
                 label = { Text(tab.label) }
             )
         }
@@ -1029,6 +1069,19 @@ private fun stopForegroundNotice(context: Context) {
     val intent = Intent(context, TestForegroundService::class.java)
         .setAction(TestForegroundService.ACTION_STOP)
     runCatching { context.startService(intent) }
+}
+
+
+private fun compactLogText(text: String): String {
+    return text
+        .replace("统计 - 成功：", "成功 ")
+        .replace(" | 失败：", " 失败 ")
+        .replace(" | 活动：", " 活动 ")
+        .replace(" | 总计：", " 总计 ")
+        .replace(" | 新增：", " 新增 ")
+        .replace(" | CPS：", " CPS ")
+        .replace("/秒", "/s")
+        .replace("测试完成 - 活动：", "完成 活动 ")
 }
 
 private fun displayIpList(values: List<String>, maskPrivacy: Boolean): String {
@@ -1124,6 +1177,6 @@ private val RedSoft = Color(0xFFFFF1F2)
 private val Orange = Color(0xFFF97316)
 private val Purple = Color(0xFF7C3AED)
 private val Navy = Color(0xFF0F2F6E)
-private val ShapeL = RoundedCornerShape(24.dp)
-private val ShapeM = RoundedCornerShape(16.dp)
-private val ShapeS = RoundedCornerShape(12.dp)
+private val ShapeL = RoundedCornerShape(20.dp)
+private val ShapeM = RoundedCornerShape(14.dp)
+private val ShapeS = RoundedCornerShape(10.dp)

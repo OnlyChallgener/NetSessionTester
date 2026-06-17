@@ -1,0 +1,2 @@
+package com.demonv.netsessiontester
+object LegacyReactBridgePlaceholder
