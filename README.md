@@ -1,4 +1,4 @@
-# NetSessionTester v0.6.3 Log Detail
+# NetSessionTester v0.6.5 Persist Logs
 
 宽带会话测试器，Kotlin + Jetpack Compose 原生版。
 
@@ -28,7 +28,7 @@
 ## 构建
 
 上传完整项目后进入 GitHub Actions，运行 Build Android APK。
-Artifact：NetSessionTester-v0.6.3-log-detail-debug-apk
+Artifact：NetSessionTester-v0.6.5-persist-logs-debug-apk
 
 ## v0.6.1 修复
 
@@ -54,3 +54,18 @@ Artifact：NetSessionTester-v0.6.3-log-detail-debug-apk
 - 测试页“最近日志”的“更多”不再跳转到底部第三栏。
 - 新增二级独立页面“运行日志”，左上返回回到测试页。
 - 第三栏“日志”继续只显示检测历史。
+
+
+## v0.6.4 修复
+
+- 运行日志括号显示规则优化：正常批量成功不显示 (+xxx)，失败为 0 不显示 (+0)。
+- 运行日志二级页支持系统返回/侧滑返回上级页面。
+- 修复仅 IPv6 测试时检测历史显示 IPv4 空数据的问题。
+- 设置页和测试页输入框、按钮、统计框字号继续缩小。
+
+
+## v0.6.5 修复
+
+- 运行日志改为本地持久化保存。
+- APP 退出后再次打开，会自动恢复最近运行日志。
+- 只有点击清理日志/清理时才删除日志文件。

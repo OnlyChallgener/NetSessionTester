@@ -10,11 +10,13 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -96,6 +98,7 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import com.demonv.netsessiontester.data.HistoryStore
+import com.demonv.netsessiontester.data.LogStore
 import com.demonv.netsessiontester.data.SavedSettings
 import com.demonv.netsessiontester.data.SettingsStore
 import com.demonv.netsessiontester.model.AppUiState
@@ -144,6 +147,7 @@ private fun NetSessionTesterApp() {
     val snackbarHostState = remember { SnackbarHostState() }
     val tester = remember { TcpTester() }
     val historyStore = remember { HistoryStore(context.applicationContext) }
+    val logStore = remember { LogStore(context.applicationContext) }
     val settingsStore = remember { SettingsStore(context.applicationContext) }
 
     var selectedTab by remember { mutableStateOf(MainTab.SETTINGS) }
@@ -166,6 +170,8 @@ private fun NetSessionTesterApp() {
     var detailTitle by remember { mutableStateOf<String?>(null) }
     var detailLines by remember { mutableStateOf<List<String>>(emptyList()) }
     var showRunLogDetail by remember { mutableStateOf(false) }
+
+    BackHandler(enabled = showRunLogDetail) { showRunLogDetail = false }
 
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
@@ -199,7 +205,7 @@ private fun NetSessionTesterApp() {
     }
 
     LaunchedEffect(Unit) {
-        state = state.copy(history = historyStore.load())
+        state = state.copy(history = historyStore.load(), logs = logStore.load())
         val saved = settingsStore.load()
         host = saved.host.ifBlank { "www.baidu.com" }
         port = saved.port
@@ -238,6 +244,7 @@ private fun NetSessionTesterApp() {
 
     fun appendLog(line: LogLine) {
         state = state.copy(logs = (state.logs + line).takeLast(800))
+        scope.launch { logStore.append(line) }
     }
 
     fun ensureNotificationPermission() {
@@ -291,6 +298,7 @@ private fun NetSessionTesterApp() {
         selectedTab = MainTab.TEST
         startForegroundNotice(context, "建连中：${config.mode.label}，目标 ${config.successLimit}")
         val startedAt = System.currentTimeMillis()
+        logStore.clearNow()
         state = state.copy(
             isAdding = true,
             status = "建连中",
@@ -321,8 +329,16 @@ private fun NetSessionTesterApp() {
                     host = config.host,
                     port = config.port,
                     mode = config.mode,
-                    ipv4Stats = pair.first ?: state.ipv4Stats,
-                    ipv6Stats = pair.second ?: state.ipv6Stats
+                    ipv4Stats = when (config.mode) {
+                        TestMode.IPV4_ONLY -> pair.first ?: state.ipv4Stats
+                        TestMode.IPV4_THEN_IPV6 -> pair.first ?: state.ipv4Stats
+                        TestMode.IPV6_ONLY -> null
+                    },
+                    ipv6Stats = when (config.mode) {
+                        TestMode.IPV6_ONLY -> pair.second ?: state.ipv6Stats
+                        TestMode.IPV4_THEN_IPV6 -> pair.second ?: state.ipv6Stats
+                        TestMode.IPV4_ONLY -> null
+                    }
                 )
                 historyStore.append(summary)
                 state = state.copy(
@@ -379,6 +395,7 @@ private fun NetSessionTesterApp() {
     fun clearLogsAndHistory() {
         scope.launch {
             historyStore.clear()
+            logStore.clear()
             state = state.copy(logs = emptyList(), history = emptyList())
             snackbarHostState.showSnackbar("已清理")
         }
@@ -397,7 +414,7 @@ private fun NetSessionTesterApp() {
                         .fillMaxWidth()
                         .height(320.dp)
                         .verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                    verticalArrangement = Arrangement.spacedBy(7.dp)
                 ) {
                     detailLines.forEach { Text(it, color = TextDark, fontSize = 12.sp) }
                 }
@@ -430,7 +447,10 @@ private fun NetSessionTesterApp() {
                     onBack = { showRunLogDetail = false },
                     onExport = { exportLogs() },
                     onClear = {
-                        state = state.copy(logs = emptyList())
+                        scope.launch {
+                            logStore.clear()
+                            state = state.copy(logs = emptyList())
+                        }
                     }
                 )
             } else when (selectedTab) {
@@ -532,8 +552,8 @@ private fun SettingsPage(
         modifier = Modifier
             .fillMaxSize()
             .statusBarsPadding()
-            .padding(horizontal = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
+            .padding(horizontal = 14.dp),
+        verticalArrangement = Arrangement.spacedBy(7.dp)
     ) {
         item { PageTitle("宽带会话测试器", "TCP 会话保持 · IPv4 / IPv6 分别测试") }
         item {
@@ -593,10 +613,10 @@ private fun SettingsPage(
         }
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxWidth()) {
-                Button(onClick = onSave, modifier = Modifier.weight(1f).height(42.dp), shape = ShapeM) {
+                Button(onClick = onSave, modifier = Modifier.weight(1f).height(38.dp), shape = ShapeM) {
                     Icon(Icons.Filled.Save, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("保存参数", fontWeight = FontWeight.Bold)
                 }
-                OutlinedButton(onClick = onRestoreDefault, modifier = Modifier.weight(1f).height(42.dp), shape = ShapeM) {
+                OutlinedButton(onClick = onRestoreDefault, modifier = Modifier.weight(1f).height(38.dp), shape = ShapeM) {
                     Icon(Icons.Filled.Refresh, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("恢复默认", fontSize = 13.sp)
                 }
             }
@@ -628,12 +648,12 @@ private fun TestPage(
         modifier = Modifier
             .fillMaxSize()
             .statusBarsPadding()
-            .padding(horizontal = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
+            .padding(horizontal = 14.dp),
+        verticalArrangement = Arrangement.spacedBy(7.dp)
     ) {
         item {
             PageTitle("宽带会话测试器", null)
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
                 StatusChip(mode.label, BlueSoft, Blue)
                 StatusChip(if (isAdding) "● 运行中" else status, GreenSoft, Green)
                 StatusChip("◎ 目标 $target", Color.White, TextDark)
@@ -644,20 +664,20 @@ private fun TestPage(
                 SectionTitle("∿", "测试控制", Blue)
                 Text(if (isAdding) "● 正在运行 · 已连接目标" else "状态：$status", color = if (isAdding) Green else Muted, fontWeight = FontWeight.Medium)
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Button(onClick = onStart, enabled = !isAdding, modifier = Modifier.weight(1f).height(42.dp), shape = ShapeM) {
+                    Button(onClick = onStart, enabled = !isAdding, modifier = Modifier.weight(1f).height(38.dp), shape = ShapeM) {
                         Icon(Icons.Filled.PlayArrow, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("开始", fontSize = 13.sp)
                     }
                     Button(
                         onClick = onStopAdding,
                         enabled = isAdding,
                         colors = ButtonDefaults.buttonColors(containerColor = RedSoft, contentColor = ErrorRed),
-                        modifier = Modifier.weight(1f).height(42.dp),
+                        modifier = Modifier.weight(1f).height(38.dp),
                         shape = ShapeM
                     ) { Icon(Icons.Filled.Stop, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("停止", fontSize = 13.sp) }
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    OutlinedButton(onClick = onRelease, modifier = Modifier.weight(1f).height(40.dp), shape = ShapeM) { Icon(Icons.Filled.DeleteOutline, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("释放", fontSize = 13.sp) }
-                    OutlinedButton(onClick = onExport, modifier = Modifier.weight(1f).height(40.dp), shape = ShapeM) { Icon(Icons.Filled.Download, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("导出", fontSize = 13.sp) }
+                    OutlinedButton(onClick = onRelease, modifier = Modifier.weight(1f).height(38.dp), shape = ShapeM) { Icon(Icons.Filled.DeleteOutline, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("释放", fontSize = 13.sp) }
+                    OutlinedButton(onClick = onExport, modifier = Modifier.weight(1f).height(38.dp), shape = ShapeM) { Icon(Icons.Filled.Download, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("导出", fontSize = 13.sp) }
                 }
             }
         }
@@ -681,15 +701,15 @@ private fun FullRunLogPage(
         modifier = Modifier
             .fillMaxSize()
             .statusBarsPadding()
-            .padding(horizontal = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp)
+            .padding(horizontal = 14.dp),
+        verticalArrangement = Arrangement.spacedBy(7.dp)
     ) {
         item {
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 10.dp, bottom = 6.dp)) {
                 TextButton(onClick = onBack, modifier = Modifier.width(52.dp)) {
                     Text("‹", fontSize = 28.sp, fontWeight = FontWeight.Bold, color = TextDark)
                 }
-                Text("运行日志", fontSize = 24.sp, fontWeight = FontWeight.ExtraBold, color = TextDark, modifier = Modifier.weight(1f))
+                Text("运行日志", fontSize = 22.sp, fontWeight = FontWeight.ExtraBold, color = TextDark, modifier = Modifier.weight(1f))
                 OutlinedButton(onClick = onClear, shape = ShapeM, modifier = Modifier.height(38.dp)) {
                     Icon(Icons.Filled.DeleteOutline, contentDescription = null, modifier = Modifier.width(16.dp).height(16.dp))
                     Spacer(Modifier.width(4.dp))
@@ -700,12 +720,12 @@ private fun FullRunLogPage(
         item {
             SoftCard {
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    OutlinedButton(onClick = onExport, modifier = Modifier.weight(1f).height(40.dp), shape = ShapeM) {
+                    OutlinedButton(onClick = onExport, modifier = Modifier.weight(1f).height(38.dp), shape = ShapeM) {
                         Icon(Icons.Filled.Download, contentDescription = null, modifier = Modifier.width(16.dp).height(16.dp))
                         Spacer(Modifier.width(4.dp))
                         Text("导出日志", fontSize = 12.sp)
                     }
-                    OutlinedButton(onClick = onClear, modifier = Modifier.weight(1f).height(40.dp), shape = ShapeM) {
+                    OutlinedButton(onClick = onClear, modifier = Modifier.weight(1f).height(38.dp), shape = ShapeM) {
                         Icon(Icons.Filled.DeleteOutline, contentDescription = null, modifier = Modifier.width(16.dp).height(16.dp))
                         Spacer(Modifier.width(4.dp))
                         Text("清理日志", fontSize = 12.sp)
@@ -749,12 +769,12 @@ private fun LogsPage(
         modifier = Modifier
             .fillMaxSize()
             .statusBarsPadding()
-            .padding(horizontal = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp)
+            .padding(horizontal = 14.dp),
+        verticalArrangement = Arrangement.spacedBy(7.dp)
     ) {
         item {
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 10.dp, bottom = 6.dp)) {
-                Text("检测历史", fontSize = 24.sp, fontWeight = FontWeight.ExtraBold, color = TextDark, modifier = Modifier.weight(1f))
+                Text("检测历史", fontSize = 22.sp, fontWeight = FontWeight.ExtraBold, color = TextDark, modifier = Modifier.weight(1f))
                 OutlinedButton(onClick = onClear, shape = ShapeM, modifier = Modifier.height(38.dp)) {
                     Icon(Icons.Filled.DeleteOutline, contentDescription = null, modifier = Modifier.width(16.dp).height(16.dp))
                     Spacer(Modifier.width(4.dp))
@@ -792,8 +812,8 @@ private fun SoftCard(content: @Composable ColumnScope.() -> Unit) {
         elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
     ) {
         Column(
-            modifier = Modifier.padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier.padding(10.dp),
+            verticalArrangement = Arrangement.spacedBy(7.dp),
             content = content
         )
     }
@@ -836,8 +856,9 @@ private fun CleanField(
     OutlinedTextField(
         value = value,
         onValueChange = onValueChange,
-        placeholder = { Text(placeholder) },
+        placeholder = { Text(placeholder, fontSize = 12.sp) },
         singleLine = true,
+        textStyle = MaterialTheme.typography.bodyMedium.copy(fontSize = 13.sp),
         shape = ShapeM,
         keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
         modifier = modifier.fillMaxWidth()
@@ -849,8 +870,9 @@ private fun ParamField(label: String, value: String, onValueChange: (String) -> 
     OutlinedTextField(
         value = value,
         onValueChange = { onValueChange(it.onlyDigits()) },
-        label = { Text(label, maxLines = 1) },
+        label = { Text(label, maxLines = 1, fontSize = 11.sp) },
         singleLine = true,
+        textStyle = MaterialTheme.typography.bodyMedium.copy(fontSize = 13.sp),
         shape = ShapeM,
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
         modifier = modifier
@@ -921,9 +943,9 @@ private fun MetricTile(label: String, value: String, color: Color, modifier: Mod
         colors = CardDefaults.cardColors(containerColor = Color(0xFFF8FAFC)),
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
     ) {
-        Column(Modifier.padding(9.dp)) {
+        Column(Modifier.padding(8.dp)) {
             Text(label, color = Muted, fontSize = 12.sp, maxLines = 1)
-            Text(value, color = color, fontSize = 18.sp, lineHeight = 21.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+            Text(value, color = color, fontSize = 16.sp, lineHeight = 19.sp, fontWeight = FontWeight.Bold, maxLines = 1)
         }
     }
 }
@@ -938,7 +960,7 @@ private fun FailureReasonCard(stats: List<ProtocolStats>, onMore: () -> Unit) {
             Spacer(Modifier.weight(1f))
             TextButton(onClick = onMore) { Text("更多", fontSize = 13.sp) }
         }
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
             merged.entries.sortedByDescending { it.value }.take(6).forEach { (name, count) ->
                 ReasonChip("$name $count")
             }
@@ -1013,13 +1035,19 @@ private fun CompactLogLine(line: LogLine, maskPrivacy: Boolean) {
             Text(tag, color = color, fontWeight = FontWeight.Bold, fontSize = 11.sp)
         }
         Spacer(Modifier.width(8.dp))
-        Text(
-            compactLogText(if (maskPrivacy) maskIpText(line.text) else line.text),
-            color = TextDark,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            fontSize = 12.sp
-        )
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .horizontalScroll(rememberScrollState())
+        ) {
+            Text(
+                compactLogText(if (maskPrivacy) maskIpText(line.text) else line.text),
+                color = TextDark,
+                maxLines = 1,
+                softWrap = false,
+                fontSize = 12.sp
+            )
+        }
     }
 }
 
@@ -1038,7 +1066,7 @@ private fun HistoryCard(item: SessionSummary, maskPrivacy: Boolean, onClick: () 
             Modifier
                 .fillMaxWidth()
                 .clickable(onClick = onClick),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+            verticalArrangement = Arrangement.spacedBy(7.dp)
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {

@@ -134,7 +134,9 @@ class TcpTester {
                 maxStableSessions = maxStable
             )
             onStats(stats)
-            onLog(LogLine(level = LogLevel.STAT, text = "${protocol.label} 统计 - 成功：$totalSuccess(+${batchResult.successSockets.size}) | 失败：$totalFailure(+$failAdd) | 活动：$active | 总计：$totalAttempts | 新增：$added | CPS：${cps}/秒"))
+            val successDeltaText = if (batchResult.successSockets.size != config.batchSize) "(+${batchResult.successSockets.size})" else ""
+            val failureDeltaText = if (failAdd > 0) "(+$failAdd)" else ""
+            onLog(LogLine(level = LogLevel.STAT, text = "${protocol.label} 统计 - 成功：$totalSuccess$successDeltaText | 失败：$totalFailure$failureDeltaText | 活动：$active | 总计：$totalAttempts | 新增：$added | CPS：${cps}/秒"))
 
             if (totalFailure >= config.failureLimit) {
                 onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 达到失败上限：${config.failureLimit}"))
