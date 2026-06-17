@@ -16,10 +16,10 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -29,32 +29,24 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.Checkbox
-import androidx.compose.material3.ElevatedCard
-import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Divider
 import androidx.compose.material3.FilterChip
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SegmentedButton
-import androidx.compose.material3.SegmentedButtonDefaults
-import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.Text
 import androidx.compose.material3.Switch
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -64,8 +56,6 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
@@ -73,6 +63,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import com.demonv.netsessiontester.data.HistoryStore
@@ -93,35 +84,31 @@ import com.demonv.netsessiontester.util.CsvExporter
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import java.io.OutputStreamWriter
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 
-private enum class MainTab(val label: String, val icon: String) {
-    SETTINGS("设置", "⚙"),
-    TEST("测试", "▶"),
-    LOGS("日志", "▣")
+private enum class MainTab(val label: String, val mark: String) {
+    SETTINGS("设置", "设"),
+    TEST("测试", "测"),
+    LOGS("日志", "志")
 }
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         WindowCompat.setDecorFitsSystemWindows(window, false)
-        window.statusBarColor = android.graphics.Color.TRANSPARENT
-        window.navigationBarColor = android.graphics.Color.TRANSPARENT
+        window.statusBarColor = android.graphics.Color.rgb(246, 248, 252)
+        window.navigationBarColor = android.graphics.Color.WHITE
         WindowCompat.getInsetsController(window, window.decorView).apply {
             isAppearanceLightStatusBars = true
             isAppearanceLightNavigationBars = true
         }
         setContent {
-            NetSessionTesterTheme {
+            NetSessionTesterTheme(darkTheme = false) {
                 NetSessionTesterApp()
             }
         }
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun NetSessionTesterApp() {
     val context = LocalContext.current
@@ -163,7 +150,7 @@ private fun NetSessionTesterApp() {
                         OutputStreamWriter(stream, Charsets.UTF_8).use { it.write(csv) }
                     } ?: error("无法打开导出文件")
                 }.onSuccess {
-                    snackbarHostState.showSnackbar("CSV / 日志已导出")
+                    snackbarHostState.showSnackbar("已导出")
                 }.onFailure {
                     snackbarHostState.showSnackbar("导出失败：${it.message}")
                 }
@@ -177,7 +164,7 @@ private fun NetSessionTesterApp() {
     LaunchedEffect(Unit) {
         state = state.copy(history = historyStore.load())
         val saved = settingsStore.load()
-        host = saved.host
+        host = saved.host.ifBlank { "www.baidu.com" }
         port = saved.port
         mode = saved.mode
         batchSize = saved.batchSize
@@ -197,7 +184,7 @@ private fun NetSessionTesterApp() {
         if (settingsLoaded) {
             settingsStore.save(
                 SavedSettings(
-                    host = host,
+                    host = host.ifBlank { "www.baidu.com" },
                     port = port,
                     mode = mode,
                     batchSize = batchSize,
@@ -227,7 +214,7 @@ private fun NetSessionTesterApp() {
     fun buildConfig(): SessionConfig? {
         val config = runCatching {
             SessionConfig(
-                host = host,
+                host = host.ifBlank { "www.baidu.com" },
                 port = port.toInt(),
                 mode = mode,
                 batchSize = batchSize.toInt(),
@@ -241,19 +228,11 @@ private fun NetSessionTesterApp() {
             scope.launch { snackbarHostState.showSnackbar("参数错误：${error.message}") }
             return null
         }
-        if (config.host.isBlank()) {
-            scope.launch { snackbarHostState.showSnackbar("请填写域名、IPv4 或 IPv6 地址") }
-            return null
-        }
         return config
     }
 
     fun resolve() {
-        val target = host.trim()
-        if (target.isBlank()) {
-            scope.launch { snackbarHostState.showSnackbar("请先填写域名或 IP") }
-            return
-        }
+        val target = host.ifBlank { "www.baidu.com" }.trim()
         scope.launch {
             appendLog(LogLine(level = LogLevel.INFO, text = "开始解析：$target"))
             val result = tester.resolveHost(target)
@@ -273,7 +252,7 @@ private fun NetSessionTesterApp() {
         runningJob?.cancel()
         scope.launch { tester.release() }
         selectedTab = MainTab.TEST
-        startForegroundNotice(context, "建连中：${config.mode.label}，目标会话 ${config.successLimit}")
+        startForegroundNotice(context, "建连中：${config.mode.label}，目标 ${config.successLimit}")
         val startedAt = System.currentTimeMillis()
         state = state.copy(
             isAdding = true,
@@ -284,8 +263,7 @@ private fun NetSessionTesterApp() {
             summary = null,
             error = null
         )
-        appendLog(LogLine(level = LogLevel.INFO, text = "目标：${config.host}:${config.port}｜模式：${config.mode.label}｜新增：${config.batchSize}｜间隔：${config.intervalMs}ms"))
-        appendLog(LogLine(level = LogLevel.WARN, text = "请只测试自有或已授权目标。"))
+        appendLog(LogLine(level = LogLevel.INFO, text = "目标：${config.host}:${config.port}｜${config.mode.label}｜新增：${config.batchSize}｜间隔：${config.intervalMs}ms"))
 
         runningJob = scope.launch {
             runCatching {
@@ -317,7 +295,7 @@ private fun NetSessionTesterApp() {
                     history = historyStore.load()
                 )
                 if (config.keepConnectionsAfterStop) {
-                    updateForegroundNotice(context, "测试完成，连接保持中；需要关闭时请返回 APP 点击释放连接")
+                    updateForegroundNotice(context, "测试完成，连接保持中")
                 } else {
                     stopForegroundNotice(context)
                 }
@@ -325,7 +303,7 @@ private fun NetSessionTesterApp() {
                 val msg = error.message ?: error.javaClass.simpleName
                 appendLog(LogLine(level = LogLevel.ERROR, text = "测试中断：$msg"))
                 state = state.copy(isAdding = false, status = "已停止新增", error = msg)
-                updateForegroundNotice(context, "测试中断：$msg；如有保持连接，请返回 APP 释放")
+                updateForegroundNotice(context, "测试中断：$msg")
             }
         }
     }
@@ -333,9 +311,9 @@ private fun NetSessionTesterApp() {
     fun stopAdding() {
         runningJob?.cancel()
         runningJob = null
-        appendLog(LogLine(level = LogLevel.WARN, text = "已停止新增；已建立连接继续保持。"))
+        appendLog(LogLine(level = LogLevel.WARN, text = "已停止新增；连接继续保持。"))
         state = state.copy(isAdding = false, status = "已停止新增")
-        updateForegroundNotice(context, "已停止新增，连接保持中；点击释放连接可关闭 socket")
+        updateForegroundNotice(context, "已停止新增，连接保持中")
     }
 
     fun releaseAll() {
@@ -346,7 +324,7 @@ private fun NetSessionTesterApp() {
             appendLog(LogLine(level = LogLevel.WARN, text = "已释放连接：$closed 条"))
             state = state.copy(
                 isAdding = false,
-                status = "已释放连接",
+                status = "已释放",
                 ipv4Stats = state.ipv4Stats.copy(activeSessions = 0, phase = "已释放"),
                 ipv6Stats = state.ipv6Stats.copy(activeSessions = 0, phase = "已释放")
             )
@@ -365,99 +343,82 @@ private fun NetSessionTesterApp() {
         scope.launch {
             historyStore.clear()
             state = state.copy(logs = emptyList(), history = emptyList())
-            snackbarHostState.showSnackbar("日志与历史已清理")
+            snackbarHostState.showSnackbar("已清理")
         }
     }
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
         bottomBar = {
-            FrostedBottomBar(
-                selectedTab = selectedTab,
-                onSelect = { selectedTab = it }
-            )
+            BottomNav(selectedTab = selectedTab, onSelect = { selectedTab = it })
         },
-        containerColor = Color.Transparent
+        containerColor = Bg
     ) { padding ->
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(
-                    Brush.verticalGradient(
-                        colors = listOf(Color(0xFFF7FAFF), Color(0xFFF4F1F8), Color(0xFFFFFFFF))
-                    )
-                )
-        ) {
-            when (selectedTab) {
-                MainTab.SETTINGS -> SettingsPage(
-                    modifier = Modifier.padding(padding),
-                    host = host,
-                    onHostChange = { host = it },
-                    port = port,
-                    onPortChange = { port = it },
-                    result = state.resolveResult,
-                    maskPrivacy = maskPrivacy,
-                    onMaskPrivacyChange = { maskPrivacy = it },
-                    onResolve = { resolve() },
-                    mode = mode,
-                    onModeChange = { mode = it },
-                    batchSize = batchSize,
-                    onBatchSizeChange = { batchSize = it },
-                    intervalMs = intervalMs,
-                    onIntervalMsChange = { intervalMs = it },
-                    timeoutMs = timeoutMs,
-                    onTimeoutMsChange = { timeoutMs = it },
-                    successLimit = successLimit,
-                    onSuccessLimitChange = { successLimit = it },
-                    failureLimit = failureLimit,
-                    onFailureLimitChange = { failureLimit = it },
-                    keepConnections = keepConnections,
-                    onKeepConnectionsChange = { keepConnections = it },
-                    onSave = {
-                        scope.launch { snackbarHostState.showSnackbar("参数已保存") }
-                    },
-                    onRestoreDefault = {
-                        host = "www.baidu.com"
-                        port = "80"
-                        mode = TestMode.IPV4_THEN_IPV6
-                        batchSize = "100"
-                        intervalMs = "500"
-                        timeoutMs = "3000"
-                        successLimit = "65535"
-                        failureLimit = "200"
-                        keepConnections = true
-                        maskPrivacy = false
-                        scope.launch { snackbarHostState.showSnackbar("已恢复默认") }
-                    }
-                )
-                MainTab.TEST -> TestPage(
-                    modifier = Modifier.padding(padding),
-                    mode = mode,
-                    status = state.status,
-                    target = successLimit,
-                    isAdding = state.isAdding,
-                    onStart = { startTest() },
-                    onStopAdding = { stopAdding() },
-                    onRelease = { releaseAll() },
-                    onExport = { exportLogs() },
-                    ipv4Stats = state.ipv4Stats,
-                    ipv6Stats = state.ipv6Stats,
-                    showIpv4 = mode != TestMode.IPV6_ONLY,
-                    showIpv6 = mode != TestMode.IPV4_ONLY,
-                    maskPrivacy = maskPrivacy,
-                    logs = state.logs,
-                    onMoreLogs = { selectedTab = MainTab.LOGS }
-                )
-                MainTab.LOGS -> LogsPage(
-                    modifier = Modifier.padding(padding),
-                    logs = state.logs,
-                    history = state.history,
-                    maskPrivacy = maskPrivacy,
-                    onExport = { exportLogs() },
-                    onClear = { clearLogsAndHistory() },
-                    onBack = { selectedTab = MainTab.TEST }
-                )
-            }
+        when (selectedTab) {
+            MainTab.SETTINGS -> SettingsPage(
+                modifier = Modifier.padding(padding),
+                host = host,
+                onHostChange = { host = it },
+                port = port,
+                onPortChange = { port = it },
+                result = state.resolveResult,
+                maskPrivacy = maskPrivacy,
+                onMaskPrivacyChange = { maskPrivacy = it },
+                onResolve = { resolve() },
+                mode = mode,
+                onModeChange = { mode = it },
+                batchSize = batchSize,
+                onBatchSizeChange = { batchSize = it },
+                intervalMs = intervalMs,
+                onIntervalMsChange = { intervalMs = it },
+                timeoutMs = timeoutMs,
+                onTimeoutMsChange = { timeoutMs = it },
+                successLimit = successLimit,
+                onSuccessLimitChange = { successLimit = it },
+                failureLimit = failureLimit,
+                onFailureLimitChange = { failureLimit = it },
+                keepConnections = keepConnections,
+                onKeepConnectionsChange = { keepConnections = it },
+                onSave = { scope.launch { snackbarHostState.showSnackbar("参数已保存") } },
+                onRestoreDefault = {
+                    host = "www.baidu.com"
+                    port = "80"
+                    mode = TestMode.IPV4_THEN_IPV6
+                    batchSize = "100"
+                    intervalMs = "500"
+                    timeoutMs = "3000"
+                    successLimit = "65535"
+                    failureLimit = "200"
+                    keepConnections = true
+                    maskPrivacy = false
+                }
+            )
+            MainTab.TEST -> TestPage(
+                modifier = Modifier.padding(padding),
+                mode = mode,
+                status = state.status,
+                target = successLimit,
+                isAdding = state.isAdding,
+                onStart = { startTest() },
+                onStopAdding = { stopAdding() },
+                onRelease = { releaseAll() },
+                onExport = { exportLogs() },
+                ipv4Stats = state.ipv4Stats,
+                ipv6Stats = state.ipv6Stats,
+                showIpv4 = mode != TestMode.IPV6_ONLY,
+                showIpv6 = mode != TestMode.IPV4_ONLY,
+                maskPrivacy = maskPrivacy,
+                logs = state.logs,
+                onMoreLogs = { selectedTab = MainTab.LOGS }
+            )
+            MainTab.LOGS -> LogsPage(
+                modifier = Modifier.padding(padding),
+                logs = state.logs,
+                history = state.history,
+                maskPrivacy = maskPrivacy,
+                onExport = { exportLogs() },
+                onClear = { clearLogsAndHistory() }
+            )
         }
     }
 }
@@ -495,90 +456,67 @@ private fun SettingsPage(
             .fillMaxSize()
             .statusBarsPadding()
             .padding(horizontal = 18.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
+        verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        item { AppTitle(subtitle = "TCP 会话保持 · IPv4 / IPv6 分别测试") }
+        item { PageTitle("宽带会话测试器", "TCP 会话保持 · IPv4 / IPv6 分别测试") }
         item {
-            GlassCard {
-                SectionTitle(icon = "◎", title = "目标设置")
-                ShortLabel("地址")
-                SoftTextField(
-                    value = host,
-                    onValueChange = onHostChange,
-                    placeholder = "www.baidu.com",
-                    leading = "🌐"
-                )
-                ShortLabel("端口")
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
-                    SoftTextField(
-                        value = port,
-                        onValueChange = { onPortChange(it.filter(Char::isDigit)) },
-                        placeholder = "80",
-                        leading = "▣",
-                        keyboardType = KeyboardType.Number,
-                        modifier = Modifier.weight(1f)
-                    )
-                    OutlinedButton(
+            Panel {
+                SectionTitle("目标设置")
+                FieldLabel("地址")
+                CleanTextField(host, onHostChange, "www.baidu.com")
+                FieldLabel("端口")
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    CleanNumberField(port, onPortChange, "80", Modifier.weight(1f))
+                    Button(
                         onClick = onResolve,
-                        shape = RoundedCornerShape(16.dp),
-                        modifier = Modifier.height(56.dp)
-                    ) { Text("🔍 解析") }
+                        shape = ShapeM,
+                        modifier = Modifier.height(56.dp).width(110.dp)
+                    ) { Text("解析") }
                 }
-                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                    Text("打码", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
-                    Spacer(Modifier.width(8.dp))
-                    Text("隐藏 IP / 公网地址", color = Color(0xFF64748B), modifier = Modifier.weight(1f), maxLines = 1)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("隐私打码", modifier = Modifier.weight(1f), fontWeight = FontWeight.Medium)
                     Switch(checked = maskPrivacy, onCheckedChange = onMaskPrivacyChange)
                 }
                 if (result.ipv4.isNotEmpty() || result.ipv6.isNotEmpty() || result.error != null) {
-                    Text("IPv4：${displayIpList(result.ipv4, maskPrivacy)}", style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Text("IPv6：${displayIpList(result.ipv6, maskPrivacy)}", style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    result.error?.let { Text("错误：$it", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+                    Divider(color = Border)
+                    InfoLine("IPv4", displayIpList(result.ipv4, maskPrivacy))
+                    InfoLine("IPv6", displayIpList(result.ipv6, maskPrivacy))
+                    result.error?.let { InfoLine("错误", it, ErrorRed) }
                 }
             }
         }
         item {
-            GlassCard {
-                SectionTitle(icon = "∿", title = "测试模式")
-                ModeSegmented(mode = mode, onModeChange = onModeChange)
-                Text("对 IPv4 / IPv6 分别进行会话保持测试。", color = Color(0xFF64748B), style = MaterialTheme.typography.bodySmall, maxLines = 1)
+            Panel {
+                SectionTitle("测试模式")
+                ModeSelector(mode, onModeChange)
             }
         }
         item {
-            GlassCard {
-                SectionTitle(icon = "≡", title = "会话参数")
+            Panel {
+                SectionTitle("会话参数")
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    CompactNumberField("新增", batchSize, onBatchSizeChange, Modifier.weight(1f))
-                    CompactNumberField("间隔ms", intervalMs, onIntervalMsChange, Modifier.weight(1f))
+                    ParamField("新增", batchSize, onBatchSizeChange, Modifier.weight(1f))
+                    ParamField("间隔ms", intervalMs, onIntervalMsChange, Modifier.weight(1f))
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    CompactNumberField("超时ms", timeoutMs, onTimeoutMsChange, Modifier.weight(1f))
-                    CompactNumberField("失败停", failureLimit, onFailureLimitChange, Modifier.weight(1f))
+                    ParamField("超时ms", timeoutMs, onTimeoutMsChange, Modifier.weight(1f))
+                    ParamField("失败停", failureLimit, onFailureLimitChange, Modifier.weight(1f))
                 }
-                CompactNumberField("目标会话", successLimit, onSuccessLimitChange, Modifier.fillMaxWidth())
+                ParamField("目标会话", successLimit, onSuccessLimitChange, Modifier.fillMaxWidth())
                 Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("完成后保持连接", modifier = Modifier.weight(1f))
                     Switch(checked = keepConnections, onCheckedChange = onKeepConnectionsChange)
-                    Spacer(Modifier.width(8.dp))
-                    Text("完成后保持连接", style = MaterialTheme.typography.bodyMedium)
                 }
-                Text("默认：新增100，间隔500ms。", color = Color(0xFF64748B), style = MaterialTheme.typography.bodySmall)
+                Text("默认：新增 100，间隔 500ms", style = MaterialTheme.typography.bodySmall, color = Muted)
             }
         }
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxWidth()) {
-                Button(
-                    onClick = onSave,
-                    shape = RoundedCornerShape(18.dp),
-                    modifier = Modifier.weight(1f).height(54.dp)
-                ) { Text("保存参数", fontWeight = FontWeight.Bold) }
-                OutlinedButton(
-                    onClick = onRestoreDefault,
-                    shape = RoundedCornerShape(18.dp),
-                    modifier = Modifier.weight(1f).height(54.dp)
-                ) { Text("恢复默认") }
+                Button(onClick = onSave, modifier = Modifier.weight(1f).height(52.dp), shape = ShapeM) { Text("保存参数") }
+                OutlinedButton(onClick = onRestoreDefault, modifier = Modifier.weight(1f).height(52.dp), shape = ShapeM) { Text("恢复默认") }
             }
         }
-        item { Spacer(Modifier.height(72.dp)) }
+        item { Spacer(Modifier.height(80.dp)) }
     }
 }
 
@@ -606,35 +544,35 @@ private fun TestPage(
             .fillMaxSize()
             .statusBarsPadding()
             .padding(horizontal = 18.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
+        verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         item {
-            AppTitle(null)
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Chip(modeLabel(mode), Color(0xFFEFF6FF), Color(0xFF2563EB))
-                Chip(if (isAdding) "● 运行中" else status, Color(0xFFEAFBF0), Color(0xFF16A34A))
-                Chip("◎ 目标 $target", Color(0xFFF8FAFC), Color(0xFF334155))
+            PageTitle("宽带会话测试器", null)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                SmallChip(shortMode(mode), BlueSoft, Blue)
+                SmallChip(if (isAdding) "运行中" else status, GreenSoft, Green)
+                SmallChip("目标 $target", Color.White, TextDark)
             }
         }
         item {
-            GlassCard {
-                SectionTitle(icon = "∿", title = "测试控制")
-                Text(if (isAdding) "● 正在运行 · 已连接目标" else "状态：$status", color = if (isAdding) Color(0xFF16A34A) else Color(0xFF64748B), maxLines = 1)
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-                    Button(onClick = onStart, enabled = !isAdding, shape = RoundedCornerShape(16.dp), modifier = Modifier.weight(1f).height(54.dp)) { Text("▶ 开始") }
-                    OutlinedButton(onClick = onStopAdding, enabled = isAdding, shape = RoundedCornerShape(16.dp), modifier = Modifier.weight(1f).height(54.dp)) { Text("■ 停止") }
+            Panel {
+                SectionTitle("测试控制")
+                Text(if (isAdding) "正在运行 · 已连接目标" else "状态：$status", color = if (isAdding) Green else Muted, fontWeight = FontWeight.Medium)
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Button(onClick = onStart, enabled = !isAdding, modifier = Modifier.weight(1f).height(52.dp), shape = ShapeM) { Text("开始") }
+                    OutlinedButton(onClick = onStopAdding, enabled = isAdding, modifier = Modifier.weight(1f).height(52.dp), shape = ShapeM) { Text("停止") }
                 }
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-                    OutlinedButton(onClick = onRelease, shape = RoundedCornerShape(16.dp), modifier = Modifier.weight(1f).height(50.dp)) { Text("释放") }
-                    OutlinedButton(onClick = onExport, shape = RoundedCornerShape(16.dp), modifier = Modifier.weight(1f).height(50.dp)) { Text("导出") }
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedButton(onClick = onRelease, modifier = Modifier.weight(1f).height(48.dp), shape = ShapeM) { Text("释放") }
+                    OutlinedButton(onClick = onExport, modifier = Modifier.weight(1f).height(48.dp), shape = ShapeM) { Text("导出") }
                 }
             }
         }
-        if (showIpv4) item { SessionStatsCard("IPv4 会话", ipv4Stats, maskPrivacy) }
-        if (showIpv6) item { SessionStatsCard("IPv6 会话", ipv6Stats, maskPrivacy) }
-        item { FailureReasonCard(stats = listOf(ipv4Stats, ipv6Stats), onMore = onMoreLogs) }
-        item { RecentLogCard(logs = logs, maskPrivacy = maskPrivacy, onMore = onMoreLogs) }
-        item { Spacer(Modifier.height(72.dp)) }
+        if (showIpv4) item { SessionCard("IPv4 会话", ipv4Stats, maskPrivacy) }
+        if (showIpv6) item { SessionCard("IPv6 会话", ipv6Stats, maskPrivacy) }
+        item { FailureCard(listOf(ipv4Stats, ipv6Stats), onMoreLogs) }
+        item { RecentLogCard(logs, maskPrivacy, onMoreLogs) }
+        item { Spacer(Modifier.height(80.dp)) }
     }
 }
 
@@ -645,231 +583,212 @@ private fun LogsPage(
     history: List<SessionSummary>,
     maskPrivacy: Boolean,
     onExport: () -> Unit,
-    onClear: () -> Unit,
-    onBack: () -> Unit
+    onClear: () -> Unit
 ) {
     LazyColumn(
         modifier = modifier
             .fillMaxSize()
             .statusBarsPadding()
             .padding(horizontal = 18.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
+        verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         item {
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                Text("‹", style = MaterialTheme.typography.headlineLarge, modifier = Modifier.padding(end = 12.dp))
-                Text("日志与历史", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-                OutlinedButton(onClick = onClear, shape = RoundedCornerShape(16.dp)) { Text("清理") }
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 12.dp)) {
-                Chip("全部", Color(0xFFEFF6FF), Color(0xFF2563EB))
-                Chip("运行日志", Color.White.copy(alpha = 0.72f), Color(0xFF334155))
-                Chip("检测历史", Color.White.copy(alpha = 0.72f), Color(0xFF334155))
-                Chip("失败原因", Color.White.copy(alpha = 0.72f), Color(0xFF334155))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("日志与历史", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f), color = TextDark)
+                OutlinedButton(onClick = onClear, shape = ShapeM) { Text("清理") }
             }
         }
         item {
-            GlassCard {
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxWidth()) {
-                    OutlinedButton(onClick = onExport, shape = RoundedCornerShape(18.dp), modifier = Modifier.weight(1f)) { Text("导出日志") }
-                    OutlinedButton(onClick = onClear, shape = RoundedCornerShape(18.dp), modifier = Modifier.weight(1f)) { Text("清理日志") }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                SmallChip("全部", BlueSoft, Blue)
+                SmallChip("运行日志", Color.White, TextDark)
+                SmallChip("检测历史", Color.White, TextDark)
+            }
+        }
+        item {
+            Panel {
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedButton(onClick = onExport, modifier = Modifier.weight(1f), shape = ShapeM) { Text("导出日志") }
+                    OutlinedButton(onClick = onClear, modifier = Modifier.weight(1f), shape = ShapeM) { Text("清理日志") }
                 }
             }
         }
-        item { RecentLogCard(logs = logs, maskPrivacy = maskPrivacy, onMore = {}) }
-        item {
-            Text("检测历史", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 4.dp))
-        }
+        item { RecentLogCard(logs, maskPrivacy, {}) }
+        item { Text("检测历史", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = TextDark) }
         if (history.isEmpty()) {
-            item { GlassCard { Text("暂无历史记录") } }
+            item { Panel { Text("暂无历史记录", color = TextDark) } }
         } else {
-            items(history.take(20)) { item ->
-                HistorySummaryCard(item, maskPrivacy)
-            }
+            items(history.take(20)) { HistoryItem(it, maskPrivacy) }
         }
-        item { Spacer(Modifier.height(72.dp)) }
+        item { Spacer(Modifier.height(80.dp)) }
     }
 }
 
 @Composable
-private fun AppTitle(subtitle: String?) {
-    Column(modifier = Modifier.padding(top = 16.dp, bottom = 6.dp)) {
-        Text("宽带会话测试器", style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.ExtraBold, color = Color(0xFF0F172A))
-        subtitle?.let { Text(it, color = Color(0xFF64748B), style = MaterialTheme.typography.titleMedium, maxLines = 1) }
+private fun PageTitle(title: String, subtitle: String?) {
+    Column(modifier = Modifier.padding(top = 10.dp, bottom = 4.dp)) {
+        Text(title, fontSize = 30.sp, lineHeight = 34.sp, fontWeight = FontWeight.ExtraBold, color = TextDark)
+        subtitle?.let { Text(it, fontSize = 14.sp, color = Muted, maxLines = 1) }
     }
 }
 
 @Composable
-private fun GlassCard(content: @Composable ColumnScope.() -> Unit) {
-    ElevatedCard(
-        colors = CardDefaults.elevatedCardColors(containerColor = Color.White.copy(alpha = 0.72f)),
-        shape = RoundedCornerShape(24.dp),
+private fun Panel(content: @Composable ColumnScope.() -> Unit) {
+    Card(
         modifier = Modifier.fillMaxWidth(),
-        elevation = CardDefaults.elevatedCardElevation(defaultElevation = 2.dp)
+        shape = ShapeL,
+        colors = CardDefaults.cardColors(containerColor = Color.White),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
     ) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-            content = content
-        )
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp), content = content)
     }
 }
 
 @Composable
-private fun SectionTitle(icon: String, title: String) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Box(
-            modifier = Modifier
-                .clip(RoundedCornerShape(12.dp))
-                .background(Color(0xFFEFF6FF))
-                .padding(horizontal = 10.dp, vertical = 8.dp)
-        ) {
-            Text(icon, color = Color(0xFF2563EB), fontWeight = FontWeight.Bold)
-        }
-        Spacer(Modifier.width(10.dp))
-        Text(title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = Color(0xFF0F172A))
-    }
+private fun SectionTitle(title: String) {
+    Text(title, fontSize = 21.sp, fontWeight = FontWeight.Bold, color = TextDark)
 }
 
 @Composable
-private fun ShortLabel(label: String) {
-    Text(label, style = MaterialTheme.typography.labelLarge, color = Color(0xFF475569), fontWeight = FontWeight.SemiBold)
+private fun FieldLabel(label: String) {
+    Text(label, fontSize = 13.sp, color = Muted, fontWeight = FontWeight.Medium)
 }
 
 @Composable
-private fun SoftTextField(
-    value: String,
-    onValueChange: (String) -> Unit,
-    placeholder: String,
-    leading: String,
-    modifier: Modifier = Modifier,
-    keyboardType: KeyboardType = KeyboardType.Text
-) {
+private fun CleanTextField(value: String, onValueChange: (String) -> Unit, placeholder: String) {
     OutlinedTextField(
         value = value,
         onValueChange = onValueChange,
-        singleLine = true,
-        leadingIcon = { Text(leading) },
         placeholder = { Text(placeholder) },
-        keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
-        shape = RoundedCornerShape(16.dp),
-        modifier = modifier.fillMaxWidth()
+        singleLine = true,
+        shape = ShapeM,
+        modifier = Modifier.fillMaxWidth()
     )
 }
 
 @Composable
-private fun CompactNumberField(label: String, value: String, onValueChange: (String) -> Unit, modifier: Modifier = Modifier) {
+private fun CleanNumberField(value: String, onValueChange: (String) -> Unit, placeholder: String, modifier: Modifier = Modifier) {
     OutlinedTextField(
         value = value,
         onValueChange = { onValueChange(it.filter(Char::isDigit)) },
-        label = { Text(label, maxLines = 1) },
-        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+        placeholder = { Text(placeholder) },
         singleLine = true,
-        shape = RoundedCornerShape(16.dp),
+        shape = ShapeM,
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
         modifier = modifier
     )
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ModeSegmented(mode: TestMode, onModeChange: (TestMode) -> Unit) {
-    val values = listOf(TestMode.IPV4_ONLY, TestMode.IPV6_ONLY, TestMode.IPV4_THEN_IPV6)
-    SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-        values.forEachIndexed { index, item ->
-            SegmentedButton(
+private fun ParamField(label: String, value: String, onValueChange: (String) -> Unit, modifier: Modifier = Modifier) {
+    OutlinedTextField(
+        value = value,
+        onValueChange = { onValueChange(it.filter(Char::isDigit)) },
+        label = { Text(label, maxLines = 1) },
+        singleLine = true,
+        shape = ShapeM,
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+        modifier = modifier
+    )
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ModeSelector(mode: TestMode, onModeChange: (TestMode) -> Unit) {
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        listOf(TestMode.IPV4_ONLY, TestMode.IPV6_ONLY, TestMode.IPV4_THEN_IPV6).forEach { item ->
+            FilterChip(
                 selected = mode == item,
                 onClick = { onModeChange(item) },
-                shape = SegmentedButtonDefaults.itemShape(index = index, count = values.size),
-                label = { Text(if (item == TestMode.IPV4_THEN_IPV6) "分别测试" else item.label.replace("仅 ", "仅")) }
+                label = { Text(if (item == TestMode.IPV4_THEN_IPV6) "分别测试" else item.label) }
             )
         }
     }
 }
 
 @Composable
-private fun SessionStatsCard(title: String, stats: ProtocolStats, maskPrivacy: Boolean) {
-    GlassCard {
+private fun SessionCard(title: String, stats: ProtocolStats, maskPrivacy: Boolean) {
+    Panel {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            SectionTitle(icon = "▮", title = title)
+            SectionTitle(title)
             Spacer(Modifier.weight(1f))
-            Text(stats.phase, color = Color(0xFF2563EB), maxLines = 1)
+            Text(stats.phase, color = Blue, fontWeight = FontWeight.Medium, maxLines = 1)
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-            MetricTile("活动", stats.activeSessions.toString(), Color(0xFF2563EB), Modifier.weight(1f))
-            MetricTile("失败", stats.totalFailure.toString(), Color(0xFFEF4444), Modifier.weight(1f))
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Metric("活动", stats.activeSessions.toString(), Blue, Modifier.weight(1f))
+            Metric("失败", stats.totalFailure.toString(), ErrorRed, Modifier.weight(1f))
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-            MetricTile("总计", stats.totalAttempts.toString(), Color(0xFF0F2F6E), Modifier.weight(1f))
-            MetricTile("新增", stats.lastAdded.toString(), Color(0xFF1D4ED8), Modifier.weight(1f))
-            MetricTile("CPS", "${stats.cps}/s", Color(0xFF2563EB), Modifier.weight(1f))
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Metric("总计", stats.totalAttempts.toString(), Navy, Modifier.weight(1f))
+            Metric("新增", stats.lastAdded.toString(), Blue, Modifier.weight(1f))
+            Metric("CPS", "${stats.cps}/s", Blue, Modifier.weight(1f))
         }
         if (stats.resolvedAddresses.isNotEmpty()) {
-            Text("地址：${displayIpList(stats.resolvedAddresses, maskPrivacy)}", maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = Color(0xFF475569))
+            Text("地址：${displayIpList(stats.resolvedAddresses, maskPrivacy)}", maxLines = 1, overflow = TextOverflow.Ellipsis, color = Muted, fontSize = 13.sp)
         }
     }
 }
 
 @Composable
-private fun MetricTile(label: String, value: String, color: Color, modifier: Modifier = Modifier) {
+private fun Metric(label: String, value: String, color: Color, modifier: Modifier) {
     Card(
-        colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.58f)),
-        shape = RoundedCornerShape(16.dp),
-        modifier = modifier
+        modifier = modifier,
+        shape = ShapeM,
+        colors = CardDefaults.cardColors(containerColor = Color(0xFFF8FAFC)),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
     ) {
         Column(Modifier.padding(12.dp)) {
-            Text(label, color = Color(0xFF475569), style = MaterialTheme.typography.labelMedium, maxLines = 1)
-            Text(value, color = color, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, maxLines = 1)
+            Text(label, color = Muted, fontSize = 12.sp, maxLines = 1)
+            Text(value, color = color, fontSize = 23.sp, lineHeight = 26.sp, fontWeight = FontWeight.Bold, maxLines = 1)
         }
     }
 }
 
 @Composable
-private fun FailureReasonCard(stats: List<ProtocolStats>, onMore: () -> Unit) {
+private fun FailureCard(stats: List<ProtocolStats>, onMore: () -> Unit) {
     val merged = linkedMapOf<String, Int>()
     stats.forEach { s ->
         s.errorSummary.forEach { (k, v) -> merged[k.shortReason()] = (merged[k.shortReason()] ?: 0) + v }
     }
     if (merged.isEmpty()) return
-    GlassCard {
+    Panel {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            SectionTitle(icon = "!", title = "失败原因")
+            SectionTitle("失败原因")
             Spacer(Modifier.weight(1f))
-            Text("更多 ›", color = Color(0xFF64748B))
+            Text("更多", color = Muted)
         }
-        FlowReasonChips(merged)
+        FlowReasons(merged)
     }
 }
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun FlowReasonChips(reasons: Map<String, Int>) {
+private fun FlowReasons(reasons: Map<String, Int>) {
     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         reasons.entries.sortedByDescending { it.value }.take(6).forEach { (name, count) ->
-            Chip("$name $count", Color(0xFFFFF1F2), Color(0xFFEF4444))
+            SmallChip("$name $count", RedSoft, ErrorRed)
         }
     }
 }
 
 @Composable
 private fun RecentLogCard(logs: List<LogLine>, maskPrivacy: Boolean, onMore: () -> Unit) {
-    GlassCard {
+    Panel {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            SectionTitle(icon = "□", title = "最近日志")
+            SectionTitle("最近日志")
             Spacer(Modifier.weight(1f))
-            Text("更多 ›", color = Color(0xFF64748B))
+            Text("更多", color = Muted)
         }
         if (logs.isEmpty()) {
-            Text("暂无日志", color = Color(0xFF64748B))
+            Text("暂无日志", color = Muted)
         } else {
-            logs.takeLast(5).forEach { line ->
-                CompactLogLine(line, maskPrivacy)
-            }
+            logs.takeLast(5).forEach { CompactLog(it, maskPrivacy) }
         }
     }
 }
 
 @Composable
-private fun CompactLogLine(line: LogLine, maskPrivacy: Boolean) {
+private fun CompactLog(line: LogLine, maskPrivacy: Boolean) {
     val tag = when (line.level) {
         LogLevel.STAT -> "统计"
         LogLevel.SUCCESS -> "成功"
@@ -877,48 +796,42 @@ private fun CompactLogLine(line: LogLine, maskPrivacy: Boolean) {
         LogLevel.ERROR -> "错误"
         LogLevel.INFO -> "信息"
     }
-    val bg = when (line.level) {
-        LogLevel.STAT -> Color(0xFFEFF6FF)
-        LogLevel.SUCCESS -> Color(0xFFEAFBF0)
-        LogLevel.WARN -> Color(0xFFFFF7ED)
-        LogLevel.ERROR -> Color(0xFFFFF1F2)
-        LogLevel.INFO -> Color(0xFFF8FAFC)
+    val color = when (line.level) {
+        LogLevel.STAT -> Blue
+        LogLevel.SUCCESS -> Green
+        LogLevel.WARN -> Orange
+        LogLevel.ERROR -> ErrorRed
+        LogLevel.INFO -> Muted
     }
-    val fg = when (line.level) {
-        LogLevel.STAT -> Color(0xFF2563EB)
-        LogLevel.SUCCESS -> Color(0xFF16A34A)
-        LogLevel.WARN -> Color(0xFFF97316)
-        LogLevel.ERROR -> Color(0xFFEF4444)
-        LogLevel.INFO -> Color(0xFF475569)
-    }
-    val text = if (maskPrivacy) maskIpText(line.text) else line.text
     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-        Text(line.timeText.take(8), color = Color(0xFF64748B), modifier = Modifier.width(72.dp), maxLines = 1)
-        Box(Modifier.clip(RoundedCornerShape(9.dp)).background(bg).padding(horizontal = 8.dp, vertical = 4.dp)) {
-            Text(tag, color = fg, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
-        }
-        Spacer(Modifier.width(8.dp))
-        Text(text, maxLines = 1, overflow = TextOverflow.Ellipsis, color = Color(0xFF334155), style = MaterialTheme.typography.bodyMedium)
+        Text(line.timeText.take(8), color = Muted, modifier = Modifier.width(70.dp), maxLines = 1)
+        Text(tag, color = color, fontWeight = FontWeight.Bold, modifier = Modifier.width(46.dp), maxLines = 1)
+        Text(
+            if (maskPrivacy) maskIpText(line.text) else line.text,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            color = TextDark,
+            fontSize = 14.sp
+        )
     }
 }
 
 @Composable
-private fun HistorySummaryCard(item: SessionSummary, maskPrivacy: Boolean) {
+private fun HistoryItem(item: SessionSummary, maskPrivacy: Boolean) {
     val mainStats = item.ipv4Stats ?: item.ipv6Stats
-    val shownHost = if (maskPrivacy) maskIpText(item.host) else item.host
     val protocol = when {
         item.ipv4Stats != null && item.ipv6Stats != null -> "分别测试"
         item.ipv4Stats != null -> "IPv4 完成"
         item.ipv6Stats != null -> "IPv6 完成"
         else -> "完成"
     }
-    GlassCard {
-        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-            Text("▣ ${item.startedAtText.drop(5)}", color = Color(0xFF64748B), modifier = Modifier.weight(1f), maxLines = 1)
-            Chip(protocol, if (protocol.contains("IPv")) Color(0xFFEAFBF0) else Color(0xFFEFF6FF), if (protocol.contains("IPv")) Color(0xFF16A34A) else Color(0xFF2563EB))
+    Panel {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(item.startedAtText.drop(5), color = Muted, modifier = Modifier.weight(1f), maxLines = 1)
+            SmallChip(protocol, GreenSoft, Green)
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            MiniInfo("目标", shownHost, Modifier.weight(1f))
+            MiniInfo("目标", if (maskPrivacy) maskIpText(item.host) else item.host, Modifier.weight(1f))
             MiniInfo("端口", item.port.toString(), Modifier.weight(1f))
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -929,48 +842,58 @@ private fun HistorySummaryCard(item: SessionSummary, maskPrivacy: Boolean) {
             MiniInfo("总计", (mainStats?.totalAttempts ?: 0).toString(), Modifier.weight(1f))
             MiniInfo("CPS", "${mainStats?.cps ?: 0}/s", Modifier.weight(1f))
         }
-        val reason = mainStats?.errorSummary.orEmpty().mapKeys { it.key.shortReason() }
-        if (reason.isNotEmpty()) FlowReasonChips(reason)
+        val reasons = mainStats?.errorSummary.orEmpty().mapKeys { it.key.shortReason() }
+        if (reasons.isNotEmpty()) FlowReasons(reasons)
     }
 }
 
 @Composable
 private fun MiniInfo(label: String, value: String, modifier: Modifier = Modifier) {
-    Card(colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.58f)), shape = RoundedCornerShape(14.dp), modifier = modifier) {
+    Card(
+        modifier = modifier,
+        shape = ShapeS,
+        colors = CardDefaults.cardColors(containerColor = Color(0xFFF8FAFC)),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+    ) {
         Row(Modifier.padding(horizontal = 10.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(label, color = Color(0xFF64748B), modifier = Modifier.width(42.dp), maxLines = 1)
-            Text(value, color = Color(0xFF334155), maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(label, color = Muted, modifier = Modifier.width(42.dp), fontSize = 13.sp, maxLines = 1)
+            Text(value, color = TextDark, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
     }
 }
 
 @Composable
-private fun Chip(text: String, bg: Color, fg: Color) {
-    Box(Modifier.clip(RoundedCornerShape(16.dp)).background(bg).padding(horizontal = 13.dp, vertical = 8.dp)) {
-        Text(text, color = fg, fontWeight = FontWeight.Bold, maxLines = 1)
+private fun SmallChip(text: String, bg: Color, fg: Color) {
+    Card(shape = RoundedCornerShape(14.dp), colors = CardDefaults.cardColors(containerColor = bg), elevation = CardDefaults.cardElevation(0.dp)) {
+        Text(text, color = fg, fontWeight = FontWeight.Medium, fontSize = 13.sp, modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp), maxLines = 1)
     }
 }
 
 @Composable
-private fun FrostedBottomBar(selectedTab: MainTab, onSelect: (MainTab) -> Unit) {
-    NavigationBar(
-        containerColor = Color.White.copy(alpha = 0.82f),
-        modifier = Modifier.navigationBarsPadding()
-    ) {
+private fun InfoLine(label: String, value: String, color: Color = TextDark) {
+    Row {
+        Text("$label：", color = Muted, fontSize = 13.sp, modifier = Modifier.width(54.dp))
+        Text(value, color = color, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+@Composable
+private fun BottomNav(selectedTab: MainTab, onSelect: (MainTab) -> Unit) {
+    NavigationBar(containerColor = Color.White, tonalElevation = 4.dp, modifier = Modifier.navigationBarsPadding()) {
         MainTab.entries.forEach { tab ->
             NavigationBarItem(
                 selected = selectedTab == tab,
                 onClick = { onSelect(tab) },
-                icon = { Text(tab.icon) },
+                icon = { Text(tab.mark, fontWeight = FontWeight.Bold) },
                 label = { Text(tab.label) }
             )
         }
     }
 }
 
-private fun modeLabel(mode: TestMode): String = when (mode) {
-    TestMode.IPV4_ONLY -> "🌐 IPv4"
-    TestMode.IPV6_ONLY -> "🌐 IPv6"
+private fun shortMode(mode: TestMode): String = when (mode) {
+    TestMode.IPV4_ONLY -> "IPv4"
+    TestMode.IPV6_ONLY -> "IPv6"
     TestMode.IPV4_THEN_IPV6 -> "分别测试"
 }
 
@@ -1046,6 +969,22 @@ private fun String.shortReason(): String {
         else -> substringBefore("(").take(6)
     }
 }
+
+private val Bg = Color(0xFFF6F8FC)
+private val TextDark = Color(0xFF111827)
+private val Muted = Color(0xFF64748B)
+private val Border = Color(0xFFE5E7EB)
+private val Blue = Color(0xFF2563EB)
+private val BlueSoft = Color(0xFFEFF6FF)
+private val Green = Color(0xFF16A34A)
+private val GreenSoft = Color(0xFFEAFBF0)
+private val ErrorRed = Color(0xFFEF4444)
+private val RedSoft = Color(0xFFFFF1F2)
+private val Orange = Color(0xFFF97316)
+private val Navy = Color(0xFF0F2F6E)
+private val ShapeL = RoundedCornerShape(22.dp)
+private val ShapeM = RoundedCornerShape(16.dp)
+private val ShapeS = RoundedCornerShape(12.dp)
 
 private val IPV4_REGEX = Regex("""\b(?:\d{1,3}\.){3}\d{1,3}\b""")
 private val IPV6_REGEX = Regex("""(?i)(?<![\w.])(?:[0-9a-f]{1,4}:){2,}[0-9a-f]{0,4}(?:%[\w.]+)?(?![\w.])""")
