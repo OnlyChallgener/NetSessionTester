@@ -34,6 +34,11 @@ class HistoryStore(private val context: Context) {
         return kb.coerceAtLeast(0L).toInt()
     }
 
+    fun count(): Int {
+        if (!file.exists()) return 0
+        return file.readLines().size
+    }
+
     suspend fun load(limit: Int = 30): List<SessionSummary> = withContext(Dispatchers.IO) {
         if (!file.exists()) return@withContext emptyList()
         file.readLines().takeLast(limit).mapNotNull { line ->

@@ -169,6 +169,7 @@ private fun NetSessionTesterApp() {
     var historyLimit by remember { mutableStateOf("30") }
     var logSizeKb by remember { mutableStateOf(0) }
     var historySizeKb by remember { mutableStateOf(0) }
+    var historySavedCount by remember { mutableStateOf(0) }
     var manualStopRequested by remember { mutableStateOf(false) }
     var currentTestConfig by remember { mutableStateOf<SessionConfig?>(null) }
     var currentStartedAt by remember { mutableStateOf(0L) }
@@ -214,6 +215,7 @@ private fun NetSessionTesterApp() {
         state = state.copy(history = historyStore.load(30), logs = logStore.load())
         logSizeKb = logStore.sizeKb()
         historySizeKb = historyStore.sizeKb()
+        historySavedCount = historyStore.count()
         val saved = settingsStore.load()
         host = saved.host.ifBlank { "www.baidu.com" }
         port = saved.port
@@ -227,6 +229,7 @@ private fun NetSessionTesterApp() {
         maskPrivacy = saved.maskPrivacy
         historyLimit = if (saved.historyLimit in listOf("10", "30", "100")) saved.historyLimit else "30"
         state = state.copy(history = historyStore.load(historyLimit.toIntOrNull()?.coerceIn(10, 100) ?: 30))
+        historySavedCount = historyStore.count()
         settingsLoaded = true
     }
 
@@ -317,7 +320,6 @@ private fun NetSessionTesterApp() {
             status = "建连中",
             ipv4Stats = ProtocolStats(IpProtocol.IPV4),
             ipv6Stats = ProtocolStats(IpProtocol.IPV6),
-            logs = state.logs.takeLast(500),
             summary = null,
             error = null
         )
@@ -356,6 +358,7 @@ private fun NetSessionTesterApp() {
                 historyStore.append(summary)
                 historyStore.trim(100)
                 historySizeKb = historyStore.sizeKb()
+                historySavedCount = historyStore.count()
                 val safeHistoryLimit = historyLimit.toIntOrNull()?.coerceIn(10, 100) ?: 30
                 state = state.copy(
                     isAdding = false,
@@ -457,6 +460,7 @@ private fun NetSessionTesterApp() {
         scope.launch {
             historyStore.clear()
             historySizeKb = 0
+            historySavedCount = 0
             state = state.copy(history = emptyList())
             snackbarHostState.showSnackbar("检测历史已清理")
         }
@@ -574,6 +578,7 @@ private fun NetSessionTesterApp() {
                     history = state.history,
                     historyLimit = historyLimit,
                     historySizeKb = historySizeKb,
+                    historySavedCount = historySavedCount,
                     maskPrivacy = maskPrivacy,
                     onExport = { exportLogs() },
                     onClear = { clearHistoryOnly() },
@@ -583,6 +588,7 @@ private fun NetSessionTesterApp() {
                             val safeLimit = limit.toIntOrNull()?.coerceIn(10, 100) ?: 30
                             historyStore.trim(100)
                             historySizeKb = historyStore.sizeKb()
+                            historySavedCount = historyStore.count()
                             state = state.copy(history = historyStore.load(safeLimit))
                         }
                     },
@@ -772,10 +778,6 @@ private fun FullRunLogPage(
     onExport: () -> Unit,
     onClear: () -> Unit
 ) {
-    val latestLogs = logs.takeLast(500)
-    val pinned = pinnedRunLogLines(latestLogs)
-    val dynamic = dynamicRunLogLines(latestLogs, pinned)
-
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -812,20 +814,14 @@ private fun FullRunLogPage(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     SectionTitle("□", "全部日志", Blue)
                     Spacer(Modifier.weight(1f))
-                    Text("${latestLogs.size} 条 · 占用 ${logSizeKb}KB", color = Muted, fontSize = 11.sp)
+                    Text("${logs.takeLast(500).size} 条 · 占用 ${logSizeKb}KB", color = Muted, fontSize = 11.sp)
                 }
-                if (latestLogs.isEmpty()) {
+                if (logs.isEmpty()) {
                     Text("暂无日志", color = Muted, fontSize = 12.sp)
                 } else {
-                    pinned.forEachIndexed { index, line ->
+                    logs.takeLast(500).forEachIndexed { index, line ->
                         CompactLogLine(line, maskPrivacy)
-                        if (index != pinned.lastIndex || dynamic.isNotEmpty()) {
-                            HorizontalDivider(color = Border.copy(alpha = 0.65f), thickness = 0.6.dp)
-                        }
-                    }
-                    dynamic.forEachIndexed { index, line ->
-                        CompactLogLine(line, maskPrivacy)
-                        if (index != dynamic.lastIndex) {
+                        if (index != logs.takeLast(500).lastIndex) {
                             HorizontalDivider(color = Border.copy(alpha = 0.65f), thickness = 0.6.dp)
                         }
                     }
@@ -842,6 +838,7 @@ private fun LogsPage(
     history: List<SessionSummary>,
     historyLimit: String,
     historySizeKb: Int,
+    historySavedCount: Int,
     maskPrivacy: Boolean,
     onExport: () -> Unit,
     onClear: () -> Unit,
@@ -859,7 +856,7 @@ private fun LogsPage(
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 10.dp, bottom = 6.dp)) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text("检测历史", fontSize = 21.sp, fontWeight = FontWeight.ExtraBold, color = TextDark)
-                    Text("占用 ${historySizeKb}KB", color = Muted, fontSize = 11.sp)
+                    Text("已保存 ${historySavedCount} 条 · 占用 ${historySizeKb}KB", color = Muted, fontSize = 11.sp)
                 }
                 OutlinedButton(onClick = onClear, shape = ShapeM, modifier = Modifier.height(36.dp)) {
                     Icon(Icons.Filled.DeleteOutline, contentDescription = null, modifier = Modifier.width(15.dp).height(15.dp))
@@ -1017,19 +1014,13 @@ private fun SessionStatsCard(title: String, stats: ProtocolStats, maskPrivacy: B
             MetricTile("CPS", "${stats.cps}/s", Blue, Modifier.weight(1f))
         }
         if (stats.resolvedAddresses.isNotEmpty()) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState())
-            ) {
-                Text(
-                    "地址：${displayIpList(stats.resolvedAddresses, maskPrivacy)}",
-                    maxLines = 1,
-                    softWrap = false,
-                    color = Muted,
-                    fontSize = 12.sp
-                )
-            }
+            Text(
+                "地址：${displayIpList(stats.resolvedAddresses, maskPrivacy)}",
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                color = Muted,
+                fontSize = 12.sp
+            )
         }
     }
 }
@@ -1247,15 +1238,9 @@ private fun iconFor(mark: String) = when (mark) {
 
 @Composable
 private fun InfoLine(label: String, value: String, color: Color = TextDark) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
+    Row {
         Text("$label：", color = Muted, fontSize = 12.sp, modifier = Modifier.width(54.dp))
-        Box(
-            modifier = Modifier
-                .weight(1f)
-                .horizontalScroll(rememberScrollState())
-        ) {
-            Text(value, color = color, fontSize = 12.sp, maxLines = 1, softWrap = false)
-        }
+        Text(value, color = color, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -1305,35 +1290,8 @@ private fun stopForegroundNotice(context: Context) {
 }
 
 
-
-private fun pinnedRunLogLines(logs: List<LogLine>): List<LogLine> {
-    if (logs.isEmpty()) return emptyList()
-    val latestTargetIndex = logs.indexOfLast { it.level == LogLevel.INFO && it.text.startsWith("目标：") }
-    val startIndex = if (latestTargetIndex >= 0) latestTargetIndex else 0
-    val latestTarget = logs.getOrNull(latestTargetIndex)
-
-    val latestResolve = logs
-        .drop(startIndex.coerceAtLeast(0))
-        .lastOrNull { line ->
-            line.level == LogLevel.SUCCESS && line.text.contains("解析成功")
-        }
-
-    return listOfNotNull(latestTarget, latestResolve).distinct()
-}
-
-private fun dynamicRunLogLines(logs: List<LogLine>, pinned: List<LogLine>): List<LogLine> {
-    val pinnedKeys = pinned.map { "${it.timeEpochMs}|${it.level}|${it.text}" }.toSet()
-    val latestTargetIndex = logs.indexOfLast { it.level == LogLevel.INFO && it.text.startsWith("目标：") }
-    val scopedLogs = if (latestTargetIndex >= 0) logs.drop(latestTargetIndex) else logs
-    return scopedLogs
-        .filterNot { "${it.timeEpochMs}|${it.level}|${it.text}" in pinnedKeys }
-        .asReversed()
-}
-
 private fun compactLogText(text: String): String {
     return text
-        .replace("目标：", "")
-        .replace(" | 模式：", " | 模式：")
         .replace("统计 - 成功：", "成功 ")
         .replace(" | 失败：", " 失败 ")
         .replace(" | 活动：", " 活动 ")
