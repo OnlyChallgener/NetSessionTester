@@ -1,4 +1,4 @@
-# NetSessionTester v0.6.1 Compose UI
+# NetSessionTester v0.6.3 Log Detail
 
 宽带会话测试器，Kotlin + Jetpack Compose 原生版。
 
@@ -28,7 +28,7 @@
 ## 构建
 
 上传完整项目后进入 GitHub Actions，运行 Build Android APK。
-Artifact：NetSessionTester-v0.6.1-compose-ui-debug-apk
+Artifact：NetSessionTester-v0.6.3-log-detail-debug-apk
 
 ## v0.6.1 修复
 
@@ -36,3 +36,21 @@ Artifact：NetSessionTester-v0.6.1-compose-ui-debug-apk
 - 整体字号和卡片间距下调。
 - 日志行显示更紧凑。
 - 底部栏改为真实图标。
+
+
+## v0.6.2 UI 修复
+
+- 测试页去掉“失败原因”卡片。
+- “测试控制 / IPv4 会话 / IPv6 会话”等标题字号继续下调。
+- 按钮、统计框、活动/失败/总计/新增/CPS 字号和卡片高度继续压缩。
+- 最近日志按参考图改成 3 行紧凑列表。
+- 日志页只显示“检测历史”。
+- 检测历史卡片增加小图标、两列信息、失败原因标签。
+- 删除 React/WebView 旧结构，回到干净 Compose 项目。
+
+
+## v0.6.3 修复
+
+- 测试页“最近日志”的“更多”不再跳转到底部第三栏。
+- 新增二级独立页面“运行日志”，左上返回回到测试页。
+- 第三栏“日志”继续只显示检测历史。
