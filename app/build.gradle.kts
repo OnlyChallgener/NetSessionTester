@@ -12,8 +12,8 @@ android {
         applicationId = "com.demonv.netsessiontester"
         minSdk = 26
         targetSdk = 35
-        versionCode = 14
-        versionName = "0.6.6-ui-history-limit"
+        versionCode = 16
+        versionName = "0.6.8-fix-stop-history"
         vectorDrawables { useSupportLibrary = true }
     }
 

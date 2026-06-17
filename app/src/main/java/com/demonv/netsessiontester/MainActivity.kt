@@ -168,6 +168,10 @@ private fun NetSessionTesterApp() {
     var maskPrivacy by remember { mutableStateOf(false) }
     var historyLimit by remember { mutableStateOf("30") }
     var logSizeKb by remember { mutableStateOf(0) }
+    var historySizeKb by remember { mutableStateOf(0) }
+    var manualStopRequested by remember { mutableStateOf(false) }
+    var currentTestConfig by remember { mutableStateOf<SessionConfig?>(null) }
+    var currentStartedAt by remember { mutableStateOf(0L) }
 
     var detailTitle by remember { mutableStateOf<String?>(null) }
     var detailLines by remember { mutableStateOf<List<String>>(emptyList()) }
@@ -209,6 +213,7 @@ private fun NetSessionTesterApp() {
     LaunchedEffect(Unit) {
         state = state.copy(history = historyStore.load(30), logs = logStore.load())
         logSizeKb = logStore.sizeKb()
+        historySizeKb = historyStore.sizeKb()
         val saved = settingsStore.load()
         host = saved.host.ifBlank { "www.baidu.com" }
         port = saved.port
@@ -220,8 +225,8 @@ private fun NetSessionTesterApp() {
         failureLimit = saved.failureLimit
         keepConnections = saved.keepConnections
         maskPrivacy = saved.maskPrivacy
-        historyLimit = saved.historyLimit
-        state = state.copy(history = historyStore.load(saved.historyLimit.toIntOrNull()?.coerceIn(15, 50) ?: 30))
+        historyLimit = if (saved.historyLimit in listOf("10", "30", "100")) saved.historyLimit else "30"
+        state = state.copy(history = historyStore.load(historyLimit.toIntOrNull()?.coerceIn(10, 100) ?: 30))
         settingsLoaded = true
     }
 
@@ -304,6 +309,9 @@ private fun NetSessionTesterApp() {
         selectedTab = MainTab.TEST
         startForegroundNotice(context, "建连中：${config.mode.label}，目标 ${config.successLimit}")
         val startedAt = System.currentTimeMillis()
+        currentStartedAt = startedAt
+        currentTestConfig = config
+        manualStopRequested = false
         logStore.clearNow()
         logSizeKb = 0
         state = state.copy(
@@ -348,8 +356,9 @@ private fun NetSessionTesterApp() {
                     }
                 )
                 historyStore.append(summary)
-                val safeHistoryLimit = historyLimit.toIntOrNull()?.coerceIn(15, 50) ?: 30
-                historyStore.trim(safeHistoryLimit)
+                historyStore.trim(100)
+                historySizeKb = historyStore.sizeKb()
+                val safeHistoryLimit = historyLimit.toIntOrNull()?.coerceIn(10, 100) ?: 30
                 state = state.copy(
                     isAdding = false,
                     status = "测试完成",
@@ -362,20 +371,65 @@ private fun NetSessionTesterApp() {
                     stopForegroundNotice(context)
                 }
             }.onFailure { error ->
-                val msg = error.message ?: error.javaClass.simpleName
-                appendLog(LogLine(level = LogLevel.ERROR, text = "测试中断：$msg"))
-                state = state.copy(isAdding = false, status = "已停止新增", error = msg)
-                updateForegroundNotice(context, "测试中断：$msg")
+                if (!manualStopRequested) {
+                    val msg = error.message ?: error.javaClass.simpleName
+                    appendLog(LogLine(level = LogLevel.ERROR, text = "测试中断：$msg"))
+                    state = state.copy(isAdding = false, status = "已停止新增", error = msg)
+                    updateForegroundNotice(context, "测试中断：$msg")
+                }
             }
         }
     }
 
+    fun stoppedStatsFor(protocol: IpProtocol, current: ProtocolStats): ProtocolStats {
+        return current.copy(
+            phase = "手动停止",
+            errorSummary = current.errorSummary + ("手动停止" to 1)
+        )
+    }
+
+    fun saveManualStopSummary() {
+        val config = currentTestConfig ?: buildConfig() ?: return
+        scope.launch {
+            val ipv4 = when (config.mode) {
+                TestMode.IPV4_ONLY -> stoppedStatsFor(IpProtocol.IPV4, state.ipv4Stats)
+                TestMode.IPV4_THEN_IPV6 -> stoppedStatsFor(IpProtocol.IPV4, state.ipv4Stats)
+                TestMode.IPV6_ONLY -> null
+            }
+            val ipv6 = when (config.mode) {
+                TestMode.IPV6_ONLY -> stoppedStatsFor(IpProtocol.IPV6, state.ipv6Stats)
+                TestMode.IPV4_THEN_IPV6 -> if (state.ipv6Stats.totalAttempts > 0) stoppedStatsFor(IpProtocol.IPV6, state.ipv6Stats) else null
+                TestMode.IPV4_ONLY -> null
+            }
+            val summary = SessionSummary(
+                startedAtEpochMs = if (currentStartedAt > 0L) currentStartedAt else System.currentTimeMillis(),
+                host = config.host,
+                port = config.port,
+                mode = config.mode,
+                ipv4Stats = ipv4,
+                ipv6Stats = ipv6
+            )
+            historyStore.append(summary)
+            historyStore.trim(100)
+            historySizeKb = historyStore.sizeKb()
+            val safeHistoryLimit = historyLimit.toIntOrNull()?.coerceIn(10, 100) ?: 30
+            state = state.copy(
+                summary = summary,
+                history = historyStore.load(safeHistoryLimit),
+                ipv4Stats = ipv4 ?: state.ipv4Stats,
+                ipv6Stats = ipv6 ?: state.ipv6Stats
+            )
+        }
+    }
+
     fun stopAdding() {
+        manualStopRequested = true
         runningJob?.cancel()
         runningJob = null
-        appendLog(LogLine(level = LogLevel.WARN, text = "已停止新增；已建立连接继续保持。"))
-        state = state.copy(isAdding = false, status = "已停止新增")
-        updateForegroundNotice(context, "已停止新增，连接保持中")
+        appendLog(LogLine(level = LogLevel.WARN, text = "手动停止；已建立连接继续保持。"))
+        saveManualStopSummary()
+        state = state.copy(isAdding = false, status = "手动停止")
+        updateForegroundNotice(context, "手动停止，连接保持中")
     }
 
     fun releaseAll() {
@@ -401,13 +455,12 @@ private fun NetSessionTesterApp() {
         exportLauncher.launch("net-session-test-v06.csv")
     }
 
-    fun clearLogsAndHistory() {
+    fun clearHistoryOnly() {
         scope.launch {
             historyStore.clear()
-            logStore.clear()
-            logSizeKb = 0
-            state = state.copy(logs = emptyList(), history = emptyList())
-            snackbarHostState.showSnackbar("已清理")
+            historySizeKb = 0
+            state = state.copy(history = emptyList())
+            snackbarHostState.showSnackbar("检测历史已清理")
         }
     }
 
@@ -522,14 +575,16 @@ private fun NetSessionTesterApp() {
                     logs = state.logs,
                     history = state.history,
                     historyLimit = historyLimit,
+                    historySizeKb = historySizeKb,
                     maskPrivacy = maskPrivacy,
                     onExport = { exportLogs() },
-                    onClear = { clearLogsAndHistory() },
+                    onClear = { clearHistoryOnly() },
                     onHistoryLimitChange = { limit ->
                         historyLimit = limit
                         scope.launch {
-                            val safeLimit = limit.toIntOrNull()?.coerceIn(15, 50) ?: 30
-                            historyStore.trim(safeLimit)
+                            val safeLimit = limit.toIntOrNull()?.coerceIn(10, 100) ?: 30
+                            historyStore.trim(100)
+                            historySizeKb = historyStore.sizeKb()
                             state = state.copy(history = historyStore.load(safeLimit))
                         }
                     },
@@ -732,11 +787,6 @@ private fun FullRunLogPage(
                     Text("‹", fontSize = 26.sp, fontWeight = FontWeight.Bold, color = TextDark)
                 }
                 Text("运行日志", fontSize = 21.sp, fontWeight = FontWeight.ExtraBold, color = TextDark, modifier = Modifier.weight(1f))
-                OutlinedButton(onClick = onClear, shape = ShapeM, modifier = Modifier.height(34.dp)) {
-                    Icon(Icons.Filled.DeleteOutline, contentDescription = null, modifier = Modifier.width(16.dp).height(16.dp))
-                    Spacer(Modifier.width(4.dp))
-                    Text("清理", fontSize = 12.sp)
-                }
             }
         }
         item {
@@ -783,6 +833,7 @@ private fun LogsPage(
     logs: List<LogLine>,
     history: List<SessionSummary>,
     historyLimit: String,
+    historySizeKb: Int,
     maskPrivacy: Boolean,
     onExport: () -> Unit,
     onClear: () -> Unit,
@@ -798,7 +849,10 @@ private fun LogsPage(
     ) {
         item {
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 10.dp, bottom = 6.dp)) {
-                Text("检测历史", fontSize = 21.sp, fontWeight = FontWeight.ExtraBold, color = TextDark, modifier = Modifier.weight(1f))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("检测历史", fontSize = 21.sp, fontWeight = FontWeight.ExtraBold, color = TextDark)
+                    Text("占用 ${historySizeKb}KB", color = Muted, fontSize = 11.sp)
+                }
                 OutlinedButton(onClick = onClear, shape = ShapeM, modifier = Modifier.height(36.dp)) {
                     Icon(Icons.Filled.DeleteOutline, contentDescription = null, modifier = Modifier.width(15.dp).height(15.dp))
                     Spacer(Modifier.width(4.dp))
@@ -806,9 +860,9 @@ private fun LogsPage(
                 }
             }
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                listOf("15", "30", "50").forEach { limit ->
+                listOf("10", "30", "100").forEach { limit ->
                     Box(modifier = Modifier.clickable { onHistoryLimitChange(limit) }) {
-                        StatusChip("保存 ${limit} 条", if (historyLimit == limit) BlueSoft else Color.White, if (historyLimit == limit) Blue else Muted, compact = true)
+                        StatusChip("显示 ${limit} 条", if (historyLimit == limit) BlueSoft else Color.White, if (historyLimit == limit) Blue else Muted, compact = true)
                     }
                 }
             }
@@ -816,7 +870,7 @@ private fun LogsPage(
         if (history.isEmpty()) {
             item { SoftCard { Text("暂无历史记录", color = TextDark, fontSize = 13.sp) } }
         } else {
-            items(history.take(historyLimit.toIntOrNull()?.coerceIn(15, 50) ?: 30)) { item ->
+            items(history.take(historyLimit.toIntOrNull()?.coerceIn(10, 100) ?: 30)) { item ->
                 HistoryCard(item, maskPrivacy, onClick = { onHistoryDetail(item) })
             }
         }
@@ -892,7 +946,7 @@ private fun CleanField(
         textStyle = MaterialTheme.typography.bodyMedium.copy(fontSize = 13.sp),
         shape = ShapeM,
         keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
-        modifier = modifier.fillMaxWidth().height(48.dp)
+        modifier = modifier.fillMaxWidth().height(52.dp)
     )
 }
 
@@ -906,7 +960,7 @@ private fun ParamField(label: String, value: String, onValueChange: (String) -> 
         textStyle = MaterialTheme.typography.bodyMedium.copy(fontSize = 13.sp),
         shape = ShapeM,
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-        modifier = modifier.height(48.dp)
+        modifier = modifier.height(56.dp)
     )
 }
 
@@ -928,7 +982,7 @@ private fun ModeSelector(mode: TestMode, onModeChange: (TestMode) -> Unit) {
                     .weight(1f)
                     .background(if (selected) Color.White else Color.Transparent, ShapeM)
                     .clickable { onModeChange(item) }
-                    .padding(vertical = 13.dp),
+                    .padding(vertical = 10.dp),
                 contentAlignment = Alignment.Center
             ) {
                 Text(item.label, color = if (selected) Blue else Muted, fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium, fontSize = 13.sp)

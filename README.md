@@ -1,4 +1,4 @@
-# NetSessionTester v0.6.6 UI History Limit
+# NetSessionTester v0.6.8 Fix Stop History
 
 宽带会话测试器，Kotlin + Jetpack Compose 原生版。
 
@@ -28,7 +28,7 @@
 ## 构建
 
 上传完整项目后进入 GitHub Actions，运行 Build Android APK。
-Artifact：NetSessionTester-v0.6.6-ui-history-limit-debug-apk
+Artifact：NetSessionTester-v0.6.8-fix-stop-history-debug-apk
 
 ## v0.6.1 修复
 
@@ -78,3 +78,13 @@ Artifact：NetSessionTester-v0.6.6-ui-history-limit-debug-apk
 - 设置页和测试页输入框、小框、标题、按钮字号继续缩小。
 - 修复“解析”按钮显示不全。
 - 检测历史增加保存数量选项：15 / 30 / 50 条。
+
+
+## v0.6.8 修复
+
+- 修复会话参数输入框数字被遮挡，输入框高度调整为更协调。
+- 运行日志二级页去掉右上角“清理”按钮，保留下面的“清理日志”。
+- 检测历史最多保存 100 条，页面可选显示 10 / 30 / 100 条。
+- 检测历史显示文件占用 KB。
+- 检测历史右上角“清理”只清理检测历史，不清运行日志。
+- 手动停止也会保存运行日志和检测历史，失败原因标记为“手动停止”。

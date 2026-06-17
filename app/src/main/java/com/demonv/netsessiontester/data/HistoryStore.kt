@@ -23,9 +23,15 @@ class HistoryStore(private val context: Context) {
 
     suspend fun trim(limit: Int) = withContext(Dispatchers.IO) {
         if (!file.exists()) return@withContext
-        val safeLimit = limit.coerceIn(15, 50)
+        val safeLimit = limit.coerceIn(10, 100)
         val lines = file.readLines().takeLast(safeLimit)
         file.writeText(lines.joinToString("\n") + if (lines.isNotEmpty()) "\n" else "")
+    }
+
+    fun sizeKb(): Int {
+        if (!file.exists()) return 0
+        val kb = (file.length() + 1023L) / 1024L
+        return kb.coerceAtLeast(0L).toInt()
     }
 
     suspend fun load(limit: Int = 30): List<SessionSummary> = withContext(Dispatchers.IO) {
