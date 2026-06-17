@@ -819,9 +819,10 @@ private fun FullRunLogPage(
                 if (logs.isEmpty()) {
                     Text("暂无日志", color = Muted, fontSize = 12.sp)
                 } else {
-                    logs.takeLast(500).forEachIndexed { index, line ->
+                    val visibleLogs = logs.takeLast(500).asReversed()
+                    visibleLogs.forEachIndexed { index, line ->
                         CompactLogLine(line, maskPrivacy)
-                        if (index != logs.takeLast(500).lastIndex) {
+                        if (index != visibleLogs.lastIndex) {
                             HorizontalDivider(color = Border.copy(alpha = 0.65f), thickness = 0.6.dp)
                         }
                     }
@@ -1082,9 +1083,10 @@ private fun RecentLogCard(logs: List<LogLine>, maskPrivacy: Boolean, onMore: () 
         if (logs.isEmpty()) {
             Text("暂无日志", color = Muted, fontSize = 12.sp)
         } else {
-            logs.takeLast(4).forEachIndexed { index, line ->
+            val visibleLogs = logs.takeLast(4).asReversed()
+            visibleLogs.forEachIndexed { index, line ->
                 CompactLogLine(line, maskPrivacy)
-                if (index != logs.takeLast(4).lastIndex) {
+                if (index != visibleLogs.lastIndex) {
                     HorizontalDivider(color = Border.copy(alpha = 0.65f), thickness = 0.6.dp)
                 }
             }

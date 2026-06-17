@@ -1,4 +1,4 @@
-# NetSessionTester v0.6.9 Log Count Fix
+# NetSessionTester v0.6.10 Log Newest First
 
 宽带会话测试器，Kotlin + Jetpack Compose 原生版。
 
@@ -28,7 +28,7 @@
 ## 构建
 
 上传完整项目后进入 GitHub Actions，运行 Build Android APK。
-Artifact：NetSessionTester-v0.6.9-log-count-fix-debug-apk
+Artifact：NetSessionTester-v0.6.10-log-newest-first-debug-apk
 
 ## v0.6.1 修复
 
@@ -96,3 +96,11 @@ Artifact：NetSessionTester-v0.6.9-log-count-fix-debug-apk
 - 运行日志继续累计保存，最多 500 条，超过自动清旧日志。
 - 修复运行日志显示条数与实际详情不一致的问题。
 - 检测历史新增显示累计已保存条数和占用 KB。
+
+
+## v0.6.10 修复
+
+- 运行日志详情页改为最新日志在最上面。
+- 第二次测试开始后，“目标 / 解析 / 新增 / 统计”等新日志会立即显示在顶部。
+- 测试页“最近日志”也改为最新 4 条倒序显示。
+- 底层运行日志仍累计保存最多 500 条，超过自动清旧日志。
