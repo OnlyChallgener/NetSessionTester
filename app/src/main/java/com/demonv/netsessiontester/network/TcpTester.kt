@@ -152,7 +152,7 @@ class TcpTester {
                 startedAtEpochMs = started
             )
             onStats(stats)
-            onLog(LogLine(level = LogLevel.STAT, text = "${protocol.label} 统计 - 成功：$totalSuccess(+${batchResult.successSockets.size}) | 失败：$totalFailure(+${batchResult.errors.values.sum()}) | 活动：$active | 总计：$totalAttempts | 本批尝试：$added | 建连速率：${cps}/秒"))
+            onLog(LogLine(level = LogLevel.STAT, text = "${protocol.label} 统计 - 成功：$totalSuccess(+${batchResult.successSockets.size}) | 失败：$totalFailure(+${batchResult.errors.values.sum()}) | 活动：$active | 总计：$totalAttempts | 新增：$added | CPS：${cps}/秒"))
 
             if (totalFailure >= config.failureLimit) {
                 onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 达到失败上限：${config.failureLimit}"))

@@ -6,7 +6,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 data class SavedSettings(
-    val host: String = "",
+    val host: String = "www.baidu.com",
     val port: String = "80",
     val mode: TestMode = TestMode.IPV4_THEN_IPV6,
     val batchSize: String = "100",
@@ -23,7 +23,7 @@ class SettingsStore(context: Context) {
 
     suspend fun load(): SavedSettings = withContext(Dispatchers.IO) {
         SavedSettings(
-            host = prefs.getString(KEY_HOST, "") ?: "",
+            host = prefs.getString(KEY_HOST, "www.baidu.com") ?: "www.baidu.com",
             port = prefs.getString(KEY_PORT, "80") ?: "80",
             mode = runCatching { TestMode.valueOf(prefs.getString(KEY_MODE, TestMode.IPV4_THEN_IPV6.name) ?: TestMode.IPV4_THEN_IPV6.name) }
                 .getOrDefault(TestMode.IPV4_THEN_IPV6),

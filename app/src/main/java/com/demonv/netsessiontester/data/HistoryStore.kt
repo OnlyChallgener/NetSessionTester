@@ -17,6 +17,10 @@ class HistoryStore(private val context: Context) {
         file.appendText(summary.toHistoryLine() + "\n")
     }
 
+    suspend fun clear() = withContext(Dispatchers.IO) {
+        if (file.exists()) file.delete()
+    }
+
     suspend fun load(limit: Int = 20): List<SessionSummary> = withContext(Dispatchers.IO) {
         if (!file.exists()) return@withContext emptyList()
         file.readLines().drop(1).takeLast(limit).mapNotNull { it.fromHistoryLineOrNull() }.reversed()
