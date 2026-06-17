@@ -1,56 +1,77 @@
-# 宽带会话测试器 / Net Session Tester
+# 宽带会话测试器 / Net Session Tester v0.2
 
-这是一个重新设计的 Android 原生项目，用于在手机上测试宽带 IPv4 / IPv6 TCP总会话数。
+这是一个 Android 原生 APP，用来测试当前宽带、路由器和运营商线路能稳定保持多少条 TCP 会话。
 
-> 使用提醒：请只测试自己的 VPS、路由器、内网服务器或已获得授权的目标。项目默认不内置公共网站目标，并在代码里限制最大并发，避免误用。
+重点不是测速，也不是压测服务器性能，而是：
 
-## 功能
+```text
+慢慢建立 TCP 连接
+成功后持续保持不关闭
+实时统计当前活动会话、成功、失败、CPS
+IPv4 / IPv6 分开测试
+直到达到成功上限或失败上限
+```
 
-- Kotlin + Jetpack Compose 原生 Android UI
-- 自适应布局：窄屏单列，宽屏双列
-- 支持自动 / 仅 IPv4 / 仅 IPv6
-- TCP Connect 并发测试
-- 自动递增并发
-- 失败率阈值自动停止
-- 显示成功率、失败率、平均延迟、P95、错误类型
+> 使用提醒：请只测试自己的 VPS、路由器、内网服务器或已获得授权的目标。不要对公共网站做高会话测试。
+
+## 主要功能
+
+- Kotlin + Jetpack Compose Android 原生 UI
+- TCP 会话保持测试，而不是一次性并发压测
+- 支持仅 IPv4、仅 IPv6、IPv4/IPv6 分别测试
+- DNS A / AAAA 解析结果分开显示
+- 目标成功会话数支持到 70000，可填 65535
+- 每批新增连接数、间隔、超时、失败停止可配置
+- 成功连接会持续保持，直到点击“释放连接”
+- 实时显示：当前活动、最大稳定、成功、失败、总计、CPS
+- 类似 Windows 工具的日志输出
 - 历史记录保存到本机
-- 当前测试结果导出 CSV
-- 自适应 Launcher 图标
+- CSV 导出日志和摘要
 - GitHub Actions 自动构建 Debug APK
+
+## 推荐参数
+
+普通测试：
+
+```text
+每批新增：16
+间隔 ms：1000
+超时 ms：3000
+失败停止：200
+目标成功会话数：65535
+测试完成后保持连接：开启
+```
+
+如果手机发热、APP 卡顿、路由器异常，先把每批新增改小，比如 8 或 16。
+
+## IPv4 / IPv6 说明
+
+IPv4 测试更接近 NAT 会话表测试。
+IPv6 通常没有传统 NAT，但路由器的 IPv6 防火墙也可能维护连接状态，所以也可以测试 IPv6 状态会话保持能力。
 
 ## GitHub 构建 APK
 
-1. 新建 GitHub 仓库。
-2. 把本项目所有文件上传到仓库根目录。
-3. 打开仓库的 `Actions`。
-4. 选择 `Build Android APK`。
-5. 点击 `Run workflow`。
-6. 构建完成后，在 `Artifacts` 下载 `NetSessionTester-debug-apk`。
-7. 解压后安装 APK 到小米 14 Pro / 澎湃 OS。
+1. 上传完整项目到 GitHub 仓库根目录。
+2. 打开 `Actions`。
+3. 选择 `Build Android APK`。
+4. 点击 `Run workflow`。
+5. 构建完成后，在 `Artifacts` 下载 `NetSessionTester-v0.2-session-debug-apk`。
+6. 解压后安装 APK。
 
-## 本地构建
+## 项目结构
 
-如果你本地安装了 Android Studio，可直接打开本项目。项目没有包含 Gradle Wrapper 二进制文件，GitHub Actions 会自动安装 Gradle 9.5.1。
-
-本地命令行构建可执行：
-
-```bash
-gradle assembleDebug
+```text
+app/src/main/java/com/demonv/netsessiontester/
+├── MainActivity.kt                  UI 界面
+├── network/TcpTester.kt             TCP 会话保持测试核心
+├── model/TestModels.kt              数据模型
+├── data/HistoryStore.kt             历史记录
+└── util/CsvExporter.kt              CSV 导出
 ```
 
-## 重要参数
+## 注意事项
 
-- 起始并发：默认 10
-- 最大并发：默认 200，代码最大限制 1000
-- 步长：默认 10
-- 超时：默认 3000 ms
-- 连接保持：默认 1000 ms
-- 失败阈值：默认 0.25，代表失败率达到 25% 自动停止
-
-## 后续可扩展
-
-- 前台服务通知，适合长时间测试
-- 图表曲线
-- 保存多个测试配置
-- Release 签名 APK / AAB
-- 自建测试服务端
+- APP 不需要 Root。
+- 长时间测试时请保持 APP 前台运行。
+- 65535 是目标会话数，不是一口气同时创建 65535 个连接；APP 会按批次慢慢累加。
+- 测试结果受手机、Wi-Fi、路由器、目标服务器、运营商线路共同影响。

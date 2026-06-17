@@ -3,80 +3,94 @@ package com.demonv.netsessiontester.model
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
-import kotlin.math.roundToInt
 
-enum class IpMode(val label: String) {
-    AUTO("自动"),
-    IPV4_ONLY("仅 IPv4"),
-    IPV6_ONLY("仅 IPv6")
+enum class IpProtocol(val label: String) {
+    IPV4("IPv4"),
+    IPV6("IPv6")
 }
 
-data class TestConfig(
+enum class TestMode(val label: String) {
+    IPV4_ONLY("仅 IPv4"),
+    IPV6_ONLY("仅 IPv6"),
+    IPV4_THEN_IPV6("IPv4 / IPv6 分别测试")
+}
+
+data class SessionConfig(
     val host: String,
     val port: Int,
-    val ipMode: IpMode,
-    val startConcurrency: Int,
-    val maxConcurrency: Int,
-    val step: Int,
+    val mode: TestMode,
+    val batchSize: Int,
+    val intervalMs: Long,
     val timeoutMs: Int,
-    val holdMs: Long,
-    val failureStopRate: Double
+    val successLimit: Int,
+    val failureLimit: Int,
+    val keepConnectionsAfterStop: Boolean
 ) {
-    fun normalized(): TestConfig {
+    fun normalized(): SessionConfig {
         val cleanHost = host.trim().removePrefix("[").removeSuffix("]")
         return copy(
             host = cleanHost,
             port = port.coerceIn(1, 65535),
-            startConcurrency = startConcurrency.coerceIn(1, SAFE_MAX_CONCURRENCY),
-            maxConcurrency = maxConcurrency.coerceIn(1, SAFE_MAX_CONCURRENCY),
-            step = step.coerceIn(1, SAFE_MAX_CONCURRENCY),
-            timeoutMs = timeoutMs.coerceIn(300, 10_000),
-            holdMs = holdMs.coerceIn(200, 60_000),
-            failureStopRate = failureStopRate.coerceIn(0.01, 0.95)
+            batchSize = batchSize.coerceIn(1, MAX_BATCH_SIZE),
+            intervalMs = intervalMs.coerceIn(100L, 60_000L),
+            timeoutMs = timeoutMs.coerceIn(300, 30_000),
+            successLimit = successLimit.coerceIn(1, MAX_SUCCESS_LIMIT),
+            failureLimit = failureLimit.coerceIn(1, MAX_FAILURE_LIMIT)
         )
     }
 
     companion object {
-        const val SAFE_MAX_CONCURRENCY = 1000
+        const val MAX_SUCCESS_LIMIT = 70_000
+        const val MAX_FAILURE_LIMIT = 100_000
+        const val MAX_BATCH_SIZE = 1_000
     }
 }
 
-data class SingleConnectionResult(
-    val success: Boolean,
-    val latencyMs: Long?,
-    val address: String,
-    val error: String?
+data class ResolveResult(
+    val host: String = "",
+    val ipv4: List<String> = emptyList(),
+    val ipv6: List<String> = emptyList(),
+    val error: String? = null
 )
 
-data class BatchResult(
-    val concurrency: Int,
-    val successCount: Int,
-    val failureCount: Int,
-    val avgLatencyMs: Long?,
-    val p95LatencyMs: Long?,
-    val minLatencyMs: Long?,
-    val maxLatencyMs: Long?,
-    val elapsedMs: Long,
-    val errorSummary: Map<String, Int>,
-    val addresses: List<String>
+data class ProtocolStats(
+    val protocol: IpProtocol,
+    val phase: String = "待测试",
+    val resolvedAddresses: List<String> = emptyList(),
+    val activeSessions: Int = 0,
+    val totalSuccess: Int = 0,
+    val totalFailure: Int = 0,
+    val totalAttempts: Int = 0,
+    val maxStableSessions: Int = 0,
+    val lastAdded: Int = 0,
+    val cps: Int = 0,
+    val errorSummary: Map<String, Int> = emptyMap(),
+    val startedAtEpochMs: Long? = null,
+    val finishedAtEpochMs: Long? = null
 ) {
-    val total: Int get() = successCount + failureCount
-    val successRate: Double get() = if (total == 0) 0.0 else successCount.toDouble() / total
-    val failureRate: Double get() = if (total == 0) 0.0 else failureCount.toDouble() / total
-
-    fun successRateText(): String = "${(successRate * 100).roundToInt()}%"
-    fun failureRateText(): String = "${(failureRate * 100).roundToInt()}%"
+    val isRunning: Boolean get() = phase.contains("测试中") || phase.contains("建连中")
 }
 
-data class TestSummary(
+data class LogLine(
+    val timeEpochMs: Long = System.currentTimeMillis(),
+    val level: LogLevel = LogLevel.INFO,
+    val text: String
+) {
+    val timeText: String
+        get() = DateTimeFormatter.ofPattern("HH:mm:ss.SSS")
+            .withZone(ZoneId.systemDefault())
+            .format(Instant.ofEpochMilli(timeEpochMs))
+}
+
+enum class LogLevel { INFO, SUCCESS, WARN, ERROR, STAT }
+
+data class SessionSummary(
     val startedAtEpochMs: Long,
     val host: String,
     val port: Int,
-    val ipMode: IpMode,
-    val stableConcurrency: Int,
-    val peakConcurrency: Int,
-    val finalSuccessRate: Double,
-    val batches: List<BatchResult>
+    val mode: TestMode,
+    val ipv4Stats: ProtocolStats?,
+    val ipv6Stats: ProtocolStats?
 ) {
     val startedAtText: String
         get() = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
@@ -85,10 +99,13 @@ data class TestSummary(
 }
 
 data class AppUiState(
-    val isRunning: Boolean = false,
+    val isAdding: Boolean = false,
     val status: String = "待测试",
-    val batches: List<BatchResult> = emptyList(),
-    val summary: TestSummary? = null,
-    val history: List<TestSummary> = emptyList(),
+    val resolveResult: ResolveResult = ResolveResult(),
+    val ipv4Stats: ProtocolStats = ProtocolStats(IpProtocol.IPV4),
+    val ipv6Stats: ProtocolStats = ProtocolStats(IpProtocol.IPV6),
+    val logs: List<LogLine> = emptyList(),
+    val history: List<SessionSummary> = emptyList(),
+    val summary: SessionSummary? = null,
     val error: String? = null
 )
