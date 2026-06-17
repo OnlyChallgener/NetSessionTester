@@ -1,4 +1,4 @@
-# NetSessionTester v0.6.8 Fix Stop History
+# NetSessionTester v0.6.9 Log Optimize
 
 宽带会话测试器，Kotlin + Jetpack Compose 原生版。
 
@@ -28,7 +28,7 @@
 ## 构建
 
 上传完整项目后进入 GitHub Actions，运行 Build Android APK。
-Artifact：NetSessionTester-v0.6.8-fix-stop-history-debug-apk
+Artifact：NetSessionTester-v0.6.9-log-optimize-debug-apk
 
 ## v0.6.1 修复
 
@@ -88,3 +88,12 @@ Artifact：NetSessionTester-v0.6.8-fix-stop-history-debug-apk
 - 检测历史显示文件占用 KB。
 - 检测历史右上角“清理”只清理检测历史，不清运行日志。
 - 手动停止也会保存运行日志和检测历史，失败原因标记为“手动停止”。
+
+
+## v0.6.9 修复
+
+- 设置页解析后的 IPv4 / IPv6 地址改为可横向滑动，便于查看完整 IPv6。
+- 测试页 IPv4 / IPv6 会话地址栏改为可横向滑动。
+- 开始第二次测试不再清空运行日志，运行日志最多保留 500 条。
+- 运行日志二级页顶部固定显示最新一轮“目标信息 + 解析地址”。
+- 统计 / 错误 / 完成等运行日志在固定信息下方按最新在上显示，避免一直滑到底部。

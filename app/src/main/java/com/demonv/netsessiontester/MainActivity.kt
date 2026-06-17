@@ -312,14 +312,12 @@ private fun NetSessionTesterApp() {
         currentStartedAt = startedAt
         currentTestConfig = config
         manualStopRequested = false
-        logStore.clearNow()
-        logSizeKb = 0
         state = state.copy(
             isAdding = true,
             status = "建连中",
             ipv4Stats = ProtocolStats(IpProtocol.IPV4),
             ipv6Stats = ProtocolStats(IpProtocol.IPV6),
-            logs = emptyList(),
+            logs = state.logs.takeLast(500),
             summary = null,
             error = null
         )
@@ -774,6 +772,10 @@ private fun FullRunLogPage(
     onExport: () -> Unit,
     onClear: () -> Unit
 ) {
+    val latestLogs = logs.takeLast(500)
+    val pinned = pinnedRunLogLines(latestLogs)
+    val dynamic = dynamicRunLogLines(latestLogs, pinned)
+
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -810,14 +812,20 @@ private fun FullRunLogPage(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     SectionTitle("□", "全部日志", Blue)
                     Spacer(Modifier.weight(1f))
-                    Text("${logs.takeLast(500).size} 条 · 占用 ${logSizeKb}KB", color = Muted, fontSize = 11.sp)
+                    Text("${latestLogs.size} 条 · 占用 ${logSizeKb}KB", color = Muted, fontSize = 11.sp)
                 }
-                if (logs.isEmpty()) {
+                if (latestLogs.isEmpty()) {
                     Text("暂无日志", color = Muted, fontSize = 12.sp)
                 } else {
-                    logs.takeLast(500).forEachIndexed { index, line ->
+                    pinned.forEachIndexed { index, line ->
                         CompactLogLine(line, maskPrivacy)
-                        if (index != logs.takeLast(500).lastIndex) {
+                        if (index != pinned.lastIndex || dynamic.isNotEmpty()) {
+                            HorizontalDivider(color = Border.copy(alpha = 0.65f), thickness = 0.6.dp)
+                        }
+                    }
+                    dynamic.forEachIndexed { index, line ->
+                        CompactLogLine(line, maskPrivacy)
+                        if (index != dynamic.lastIndex) {
                             HorizontalDivider(color = Border.copy(alpha = 0.65f), thickness = 0.6.dp)
                         }
                     }
@@ -1009,13 +1017,19 @@ private fun SessionStatsCard(title: String, stats: ProtocolStats, maskPrivacy: B
             MetricTile("CPS", "${stats.cps}/s", Blue, Modifier.weight(1f))
         }
         if (stats.resolvedAddresses.isNotEmpty()) {
-            Text(
-                "地址：${displayIpList(stats.resolvedAddresses, maskPrivacy)}",
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                color = Muted,
-                fontSize = 12.sp
-            )
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+            ) {
+                Text(
+                    "地址：${displayIpList(stats.resolvedAddresses, maskPrivacy)}",
+                    maxLines = 1,
+                    softWrap = false,
+                    color = Muted,
+                    fontSize = 12.sp
+                )
+            }
         }
     }
 }
@@ -1233,9 +1247,15 @@ private fun iconFor(mark: String) = when (mark) {
 
 @Composable
 private fun InfoLine(label: String, value: String, color: Color = TextDark) {
-    Row {
+    Row(verticalAlignment = Alignment.CenterVertically) {
         Text("$label：", color = Muted, fontSize = 12.sp, modifier = Modifier.width(54.dp))
-        Text(value, color = color, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .horizontalScroll(rememberScrollState())
+        ) {
+            Text(value, color = color, fontSize = 12.sp, maxLines = 1, softWrap = false)
+        }
     }
 }
 
@@ -1285,8 +1305,35 @@ private fun stopForegroundNotice(context: Context) {
 }
 
 
+
+private fun pinnedRunLogLines(logs: List<LogLine>): List<LogLine> {
+    if (logs.isEmpty()) return emptyList()
+    val latestTargetIndex = logs.indexOfLast { it.level == LogLevel.INFO && it.text.startsWith("目标：") }
+    val startIndex = if (latestTargetIndex >= 0) latestTargetIndex else 0
+    val latestTarget = logs.getOrNull(latestTargetIndex)
+
+    val latestResolve = logs
+        .drop(startIndex.coerceAtLeast(0))
+        .lastOrNull { line ->
+            line.level == LogLevel.SUCCESS && line.text.contains("解析成功")
+        }
+
+    return listOfNotNull(latestTarget, latestResolve).distinct()
+}
+
+private fun dynamicRunLogLines(logs: List<LogLine>, pinned: List<LogLine>): List<LogLine> {
+    val pinnedKeys = pinned.map { "${it.timeEpochMs}|${it.level}|${it.text}" }.toSet()
+    val latestTargetIndex = logs.indexOfLast { it.level == LogLevel.INFO && it.text.startsWith("目标：") }
+    val scopedLogs = if (latestTargetIndex >= 0) logs.drop(latestTargetIndex) else logs
+    return scopedLogs
+        .filterNot { "${it.timeEpochMs}|${it.level}|${it.text}" in pinnedKeys }
+        .asReversed()
+}
+
 private fun compactLogText(text: String): String {
     return text
+        .replace("目标：", "")
+        .replace(" | 模式：", " | 模式：")
         .replace("统计 - 成功：", "成功 ")
         .replace(" | 失败：", " 失败 ")
         .replace(" | 活动：", " 活动 ")
