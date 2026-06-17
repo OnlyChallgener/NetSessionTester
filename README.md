@@ -1,8 +1,14 @@
-# NetSessionTester v0.4
+# NetSessionTester v0.5 React + Kotlin
 
-安卓宽带会话测试器。用于 TCP 会话保持测试，支持 IPv4 / IPv6 分别测试。
+宽带会话测试器：React 前端 + Kotlin 原生 TCP 核心。
 
-## 当前默认参数
+## 架构
+
+- 前端 UI：React + CSS，打包到 Android assets，通过 WebView 加载。
+- 原生核心：Kotlin，负责 TCP 会话保持、IPv4/IPv6 解析、前台服务、日志、历史、CSV 导出。
+- JSBridge：React 调用 Kotlin，Kotlin 推送实时统计到 React。
+
+## 默认参数
 
 - 默认地址：www.baidu.com
 - 端口：80
@@ -13,24 +19,21 @@
 - 目标会话：65535
 - 测试完成后保持连接：开启
 
-## 主要功能
+## 功能
 
-- TCP 会话保持测试，不是下载测速，也不是 QPS 压测。
 - 支持仅 IPv4、仅 IPv6、IPv4 / IPv6 分别测试。
-- DNS 解析区分 IPv4 A 记录和 IPv6 AAAA 记录。
-- 会话成功后持续保持，直到点击“释放”。
-- 测试页统计：活动、失败、总计、新增、CPS。
-- 失败原因统计：超时、拒绝、端口耗尽、FD 上限、网络不可达等。
-- 日志与检测历史归集到“日志”页。
-- 支持日志 / CSV 导出。
-- 支持清理日志与历史。
-- 支持隐私打码，隐藏 IP / 公网地址。
+- TCP 会话保持测试，成功连接会持续保持。
+- 测试统计：活动、失败、总计、新增、CPS。
+- 失败原因细分：超时、拒绝、端口耗尽、FD 上限、网络不可达等。
+- 日志与检测历史集中在“日志”页。
+- 支持隐私打码、导出 CSV、清理日志/历史、自动保存设置。
 - 支持前台服务，降低长时间测试被系统回收概率。
-- 退出后自动保存上一次设置。
 
-## GitHub Actions 构建
+## GitHub Actions
 
-上传到 GitHub 后，进入 Actions，运行 `Build Android APK`。构建完成后下载 Artifacts 中的 APK。
+上传完整项目后进入 Actions，运行 `Build Android APK`。构建完成后下载 Artifact：
+
+`NetSessionTester-v0.5-react-kotlin-debug-apk`
 
 ## 注意
 
