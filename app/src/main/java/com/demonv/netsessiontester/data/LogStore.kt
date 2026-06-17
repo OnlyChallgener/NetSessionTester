@@ -16,7 +16,7 @@ class LogStore(private val context: Context) {
         trimIfNeeded()
     }
 
-    suspend fun load(limit: Int = 800): List<LogLine> = withContext(Dispatchers.IO) {
+    suspend fun load(limit: Int = 500): List<LogLine> = withContext(Dispatchers.IO) {
         if (!file.exists()) return@withContext emptyList()
         file.readLines().takeLast(limit).mapNotNull { raw ->
             runCatching { JSONObject(raw).toLogLine() }.getOrNull()
@@ -31,7 +31,13 @@ class LogStore(private val context: Context) {
         if (file.exists()) file.delete()
     }
 
-    private fun trimIfNeeded(maxLines: Int = 1000) {
+    fun sizeKb(): Int {
+        if (!file.exists()) return 0
+        val kb = (file.length() + 1023L) / 1024L
+        return kb.coerceAtLeast(0L).toInt()
+    }
+
+    private fun trimIfNeeded(maxLines: Int = 500) {
         if (!file.exists()) return
         val lines = file.readLines()
         if (lines.size > maxLines) {

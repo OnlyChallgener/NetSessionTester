@@ -166,6 +166,8 @@ private fun NetSessionTesterApp() {
     var failureLimit by remember { mutableStateOf("200") }
     var keepConnections by remember { mutableStateOf(true) }
     var maskPrivacy by remember { mutableStateOf(false) }
+    var historyLimit by remember { mutableStateOf("30") }
+    var logSizeKb by remember { mutableStateOf(0) }
 
     var detailTitle by remember { mutableStateOf<String?>(null) }
     var detailLines by remember { mutableStateOf<List<String>>(emptyList()) }
@@ -205,7 +207,8 @@ private fun NetSessionTesterApp() {
     }
 
     LaunchedEffect(Unit) {
-        state = state.copy(history = historyStore.load(), logs = logStore.load())
+        state = state.copy(history = historyStore.load(30), logs = logStore.load())
+        logSizeKb = logStore.sizeKb()
         val saved = settingsStore.load()
         host = saved.host.ifBlank { "www.baidu.com" }
         port = saved.port
@@ -217,12 +220,14 @@ private fun NetSessionTesterApp() {
         failureLimit = saved.failureLimit
         keepConnections = saved.keepConnections
         maskPrivacy = saved.maskPrivacy
+        historyLimit = saved.historyLimit
+        state = state.copy(history = historyStore.load(saved.historyLimit.toIntOrNull()?.coerceIn(15, 50) ?: 30))
         settingsLoaded = true
     }
 
     LaunchedEffect(
         settingsLoaded, host, port, mode, batchSize, intervalMs, timeoutMs,
-        successLimit, failureLimit, keepConnections, maskPrivacy
+        successLimit, failureLimit, keepConnections, maskPrivacy, historyLimit
     ) {
         if (settingsLoaded) {
             settingsStore.save(
@@ -236,15 +241,16 @@ private fun NetSessionTesterApp() {
                     successLimit = successLimit,
                     failureLimit = failureLimit,
                     keepConnections = keepConnections,
-                    maskPrivacy = maskPrivacy
+                    maskPrivacy = maskPrivacy,
+                    historyLimit = historyLimit
                 )
             )
         }
     }
 
     fun appendLog(line: LogLine) {
-        state = state.copy(logs = (state.logs + line).takeLast(800))
-        scope.launch { logStore.append(line) }
+        state = state.copy(logs = (state.logs + line).takeLast(500))
+        scope.launch { logStore.append(line); logSizeKb = logStore.sizeKb() }
     }
 
     fun ensureNotificationPermission() {
@@ -299,6 +305,7 @@ private fun NetSessionTesterApp() {
         startForegroundNotice(context, "建连中：${config.mode.label}，目标 ${config.successLimit}")
         val startedAt = System.currentTimeMillis()
         logStore.clearNow()
+        logSizeKb = 0
         state = state.copy(
             isAdding = true,
             status = "建连中",
@@ -341,11 +348,13 @@ private fun NetSessionTesterApp() {
                     }
                 )
                 historyStore.append(summary)
+                val safeHistoryLimit = historyLimit.toIntOrNull()?.coerceIn(15, 50) ?: 30
+                historyStore.trim(safeHistoryLimit)
                 state = state.copy(
                     isAdding = false,
                     status = "测试完成",
                     summary = summary,
-                    history = historyStore.load()
+                    history = historyStore.load(safeHistoryLimit)
                 )
                 if (config.keepConnectionsAfterStop) {
                     updateForegroundNotice(context, "测试完成，连接保持中")
@@ -396,6 +405,7 @@ private fun NetSessionTesterApp() {
         scope.launch {
             historyStore.clear()
             logStore.clear()
+            logSizeKb = 0
             state = state.copy(logs = emptyList(), history = emptyList())
             snackbarHostState.showSnackbar("已清理")
         }
@@ -443,12 +453,14 @@ private fun NetSessionTesterApp() {
             if (showRunLogDetail) {
                 FullRunLogPage(
                     logs = state.logs,
+                    logSizeKb = logSizeKb,
                     maskPrivacy = maskPrivacy,
                     onBack = { showRunLogDetail = false },
                     onExport = { exportLogs() },
                     onClear = {
                         scope.launch {
                             logStore.clear()
+                            logSizeKb = 0
                             state = state.copy(logs = emptyList())
                         }
                     }
@@ -481,7 +493,7 @@ private fun NetSessionTesterApp() {
                     onRestoreDefault = {
                         host = "www.baidu.com"; port = "80"; mode = TestMode.IPV4_THEN_IPV6
                         batchSize = "100"; intervalMs = "500"; timeoutMs = "3000"
-                        successLimit = "65535"; failureLimit = "200"; keepConnections = true; maskPrivacy = false
+                        successLimit = "65535"; failureLimit = "200"; keepConnections = true; maskPrivacy = false; historyLimit = "30"
                     }
                 )
 
@@ -509,9 +521,18 @@ private fun NetSessionTesterApp() {
                 MainTab.LOGS -> LogsPage(
                     logs = state.logs,
                     history = state.history,
+                    historyLimit = historyLimit,
                     maskPrivacy = maskPrivacy,
                     onExport = { exportLogs() },
                     onClear = { clearLogsAndHistory() },
+                    onHistoryLimitChange = { limit ->
+                        historyLimit = limit
+                        scope.launch {
+                            val safeLimit = limit.toIntOrNull()?.coerceIn(15, 50) ?: 30
+                            historyStore.trim(safeLimit)
+                            state = state.copy(history = historyStore.load(safeLimit))
+                        }
+                    },
                     onHistoryDetail = { summary ->
                         showDetail("检测详情", historyDetailLines(summary, maskPrivacy))
                     }
@@ -564,15 +585,15 @@ private fun SettingsPage(
                 FieldLabel("端口")
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
                     CleanField(port, { onPortChange(it.onlyDigits()) }, "80", Modifier.weight(1f), KeyboardType.Number)
-                    OutlinedButton(onClick = onResolve, shape = ShapeM, modifier = Modifier.height(44.dp).width(96.dp)) {
-                        Icon(Icons.Filled.Search, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("解析", fontSize = 13.sp)
+                    OutlinedButton(onClick = onResolve, shape = ShapeM, modifier = Modifier.height(44.dp).width(104.dp)) {
+                        Icon(Icons.Filled.Search, contentDescription = null, modifier = Modifier.width(15.dp).height(15.dp)); Spacer(Modifier.width(3.dp)); Text("解析", fontSize = 12.sp)
                     }
                 }
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     MarkBox("□", Color(0xFFEFF6FF), Blue)
                     Spacer(Modifier.width(10.dp))
                     Column(Modifier.weight(1f)) {
-                        Text("打码", fontWeight = FontWeight.Bold, color = TextDark)
+                        Text("打码", fontWeight = FontWeight.Bold, color = TextDark, fontSize = 13.sp)
                         Text("隐藏 IP / 公网地址显示和导出", color = Muted, fontSize = 12.sp, maxLines = 1)
                     }
                     Switch(checked = maskPrivacy, onCheckedChange = onMaskPrivacyChange)
@@ -605,7 +626,7 @@ private fun SettingsPage(
                 }
                 ParamField("目标会话（条）", successLimit, onSuccessLimitChange, Modifier.fillMaxWidth())
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("完成后保持连接", modifier = Modifier.weight(1f), color = TextDark)
+                    Text("完成后保持连接", modifier = Modifier.weight(1f), color = TextDark, fontSize = 13.sp)
                     Switch(checked = keepConnections, onCheckedChange = onKeepConnectionsChange)
                 }
                 Text("参数将用于后续测试，可随时修改并保存。", color = Muted, fontSize = 12.sp)
@@ -692,6 +713,7 @@ private fun TestPage(
 @Composable
 private fun FullRunLogPage(
     logs: List<LogLine>,
+    logSizeKb: Int,
     maskPrivacy: Boolean,
     onBack: () -> Unit,
     onExport: () -> Unit,
@@ -707,10 +729,10 @@ private fun FullRunLogPage(
         item {
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 10.dp, bottom = 6.dp)) {
                 TextButton(onClick = onBack, modifier = Modifier.width(52.dp)) {
-                    Text("‹", fontSize = 28.sp, fontWeight = FontWeight.Bold, color = TextDark)
+                    Text("‹", fontSize = 26.sp, fontWeight = FontWeight.Bold, color = TextDark)
                 }
-                Text("运行日志", fontSize = 22.sp, fontWeight = FontWeight.ExtraBold, color = TextDark, modifier = Modifier.weight(1f))
-                OutlinedButton(onClick = onClear, shape = ShapeM, modifier = Modifier.height(38.dp)) {
+                Text("运行日志", fontSize = 21.sp, fontWeight = FontWeight.ExtraBold, color = TextDark, modifier = Modifier.weight(1f))
+                OutlinedButton(onClick = onClear, shape = ShapeM, modifier = Modifier.height(34.dp)) {
                     Icon(Icons.Filled.DeleteOutline, contentDescription = null, modifier = Modifier.width(16.dp).height(16.dp))
                     Spacer(Modifier.width(4.dp))
                     Text("清理", fontSize = 12.sp)
@@ -738,14 +760,14 @@ private fun FullRunLogPage(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     SectionTitle("□", "全部日志", Blue)
                     Spacer(Modifier.weight(1f))
-                    Text("${logs.size} 条", color = Muted, fontSize = 12.sp)
+                    Text("${logs.takeLast(500).size} 条 · 占用 ${logSizeKb}KB", color = Muted, fontSize = 11.sp)
                 }
                 if (logs.isEmpty()) {
                     Text("暂无日志", color = Muted, fontSize = 12.sp)
                 } else {
-                    logs.takeLast(120).forEachIndexed { index, line ->
+                    logs.takeLast(500).forEachIndexed { index, line ->
                         CompactLogLine(line, maskPrivacy)
-                        if (index != logs.takeLast(120).lastIndex) {
+                        if (index != logs.takeLast(500).lastIndex) {
                             HorizontalDivider(color = Border.copy(alpha = 0.65f), thickness = 0.6.dp)
                         }
                     }
@@ -760,9 +782,11 @@ private fun FullRunLogPage(
 private fun LogsPage(
     logs: List<LogLine>,
     history: List<SessionSummary>,
+    historyLimit: String,
     maskPrivacy: Boolean,
     onExport: () -> Unit,
     onClear: () -> Unit,
+    onHistoryLimitChange: (String) -> Unit,
     onHistoryDetail: (SessionSummary) -> Unit
 ) {
     LazyColumn(
@@ -774,18 +798,25 @@ private fun LogsPage(
     ) {
         item {
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 10.dp, bottom = 6.dp)) {
-                Text("检测历史", fontSize = 22.sp, fontWeight = FontWeight.ExtraBold, color = TextDark, modifier = Modifier.weight(1f))
-                OutlinedButton(onClick = onClear, shape = ShapeM, modifier = Modifier.height(38.dp)) {
-                    Icon(Icons.Filled.DeleteOutline, contentDescription = null, modifier = Modifier.width(16.dp).height(16.dp))
+                Text("检测历史", fontSize = 21.sp, fontWeight = FontWeight.ExtraBold, color = TextDark, modifier = Modifier.weight(1f))
+                OutlinedButton(onClick = onClear, shape = ShapeM, modifier = Modifier.height(36.dp)) {
+                    Icon(Icons.Filled.DeleteOutline, contentDescription = null, modifier = Modifier.width(15.dp).height(15.dp))
                     Spacer(Modifier.width(4.dp))
-                    Text("清理", fontSize = 12.sp)
+                    Text("清理", fontSize = 11.sp)
+                }
+            }
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                listOf("15", "30", "50").forEach { limit ->
+                    Box(modifier = Modifier.clickable { onHistoryLimitChange(limit) }) {
+                        StatusChip("保存 ${limit} 条", if (historyLimit == limit) BlueSoft else Color.White, if (historyLimit == limit) Blue else Muted, compact = true)
+                    }
                 }
             }
         }
         if (history.isEmpty()) {
             item { SoftCard { Text("暂无历史记录", color = TextDark, fontSize = 13.sp) } }
         } else {
-            items(history.take(30)) { item ->
+            items(history.take(historyLimit.toIntOrNull()?.coerceIn(15, 50) ?: 30)) { item ->
                 HistoryCard(item, maskPrivacy, onClick = { onHistoryDetail(item) })
             }
         }
@@ -796,7 +827,7 @@ private fun LogsPage(
 @Composable
 private fun PageTitle(title: String, subtitle: String?) {
     Column(modifier = Modifier.padding(top = 12.dp, bottom = 4.dp)) {
-        Text(title, fontSize = 24.sp, lineHeight = 30.sp, fontWeight = FontWeight.ExtraBold, color = TextDark)
+        Text(title, fontSize = 23.sp, lineHeight = 27.sp, fontWeight = FontWeight.ExtraBold, color = TextDark)
         subtitle?.let {
             Text(it, fontSize = 13.sp, color = Muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
@@ -832,11 +863,11 @@ private fun SectionTitle(mark: String, title: String, color: Color) {
 private fun MarkBox(mark: String, bg: Color, fg: Color) {
     Box(
         modifier = Modifier
-            .background(bg, RoundedCornerShape(12.dp))
-            .padding(8.dp),
+            .background(bg, RoundedCornerShape(11.dp))
+            .padding(7.dp),
         contentAlignment = Alignment.Center
     ) {
-        Icon(iconFor(mark), contentDescription = null, tint = fg, modifier = Modifier.width(18.dp).height(18.dp))
+        Icon(iconFor(mark), contentDescription = null, tint = fg, modifier = Modifier.width(16.dp).height(16.dp))
     }
 }
 
@@ -861,7 +892,7 @@ private fun CleanField(
         textStyle = MaterialTheme.typography.bodyMedium.copy(fontSize = 13.sp),
         shape = ShapeM,
         keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
-        modifier = modifier.fillMaxWidth()
+        modifier = modifier.fillMaxWidth().height(48.dp)
     )
 }
 
@@ -875,7 +906,7 @@ private fun ParamField(label: String, value: String, onValueChange: (String) -> 
         textStyle = MaterialTheme.typography.bodyMedium.copy(fontSize = 13.sp),
         shape = ShapeM,
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-        modifier = modifier
+        modifier = modifier.height(48.dp)
     )
 }
 
@@ -900,7 +931,7 @@ private fun ModeSelector(mode: TestMode, onModeChange: (TestMode) -> Unit) {
                     .padding(vertical = 13.dp),
                 contentAlignment = Alignment.Center
             ) {
-                Text(item.label, color = if (selected) Blue else Muted, fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium)
+                Text(item.label, color = if (selected) Blue else Muted, fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium, fontSize = 13.sp)
             }
         }
     }
@@ -944,8 +975,8 @@ private fun MetricTile(label: String, value: String, color: Color, modifier: Mod
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
     ) {
         Column(Modifier.padding(8.dp)) {
-            Text(label, color = Muted, fontSize = 12.sp, maxLines = 1)
-            Text(value, color = color, fontSize = 16.sp, lineHeight = 19.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+            Text(label, color = Muted, fontSize = 11.sp, maxLines = 1)
+            Text(value, color = color, fontSize = 15.sp, lineHeight = 18.sp, fontWeight = FontWeight.Bold, maxLines = 1)
         }
     }
 }
@@ -992,9 +1023,9 @@ private fun RecentLogCard(logs: List<LogLine>, maskPrivacy: Boolean, onMore: () 
         if (logs.isEmpty()) {
             Text("暂无日志", color = Muted, fontSize = 12.sp)
         } else {
-            logs.takeLast(3).forEachIndexed { index, line ->
+            logs.takeLast(4).forEachIndexed { index, line ->
                 CompactLogLine(line, maskPrivacy)
-                if (index != logs.takeLast(3).lastIndex) {
+                if (index != logs.takeLast(4).lastIndex) {
                     HorizontalDivider(color = Border.copy(alpha = 0.65f), thickness = 0.6.dp)
                 }
             }

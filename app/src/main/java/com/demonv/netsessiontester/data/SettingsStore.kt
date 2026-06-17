@@ -15,7 +15,8 @@ data class SavedSettings(
     val successLimit: String = "65535",
     val failureLimit: String = "200",
     val keepConnections: Boolean = true,
-    val maskPrivacy: Boolean = false
+    val maskPrivacy: Boolean = false,
+    val historyLimit: String = "30"
 )
 
 class SettingsStore(context: Context) {
@@ -33,7 +34,8 @@ class SettingsStore(context: Context) {
             successLimit = prefs.getString(KEY_SUCCESS_LIMIT, "65535") ?: "65535",
             failureLimit = prefs.getString(KEY_FAILURE_LIMIT, "200") ?: "200",
             keepConnections = prefs.getBoolean(KEY_KEEP_CONNECTIONS, true),
-            maskPrivacy = prefs.getBoolean(KEY_MASK_PRIVACY, false)
+            maskPrivacy = prefs.getBoolean(KEY_MASK_PRIVACY, false),
+            historyLimit = prefs.getString(KEY_HISTORY_LIMIT, "30") ?: "30"
         )
     }
 
@@ -49,6 +51,7 @@ class SettingsStore(context: Context) {
             .putString(KEY_FAILURE_LIMIT, settings.failureLimit)
             .putBoolean(KEY_KEEP_CONNECTIONS, settings.keepConnections)
             .putBoolean(KEY_MASK_PRIVACY, settings.maskPrivacy)
+            .putString(KEY_HISTORY_LIMIT, settings.historyLimit)
             .apply()
     }
 
@@ -63,5 +66,6 @@ class SettingsStore(context: Context) {
         private const val KEY_FAILURE_LIMIT = "failure_limit"
         private const val KEY_KEEP_CONNECTIONS = "keep_connections"
         private const val KEY_MASK_PRIVACY = "mask_privacy"
+        private const val KEY_HISTORY_LIMIT = "history_limit"
     }
 }

@@ -1,4 +1,4 @@
-# NetSessionTester v0.6.5 Persist Logs
+# NetSessionTester v0.6.6 UI History Limit
 
 宽带会话测试器，Kotlin + Jetpack Compose 原生版。
 
@@ -28,7 +28,7 @@
 ## 构建
 
 上传完整项目后进入 GitHub Actions，运行 Build Android APK。
-Artifact：NetSessionTester-v0.6.5-persist-logs-debug-apk
+Artifact：NetSessionTester-v0.6.6-ui-history-limit-debug-apk
 
 ## v0.6.1 修复
 
@@ -69,3 +69,12 @@ Artifact：NetSessionTester-v0.6.5-persist-logs-debug-apk
 - 运行日志改为本地持久化保存。
 - APP 退出后再次打开，会自动恢复最近运行日志。
 - 只有点击清理日志/清理时才删除日志文件。
+
+
+## v0.6.6 修复
+
+- 测试页最近日志显示 4 条。
+- 运行日志二级页最多保留/显示 500 条，多余自动清理，并显示日志占用 KB。
+- 设置页和测试页输入框、小框、标题、按钮字号继续缩小。
+- 修复“解析”按钮显示不全。
+- 检测历史增加保存数量选项：15 / 30 / 50 条。
