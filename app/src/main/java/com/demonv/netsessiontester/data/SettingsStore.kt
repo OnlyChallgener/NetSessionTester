@@ -19,7 +19,7 @@ data class SavedSettings(
 )
 
 class SettingsStore(context: Context) {
-    private val prefs = context.getSharedPreferences("net_session_settings", Context.MODE_PRIVATE)
+    private val prefs = context.getSharedPreferences("net_session_settings_v6", Context.MODE_PRIVATE)
 
     suspend fun load(): SavedSettings = withContext(Dispatchers.IO) {
         SavedSettings(
@@ -39,7 +39,7 @@ class SettingsStore(context: Context) {
 
     suspend fun save(settings: SavedSettings) = withContext(Dispatchers.IO) {
         prefs.edit()
-            .putString(KEY_HOST, settings.host)
+            .putString(KEY_HOST, settings.host.ifBlank { "www.baidu.com" })
             .putString(KEY_PORT, settings.port)
             .putString(KEY_MODE, settings.mode.name)
             .putString(KEY_BATCH_SIZE, settings.batchSize)

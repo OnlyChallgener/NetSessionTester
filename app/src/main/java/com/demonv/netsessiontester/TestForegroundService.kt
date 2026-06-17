@@ -39,9 +39,7 @@ class TestForegroundService : Service() {
                 CHANNEL_ID,
                 "会话测试前台服务",
                 NotificationManager.IMPORTANCE_LOW
-            ).apply {
-                description = "测试运行或连接保持时显示，降低后台被系统回收概率"
-            }
+            )
             getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
         }
     }

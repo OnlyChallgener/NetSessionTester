@@ -7,79 +7,77 @@ import com.demonv.netsessiontester.model.SessionSummary
 import com.demonv.netsessiontester.model.TestMode
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 import java.io.File
 
 class HistoryStore(private val context: Context) {
-    private val file: File get() = File(context.filesDir, "session_history.csv")
+    private val file: File get() = File(context.filesDir, "session_history_v6.jsonl")
 
     suspend fun append(summary: SessionSummary) = withContext(Dispatchers.IO) {
-        if (!file.exists()) file.writeText(HEADER + "\n")
-        file.appendText(summary.toHistoryLine() + "\n")
+        file.appendText(summary.toJson().toString() + "\n")
     }
 
     suspend fun clear() = withContext(Dispatchers.IO) {
         if (file.exists()) file.delete()
     }
 
-    suspend fun load(limit: Int = 20): List<SessionSummary> = withContext(Dispatchers.IO) {
+    suspend fun load(limit: Int = 30): List<SessionSummary> = withContext(Dispatchers.IO) {
         if (!file.exists()) return@withContext emptyList()
-        file.readLines().drop(1).takeLast(limit).mapNotNull { it.fromHistoryLineOrNull() }.reversed()
+        file.readLines().takeLast(limit).mapNotNull { line ->
+            runCatching { JSONObject(line).toSummary() }.getOrNull()
+        }.reversed()
     }
 
-    private fun SessionSummary.toHistoryLine(): String = listOf(
-        startedAtEpochMs.toString(), csv(host), port.toString(), mode.name,
-        (ipv4Stats?.maxStableSessions ?: 0).toString(),
-        (ipv4Stats?.totalFailure ?: 0).toString(),
-        (ipv6Stats?.maxStableSessions ?: 0).toString(),
-        (ipv6Stats?.totalFailure ?: 0).toString()
-    ).joinToString(",")
+    private fun SessionSummary.toJson(): JSONObject = JSONObject()
+        .put("startedAtEpochMs", startedAtEpochMs)
+        .put("host", host)
+        .put("port", port)
+        .put("mode", mode.name)
+        .put("ipv4Stats", ipv4Stats?.toJson())
+        .put("ipv6Stats", ipv6Stats?.toJson())
 
-    private fun String.fromHistoryLineOrNull(): SessionSummary? {
-        val parts = splitCsv(this)
-        if (parts.size < 8) return null
-        return runCatching {
-            val ipv4 = parts[4].toInt().takeIf { it > 0 }?.let {
-                ProtocolStats(protocol = IpProtocol.IPV4, phase = "历史", maxStableSessions = it, totalFailure = parts[5].toInt())
-            }
-            val ipv6 = parts[6].toInt().takeIf { it > 0 }?.let {
-                ProtocolStats(protocol = IpProtocol.IPV6, phase = "历史", maxStableSessions = it, totalFailure = parts[7].toInt())
-            }
-            SessionSummary(
-                startedAtEpochMs = parts[0].toLong(),
-                host = parts[1],
-                port = parts[2].toInt(),
-                mode = TestMode.valueOf(parts[3]),
-                ipv4Stats = ipv4,
-                ipv6Stats = ipv6
-            )
-        }.getOrNull()
-    }
+    private fun ProtocolStats.toJson(): JSONObject = JSONObject()
+        .put("protocol", protocol.name)
+        .put("phase", phase)
+        .put("addresses", resolvedAddresses.joinToString("|"))
+        .put("active", activeSessions)
+        .put("failure", totalFailure)
+        .put("total", totalAttempts)
+        .put("added", lastAdded)
+        .put("cps", cps)
+        .put("success", totalSuccess)
+        .put("stable", maxStableSessions)
+        .put("errors", JSONObject(errorSummary))
 
-    private fun csv(value: String): String {
-        val escaped = value.replace("\"", "\"\"")
-        return if (escaped.any { it == ',' || it == '"' || it == '\n' }) "\"$escaped\"" else escaped
-    }
+    private fun JSONObject.toSummary(): SessionSummary = SessionSummary(
+        startedAtEpochMs = optLong("startedAtEpochMs"),
+        host = optString("host", "www.baidu.com"),
+        port = optInt("port", 80),
+        mode = runCatching { TestMode.valueOf(optString("mode", TestMode.IPV4_THEN_IPV6.name)) }.getOrDefault(TestMode.IPV4_THEN_IPV6),
+        ipv4Stats = optJSONObject("ipv4Stats")?.toStats(),
+        ipv6Stats = optJSONObject("ipv6Stats")?.toStats()
+    )
 
-    private fun splitCsv(line: String): List<String> {
-        val out = mutableListOf<String>()
-        val sb = StringBuilder()
-        var inQuotes = false
-        var i = 0
-        while (i < line.length) {
-            val ch = line[i]
-            when {
-                ch == '"' && inQuotes && i + 1 < line.length && line[i + 1] == '"' -> { sb.append('"'); i++ }
-                ch == '"' -> inQuotes = !inQuotes
-                ch == ',' && !inQuotes -> { out += sb.toString(); sb.clear() }
-                else -> sb.append(ch)
-            }
-            i++
+    private fun JSONObject.toStats(): ProtocolStats {
+        val errorsObj = optJSONObject("errors") ?: JSONObject()
+        val errors = mutableMapOf<String, Int>()
+        val keys = errorsObj.keys()
+        while (keys.hasNext()) {
+            val key = keys.next()
+            errors[key] = errorsObj.optInt(key)
         }
-        out += sb.toString()
-        return out
-    }
-
-    companion object {
-        private const val HEADER = "startedAtEpochMs,host,port,mode,ipv4MaxStable,ipv4Failure,ipv6MaxStable,ipv6Failure"
+        return ProtocolStats(
+            protocol = runCatching { IpProtocol.valueOf(optString("protocol")) }.getOrDefault(IpProtocol.IPV4),
+            phase = optString("phase", "历史"),
+            resolvedAddresses = optString("addresses").split("|").filter { it.isNotBlank() },
+            activeSessions = optInt("active"),
+            totalFailure = optInt("failure"),
+            totalAttempts = optInt("total"),
+            lastAdded = optInt("added"),
+            cps = optInt("cps"),
+            totalSuccess = optInt("success"),
+            maxStableSessions = optInt("stable"),
+            errorSummary = errors
+        )
     }
 }

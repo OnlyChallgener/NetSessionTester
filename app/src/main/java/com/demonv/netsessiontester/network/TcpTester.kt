@@ -18,10 +18,10 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import java.net.ConnectException
 import java.net.Inet4Address
 import java.net.Inet6Address
 import java.net.InetAddress
-import java.net.ConnectException
 import java.net.InetSocketAddress
 import java.net.NoRouteToHostException
 import java.net.PortUnreachableException
@@ -39,8 +39,7 @@ class TcpTester {
     )
 
     suspend fun resolveHost(host: String): ResolveResult = withContext(Dispatchers.IO) {
-        val cleanHost = host.trim().removePrefix("[").removeSuffix("]")
-        if (cleanHost.isBlank()) return@withContext ResolveResult(error = "请填写域名或 IP")
+        val cleanHost = host.trim().removePrefix("[").removeSuffix("]").ifBlank { "www.baidu.com" }
         runCatching {
             val all = InetAddress.getAllByName(cleanHost).toList()
             ResolveResult(
@@ -59,24 +58,16 @@ class TcpTester {
         onLog: suspend (LogLine) -> Unit
     ): Pair<ProtocolStats?, ProtocolStats?> {
         val config = rawConfig.normalized()
-        require(config.host.isNotBlank()) { "请填写你自己的 VPS、路由器、内网服务器或已授权服务器地址" }
-
         var ipv4Stats: ProtocolStats? = null
         var ipv6Stats: ProtocolStats? = null
 
         when (config.mode) {
-            TestMode.IPV4_ONLY -> {
-                ipv4Stats = runOneProtocol(config, IpProtocol.IPV4, onStats, onLog)
-            }
-            TestMode.IPV6_ONLY -> {
-                ipv6Stats = runOneProtocol(config, IpProtocol.IPV6, onStats, onLog)
-            }
+            TestMode.IPV4_ONLY -> ipv4Stats = runOneProtocol(config, IpProtocol.IPV4, onStats, onLog)
+            TestMode.IPV6_ONLY -> ipv6Stats = runOneProtocol(config, IpProtocol.IPV6, onStats, onLog)
             TestMode.IPV4_THEN_IPV6 -> {
-                onLog(LogLine(level = LogLevel.INFO, text = "开始 IPv4 测试，测试完成后会释放 IPv4 连接，再测试 IPv6。"))
                 ipv4Stats = runOneProtocol(config.copy(mode = TestMode.IPV4_ONLY), IpProtocol.IPV4, onStats, onLog)
                 release(IpProtocol.IPV4)
-                delay(1500)
-                onLog(LogLine(level = LogLevel.INFO, text = "开始 IPv6 测试。"))
+                delay(1200)
                 ipv6Stats = runOneProtocol(config.copy(mode = TestMode.IPV6_ONLY), IpProtocol.IPV6, onStats, onLog)
             }
         }
@@ -94,11 +85,11 @@ class TcpTester {
         if (addresses.isEmpty()) {
             val stats = ProtocolStats(protocol = protocol, phase = "解析失败")
             onStats(stats)
-            onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 没有解析到可用地址：${config.host}"))
+            onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 没有解析到可用地址"))
             return stats
         }
 
-        val addressText = addresses.map { it.hostAddress ?: it.hostName }.distinct()
+        val addressText = addresses.mapNotNull { it.hostAddress }.distinct()
         onLog(LogLine(level = LogLevel.SUCCESS, text = "${protocol.label} 解析成功：${addressText.joinToString(" / ")}"))
 
         var totalSuccess = 0
@@ -107,14 +98,7 @@ class TcpTester {
         var maxStable = 0
         var lastTotalAttempts = 0
         val errors = linkedMapOf<String, Int>()
-        val started = System.currentTimeMillis()
-        var stats = ProtocolStats(
-            protocol = protocol,
-            phase = "建连中",
-            resolvedAddresses = addressText,
-            startedAtEpochMs = started
-        )
-
+        var stats = ProtocolStats(protocol = protocol, phase = "建连中", resolvedAddresses = addressText)
         onStats(stats)
 
         while (currentCoroutineContext().isActive && totalSuccess < config.successLimit && totalFailure < config.failureLimit) {
@@ -123,13 +107,12 @@ class TcpTester {
             val batchResult = openBatch(addresses, config.port, config.timeoutMs, targetBatch)
 
             totalSuccess += batchResult.successSockets.size
-            totalFailure += batchResult.errors.values.sum()
-            totalAttempts += batchResult.successSockets.size + batchResult.errors.values.sum()
+            val failAdd = batchResult.errors.values.sum()
+            totalFailure += failAdd
+            totalAttempts += batchResult.successSockets.size + failAdd
             batchResult.errors.forEach { (key, value) -> errors[key] = (errors[key] ?: 0) + value }
 
-            socketLock.withLock {
-                heldSockets.getValue(protocol).addAll(batchResult.successSockets)
-            }
+            socketLock.withLock { heldSockets.getValue(protocol).addAll(batchResult.successSockets) }
 
             val active = activeCount(protocol)
             maxStable = maxOf(maxStable, active)
@@ -142,24 +125,19 @@ class TcpTester {
                 phase = "建连中",
                 resolvedAddresses = addressText,
                 activeSessions = active,
-                totalSuccess = totalSuccess,
                 totalFailure = totalFailure,
                 totalAttempts = totalAttempts,
-                maxStableSessions = maxStable,
                 lastAdded = added,
                 cps = cps,
                 errorSummary = errors.toMap(),
-                startedAtEpochMs = started
+                totalSuccess = totalSuccess,
+                maxStableSessions = maxStable
             )
             onStats(stats)
-            onLog(LogLine(level = LogLevel.STAT, text = "${protocol.label} 统计 - 成功：$totalSuccess(+${batchResult.successSockets.size}) | 失败：$totalFailure(+${batchResult.errors.values.sum()}) | 活动：$active | 总计：$totalAttempts | 新增：$added | CPS：${cps}/秒"))
+            onLog(LogLine(level = LogLevel.STAT, text = "${protocol.label} 统计 - 成功：$totalSuccess(+${batchResult.successSockets.size}) | 失败：$totalFailure(+$failAdd) | 活动：$active | 总计：$totalAttempts | 新增：$added | CPS：${cps}/秒"))
 
             if (totalFailure >= config.failureLimit) {
                 onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 达到失败上限：${config.failureLimit}"))
-                break
-            }
-            if (totalSuccess >= config.successLimit) {
-                onLog(LogLine(level = LogLevel.SUCCESS, text = "${protocol.label} 达到目标成功会话数：${config.successLimit}"))
                 break
             }
             delay(config.intervalMs)
@@ -169,15 +147,14 @@ class TcpTester {
         val finalStats = stats.copy(
             phase = "测试完成",
             activeSessions = finalActive,
-            maxStableSessions = maxOf(maxStable, finalActive),
-            finishedAtEpochMs = System.currentTimeMillis()
+            maxStableSessions = maxOf(maxStable, finalActive)
         )
         onStats(finalStats)
-        onLog(LogLine(level = LogLevel.INFO, text = "${protocol.label} 测试完成 - 总成功：$totalSuccess 总失败：$totalFailure 当前活动：$finalActive 最大稳定：${finalStats.maxStableSessions}"))
+        onLog(LogLine(level = LogLevel.INFO, text = "${protocol.label} 测试完成 - 活动：${finalStats.activeSessions} 失败：${finalStats.totalFailure} 总计：${finalStats.totalAttempts}"))
 
         if (!config.keepConnectionsAfterStop) {
             release(protocol)
-            onLog(LogLine(level = LogLevel.WARN, text = "${protocol.label} 已按设置自动释放连接。"))
+            onLog(LogLine(level = LogLevel.WARN, text = "${protocol.label} 已按设置释放连接。"))
         }
         return finalStats
     }
@@ -221,29 +198,29 @@ class TcpTester {
     private fun classifyError(e: Exception): String {
         val message = e.message.orEmpty().lowercase()
         return when (e) {
-            is SocketTimeoutException -> "连接超时(SocketTimeoutException)"
+            is SocketTimeoutException -> "超时"
             is ConnectException -> when {
-                "refused" in message -> "连接被拒绝(ConnectException)"
-                "timed out" in message -> "连接超时(ConnectException)"
-                else -> "连接失败(ConnectException)"
+                "refused" in message -> "拒绝"
+                "timed out" in message -> "超时"
+                else -> "连接失败"
             }
-            is NoRouteToHostException -> "无路由到主机(NoRouteToHostException)"
-            is PortUnreachableException -> "端口不可达(PortUnreachableException)"
-            is UnknownHostException -> "DNS/主机解析失败(UnknownHostException)"
+            is NoRouteToHostException -> "无路由"
+            is PortUnreachableException -> "端口不可达"
+            is UnknownHostException -> "DNS失败"
             is SocketException -> when {
-                "too many open files" in message || "emfile" in message -> "安卓FD/Socket上限(Too many open files)"
-                "cannot assign requested address" in message -> "本地端口耗尽(Cannot assign requested address)"
-                "network is unreachable" in message -> "网络不可达(Network is unreachable)"
-                "connection reset" in message -> "连接被重置(Connection reset)"
-                "broken pipe" in message -> "连接已断开(Broken pipe)"
-                else -> "Socket异常(${e.message ?: e.javaClass.simpleName})"
+                "too many open files" in message || "emfile" in message -> "FD上限"
+                "cannot assign requested address" in message -> "端口耗尽"
+                "network is unreachable" in message -> "网络不可达"
+                "connection reset" in message -> "重置"
+                "broken pipe" in message -> "已断开"
+                else -> "Socket异常"
             }
-            else -> "${e.javaClass.simpleName}${e.message?.let { ":$it" } ?: ""}"
+            else -> e.javaClass.simpleName
         }
     }
 
     private suspend fun resolveInetAddresses(host: String, protocol: IpProtocol): List<InetAddress> = withContext(Dispatchers.IO) {
-        val cleanHost = host.trim().removePrefix("[").removeSuffix("]")
+        val cleanHost = host.trim().removePrefix("[").removeSuffix("]").ifBlank { "www.baidu.com" }
         InetAddress.getAllByName(cleanHost).filter { address ->
             when (protocol) {
                 IpProtocol.IPV4 -> address is Inet4Address

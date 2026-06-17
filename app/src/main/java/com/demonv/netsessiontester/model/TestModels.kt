@@ -4,15 +4,12 @@ import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
-enum class IpProtocol(val label: String) {
-    IPV4("IPv4"),
-    IPV6("IPv6")
-}
+enum class IpProtocol(val label: String) { IPV4("IPv4"), IPV6("IPv6") }
 
 enum class TestMode(val label: String) {
     IPV4_ONLY("仅 IPv4"),
     IPV6_ONLY("仅 IPv6"),
-    IPV4_THEN_IPV6("IPv4 / IPv6 分别测试")
+    IPV4_THEN_IPV6("分别测试")
 }
 
 data class SessionConfig(
@@ -27,22 +24,16 @@ data class SessionConfig(
     val keepConnectionsAfterStop: Boolean
 ) {
     fun normalized(): SessionConfig {
-        val cleanHost = host.trim().removePrefix("[").removeSuffix("]")
+        val cleanHost = host.trim().removePrefix("[").removeSuffix("]").ifBlank { "www.baidu.com" }
         return copy(
             host = cleanHost,
             port = port.coerceIn(1, 65535),
-            batchSize = batchSize.coerceIn(1, MAX_BATCH_SIZE),
+            batchSize = batchSize.coerceIn(1, 1000),
             intervalMs = intervalMs.coerceIn(100L, 60_000L),
             timeoutMs = timeoutMs.coerceIn(300, 30_000),
-            successLimit = successLimit.coerceIn(1, MAX_SUCCESS_LIMIT),
-            failureLimit = failureLimit.coerceIn(1, MAX_FAILURE_LIMIT)
+            successLimit = successLimit.coerceIn(1, 70_000),
+            failureLimit = failureLimit.coerceIn(1, 100_000)
         )
-    }
-
-    companion object {
-        const val MAX_SUCCESS_LIMIT = 70_000
-        const val MAX_FAILURE_LIMIT = 100_000
-        const val MAX_BATCH_SIZE = 1_000
     }
 }
 
@@ -58,18 +49,14 @@ data class ProtocolStats(
     val phase: String = "待测试",
     val resolvedAddresses: List<String> = emptyList(),
     val activeSessions: Int = 0,
-    val totalSuccess: Int = 0,
     val totalFailure: Int = 0,
     val totalAttempts: Int = 0,
-    val maxStableSessions: Int = 0,
     val lastAdded: Int = 0,
     val cps: Int = 0,
     val errorSummary: Map<String, Int> = emptyMap(),
-    val startedAtEpochMs: Long? = null,
-    val finishedAtEpochMs: Long? = null
-) {
-    val isRunning: Boolean get() = phase.contains("测试中") || phase.contains("建连中")
-}
+    val totalSuccess: Int = 0,
+    val maxStableSessions: Int = 0
+)
 
 data class LogLine(
     val timeEpochMs: Long = System.currentTimeMillis(),
@@ -77,7 +64,7 @@ data class LogLine(
     val text: String
 ) {
     val timeText: String
-        get() = DateTimeFormatter.ofPattern("HH:mm:ss.SSS")
+        get() = DateTimeFormatter.ofPattern("HH:mm:ss")
             .withZone(ZoneId.systemDefault())
             .format(Instant.ofEpochMilli(timeEpochMs))
 }
@@ -93,7 +80,7 @@ data class SessionSummary(
     val ipv6Stats: ProtocolStats?
 ) {
     val startedAtText: String
-        get() = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
+        get() = DateTimeFormatter.ofPattern("MM-dd HH:mm:ss")
             .withZone(ZoneId.systemDefault())
             .format(Instant.ofEpochMilli(startedAtEpochMs))
 }

@@ -5,44 +5,46 @@ import com.demonv.netsessiontester.model.ProtocolStats
 import com.demonv.netsessiontester.model.SessionSummary
 
 object CsvExporter {
-    fun logsCsv(logs: List<LogLine>): String = buildString {
-        appendLine("time,level,message")
+    fun logsCsv(logs: List<LogLine>): String {
+        val sb = StringBuilder()
+        sb.appendLine("time,level,text")
         logs.forEach { line ->
-            appendLine(listOf(csv(line.timeText), line.level.name, csv(line.text)).joinToString(","))
+            sb.appendLine("${csv(line.timeText)},${csv(line.level.name)},${csv(line.text)}")
         }
+        return sb.toString()
     }
 
-    fun summaryCsv(summary: SessionSummary, logs: List<LogLine>): String = buildString {
-        appendLine("type,time,host,port,mode,protocol,activeSessions,totalSuccess,totalFailure,totalAttempts,maxStableSessions,cps,errors")
-        appendLine(summaryRow(summary, summary.ipv4Stats))
-        appendLine(summaryRow(summary, summary.ipv6Stats))
-        appendLine()
-        appendLine("logTime,level,message")
+    fun summaryCsv(summary: SessionSummary, logs: List<LogLine>): String {
+        val sb = StringBuilder()
+        sb.appendLine("section,key,value")
+        sb.appendLine("summary,time,${csv(summary.startedAtText)}")
+        sb.appendLine("summary,host,${csv(summary.host)}")
+        sb.appendLine("summary,port,${summary.port}")
+        sb.appendLine("summary,mode,${csv(summary.mode.label)}")
+        appendStats(sb, "IPv4", summary.ipv4Stats)
+        appendStats(sb, "IPv6", summary.ipv6Stats)
+        sb.appendLine()
+        sb.appendLine("log_time,level,text")
         logs.forEach { line ->
-            appendLine(listOf(csv(line.timeText), line.level.name, csv(line.text)).joinToString(","))
+            sb.appendLine("${csv(line.timeText)},${csv(line.level.name)},${csv(line.text)}")
         }
+        return sb.toString()
     }
 
-    private fun summaryRow(summary: SessionSummary, stats: ProtocolStats?): String {
-        return listOf(
-            "summary",
-            csv(summary.startedAtText),
-            csv(summary.host),
-            summary.port.toString(),
-            summary.mode.name,
-            stats?.protocol?.name.orEmpty(),
-            stats?.activeSessions?.toString().orEmpty(),
-            stats?.totalSuccess?.toString().orEmpty(),
-            stats?.totalFailure?.toString().orEmpty(),
-            stats?.totalAttempts?.toString().orEmpty(),
-            stats?.maxStableSessions?.toString().orEmpty(),
-            stats?.cps?.toString().orEmpty(),
-            csv(stats?.errorSummary?.entries?.joinToString(" | ") { "${it.key}:${it.value}" }.orEmpty())
-        ).joinToString(",")
+    private fun appendStats(sb: StringBuilder, section: String, stats: ProtocolStats?) {
+        if (stats == null) return
+        sb.appendLine("$section,active,${stats.activeSessions}")
+        sb.appendLine("$section,failure,${stats.totalFailure}")
+        sb.appendLine("$section,total,${stats.totalAttempts}")
+        sb.appendLine("$section,added,${stats.lastAdded}")
+        sb.appendLine("$section,cps,${stats.cps}")
+        stats.errorSummary.forEach { (key, value) ->
+            sb.appendLine("$section,error_${csv(key)},$value")
+        }
     }
 
     private fun csv(value: String): String {
         val escaped = value.replace("\"", "\"\"")
-        return if (escaped.any { it == ',' || it == '"' || it == '\n' || it == '|' }) "\"$escaped\"" else escaped
+        return "\"$escaped\""
     }
 }
