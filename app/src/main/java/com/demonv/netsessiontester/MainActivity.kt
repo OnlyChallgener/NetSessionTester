@@ -130,7 +130,7 @@ private enum class MainTab(val label: String, val mark: String) {
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        WindowCompat.setDecorFitsSystemWindows(window, false)
+        WindowCompat.setDecorFitsSystemWindows(window, true)
         window.statusBarColor = android.graphics.Color.TRANSPARENT
         window.navigationBarColor = android.graphics.Color.WHITE
         WindowCompat.getInsetsController(window, window.decorView).apply {
@@ -771,7 +771,6 @@ private fun SettingsPage(
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
-            .statusBarsPadding()
             .padding(horizontal = 14.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
@@ -887,7 +886,6 @@ private fun TestPage(
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
-            .statusBarsPadding()
             .padding(horizontal = 14.dp),
         verticalArrangement = Arrangement.spacedBy(7.dp)
     ) {
@@ -941,12 +939,11 @@ private fun FullRunLogPage(
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
-            .statusBarsPadding()
             .padding(horizontal = 14.dp),
         verticalArrangement = Arrangement.spacedBy(7.dp)
     ) {
         item {
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 10.dp, bottom = 6.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 4.dp, bottom = 5.dp)) {
                 TextButton(onClick = onBack, modifier = Modifier.width(52.dp)) {
                     Text("‹", fontSize = 26.sp, fontWeight = FontWeight.Bold, color = TextDark)
                 }
@@ -1014,12 +1011,11 @@ private fun LogsPage(
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
-            .statusBarsPadding()
             .padding(horizontal = 14.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         item {
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 10.dp, bottom = 6.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 4.dp, bottom = 5.dp)) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text("检测历史", fontSize = 21.sp, fontWeight = FontWeight.ExtraBold, color = TextDark)
                     Text("已保存 ${historySavedCount} 条 · 占用 ${historySizeKb}KB", color = Muted, fontSize = 11.sp)
@@ -1087,7 +1083,7 @@ private fun PeriodCountChip(title: String, subtitle: String, bg: Color, fg: Colo
 
 @Composable
 private fun PageTitle(title: String, subtitle: String?) {
-    Column(modifier = Modifier.padding(top = 0.dp, bottom = 2.dp)) {
+    Column(modifier = Modifier.padding(top = 4.dp, bottom = 2.dp)) {
         Text(title, fontSize = 22.sp, lineHeight = 25.sp, fontWeight = FontWeight.ExtraBold, color = TextDark)
         subtitle?.let {
             Text(it, fontSize = 12.sp, color = Muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -1520,10 +1516,9 @@ private fun BottomNav(selectedTab: MainTab, onSelect: (MainTab) -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .height(58.dp)
+            .height(54.dp)
             .background(Color(0xFFEAF2FF))
-            .navigationBarsPadding()
-            .padding(horizontal = 22.dp, vertical = 4.dp),
+            .padding(horizontal = 22.dp, vertical = 3.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {

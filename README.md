@@ -1,4 +1,4 @@
-# NetSessionTester v0.7.7 Copy Public Exit IP
+# NetSessionTester v0.8.0 Compact Top
 
 宽带会话测试器，Kotlin + Jetpack Compose 原生版。
 
@@ -28,7 +28,7 @@
 ## 构建
 
 上传完整项目后进入 GitHub Actions，运行 Build Android APK。
-Artifact：NetSessionTester-v0.7.7-copy-public-ip-debug-apk
+Artifact：NetSessionTester-v0.8.0-compact-top-debug-apk
 
 ## v0.6.1 修复
 
@@ -175,3 +175,11 @@ Artifact：NetSessionTester-v0.7.7-copy-public-ip-debug-apk
 - 点击 IPv4 出口地址的具体值，只复制 IPv4 地址。
 - 点击 IPv6 出口地址的具体值，只复制 IPv6 地址。
 - 复制成功后弹出提示。
+
+
+## v0.8.0
+
+- 优化设置页、测试页、历史页顶部留白。
+- 标题区域更靠近状态栏，但保留安全间距，不遮挡文字。
+- 统一页面顶部间距，减少三页顶部大块空白。
+- 保留 v0.7.7 的公网出口点击复制、强制释放、历史筛选、备注、finally 释放保护等功能。
