@@ -1,4 +1,4 @@
-# NetSessionTester v0.9.2 Subtitle Fix
+# NetSessionTester v0.9.3 Build Fix
 
 宽带会话测试器，Kotlin + Jetpack Compose 原生版。
 
@@ -28,7 +28,7 @@
 ## 构建
 
 上传完整项目后进入 GitHub Actions，运行 Build Android APK。
-Artifact：NetSessionTester-v0.9.2-subtitle-fix-debug-apk
+Artifact：NetSessionTester-v0.9.3-build-fix-debug-apk
 
 ## v0.6.1 修复
 
@@ -227,3 +227,9 @@ Artifact：NetSessionTester-v0.9.2-subtitle-fix-debug-apk
 
 - 首页副标题改为：网络总会话数测试 - IPV4/IPV6分别测试。
 - 字体不再继续缩小，保持当前字号。
+
+
+## v0.9.3
+
+- 修复 GitHub Actions 编译失败：移除错误的 `matchParentSize` import。
+- 保留 v0.9.2 的副标题和 UI 改动。
