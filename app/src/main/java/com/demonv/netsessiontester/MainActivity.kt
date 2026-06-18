@@ -1516,9 +1516,9 @@ private fun BottomNav(selectedTab: MainTab, onSelect: (MainTab) -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .height(54.dp)
+            .height(60.dp)
             .background(Color(0xFFEAF2FF))
-            .padding(horizontal = 22.dp, vertical = 3.dp),
+            .padding(horizontal = 22.dp, vertical = 2.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -1531,11 +1531,13 @@ private fun BottomNav(selectedTab: MainTab, onSelect: (MainTab) -> Unit) {
             }
             Column(
                 modifier = Modifier
-                    .width(82.dp)
+                    .width(86.dp)
+                    .height(56.dp)
                     .background(if (selected) Color(0xFFEBDCFD) else Color.Transparent, RoundedCornerShape(24.dp))
                     .clickable { onSelect(tab) }
-                    .padding(vertical = 4.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
+                    .padding(vertical = 5.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
             ) {
                 Icon(
                     image,
@@ -1543,8 +1545,8 @@ private fun BottomNav(selectedTab: MainTab, onSelect: (MainTab) -> Unit) {
                     tint = if (selected) Blue else Muted,
                     modifier = Modifier.width(22.dp).height(22.dp)
                 )
-                Spacer(Modifier.height(2.dp))
-                Text(tab.label, color = TextDark, fontSize = 11.sp, maxLines = 1)
+                Spacer(Modifier.height(3.dp))
+                Text(tab.label, color = TextDark, fontSize = 11.sp, lineHeight = 13.sp, maxLines = 1)
             }
         }
     }

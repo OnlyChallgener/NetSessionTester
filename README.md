@@ -1,4 +1,4 @@
-# NetSessionTester v0.8.0 Compact Top
+# NetSessionTester v0.8.2 Bottom 60
 
 宽带会话测试器，Kotlin + Jetpack Compose 原生版。
 
@@ -28,7 +28,7 @@
 ## 构建
 
 上传完整项目后进入 GitHub Actions，运行 Build Android APK。
-Artifact：NetSessionTester-v0.8.0-compact-top-debug-apk
+Artifact：NetSessionTester-v0.8.2-bottom-60-debug-apk
 
 ## v0.6.1 修复
 
@@ -183,3 +183,18 @@ Artifact：NetSessionTester-v0.8.0-compact-top-debug-apk
 - 标题区域更靠近状态栏，但保留安全间距，不遮挡文字。
 - 统一页面顶部间距，减少三页顶部大块空白。
 - 保留 v0.7.7 的公网出口点击复制、强制释放、历史筛选、备注、finally 释放保护等功能。
+
+
+## v0.8.1
+
+- 修复 v0.8.0 底部导航栏压缩过头，文字被遮挡的问题。
+- 底部栏恢复为安全高度，图标和文字完整显示。
+- 保留 v0.8.0 的顶部留白优化。
+
+
+## v0.8.2
+
+- 底部导航栏整体高度改为 60dp。
+- 每个底部按钮区域固定 56dp 高度。
+- 底部按钮图标和文字继续居中显示，避免文字被遮挡。
+- 保留 v0.8.1 的顶部留白优化和其他功能。
