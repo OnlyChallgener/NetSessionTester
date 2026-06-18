@@ -111,6 +111,8 @@ import com.demonv.netsessiontester.model.SessionConfig
 import com.demonv.netsessiontester.model.SessionSummary
 import com.demonv.netsessiontester.model.TestMode
 import com.demonv.netsessiontester.network.TcpTester
+import com.demonv.netsessiontester.network.PublicIpDetector
+import com.demonv.netsessiontester.network.PublicIpResult
 import com.demonv.netsessiontester.ui.theme.NetSessionTesterTheme
 import com.demonv.netsessiontester.util.CsvExporter
 import kotlinx.coroutines.Job
@@ -120,7 +122,7 @@ import java.io.OutputStreamWriter
 private enum class MainTab(val label: String, val mark: String) {
     SETTINGS("设置", "settings"),
     TEST("测试", "play"),
-    LOGS("日志", "logs")
+    LOGS("历史", "logs")
 }
 
 class MainActivity : ComponentActivity() {
@@ -168,10 +170,13 @@ private fun NetSessionTesterApp() {
     var keepConnections by remember { mutableStateOf(true) }
     var maskPrivacy by remember { mutableStateOf(false) }
     var historyLimit by remember { mutableStateOf("30") }
+    var historyPeriod by remember { mutableStateOf("WEEK") }
     var logSizeKb by remember { mutableStateOf(0) }
     var historySizeKb by remember { mutableStateOf(0) }
     var historySavedCount by remember { mutableStateOf(0) }
     var historyCounts by remember { mutableStateOf(HistoryCounts()) }
+    var publicIpResult by remember { mutableStateOf(PublicIpResult()) }
+    var publicIpLoading by remember { mutableStateOf(false) }
     var manualStopRequested by remember { mutableStateOf(false) }
     var currentTestConfig by remember { mutableStateOf<SessionConfig?>(null) }
     var currentStartedAt by remember { mutableStateOf(0L) }
@@ -215,8 +220,28 @@ private fun NetSessionTesterApp() {
         detailLines = lines
     }
 
+
+    fun safeHistoryLimit(): Int = historyLimit.toIntOrNull()?.coerceIn(10, 100) ?: 30
+
+    fun refreshHistory() {
+        scope.launch {
+            state = state.copy(history = historyStore.load(historyPeriod, safeHistoryLimit()))
+            historySizeKb = historyStore.sizeKb()
+            historySavedCount = historyStore.count()
+            historyCounts = historyStore.counts()
+        }
+    }
+
+    fun refreshPublicIp() {
+        scope.launch {
+            publicIpLoading = true
+            publicIpResult = PublicIpDetector.detect()
+            publicIpLoading = false
+        }
+    }
+
     LaunchedEffect(Unit) {
-        state = state.copy(history = historyStore.load(30), logs = logStore.load())
+        state = state.copy(history = historyStore.load(historyPeriod, 30), logs = logStore.load())
         logSizeKb = logStore.sizeKb()
         historySizeKb = historyStore.sizeKb()
         historySavedCount = historyStore.count()
@@ -233,10 +258,11 @@ private fun NetSessionTesterApp() {
         keepConnections = saved.keepConnections
         maskPrivacy = saved.maskPrivacy
         historyLimit = if (saved.historyLimit in listOf("10", "30", "100")) saved.historyLimit else "30"
-        state = state.copy(history = historyStore.load(historyLimit.toIntOrNull()?.coerceIn(10, 100) ?: 30))
+        state = state.copy(history = historyStore.load(historyPeriod, historyLimit.toIntOrNull()?.coerceIn(10, 100) ?: 30))
         historySavedCount = historyStore.count()
         historyCounts = historyStore.counts()
         settingsLoaded = true
+        refreshPublicIp()
     }
 
     LaunchedEffect(
@@ -286,7 +312,7 @@ private fun NetSessionTesterApp() {
                 timeoutMs = timeoutMs.toInt(),
                 successLimit = successLimit.toInt(),
                 failureLimit = failureLimit.toInt(),
-                keepConnectionsAfterStop = keepConnections
+                keepConnectionsAfterStop = true
             ).normalized()
         }.getOrElse { error ->
             scope.launch { snackbarHostState.showSnackbar("参数错误：${error.message}") }
@@ -314,7 +340,6 @@ private fun NetSessionTesterApp() {
         val config = buildConfig() ?: return
         ensureNotificationPermission()
         runningJob?.cancel()
-        scope.launch { tester.release() }
         selectedTab = MainTab.TEST
         startForegroundNotice(context, "建连中：${config.mode.label}，目标 ${config.successLimit}")
         val startedAt = System.currentTimeMillis()
@@ -332,6 +357,10 @@ private fun NetSessionTesterApp() {
         appendLog(LogLine(level = LogLevel.INFO, text = "目标：${config.host}:${config.port} | 模式：${config.mode.label} | 新增：${config.batchSize} | 间隔：${config.intervalMs}ms"))
 
         runningJob = scope.launch {
+            val oldClosed = tester.release()
+            if (oldClosed > 0) {
+                appendLog(LogLine(level = LogLevel.WARN, text = "开始新测试前释放旧连接：$oldClosed 条"))
+            }
             runCatching {
                 tester.runSessionHoldTest(
                     rawConfig = config,
@@ -363,21 +392,23 @@ private fun NetSessionTesterApp() {
                 )
                 historyStore.append(summary)
                 historyStore.trim(100)
-                historySizeKb = historyStore.sizeKb()
-                historySavedCount = historyStore.count()
-                historyCounts = historyStore.counts()
-                val safeHistoryLimit = historyLimit.toIntOrNull()?.coerceIn(10, 100) ?: 30
+                refreshHistory()
+                val closed = tester.release()
+                if (closed > 0) {
+                    appendLog(LogLine(level = LogLevel.WARN, text = "测试完成，已立即释放连接：$closed 条"))
+                } else {
+                    appendLog(LogLine(level = LogLevel.WARN, text = "测试完成，未发现需要释放的连接"))
+                }
+                val finalIpv4 = summary.ipv4Stats ?: state.ipv4Stats
+                val finalIpv6 = summary.ipv6Stats ?: state.ipv6Stats
                 state = state.copy(
                     isAdding = false,
-                    status = "测试完成",
+                    status = "测试完成 · 已释放",
                     summary = summary,
-                    history = historyStore.load(safeHistoryLimit)
+                    ipv4Stats = if (summary.ipv4Stats != null) finalIpv4.copy(activeSessions = 0, phase = "已释放") else state.ipv4Stats,
+                    ipv6Stats = if (summary.ipv6Stats != null) finalIpv6.copy(activeSessions = 0, phase = "已释放") else state.ipv6Stats
                 )
-                if (config.keepConnectionsAfterStop) {
-                    updateForegroundNotice(context, "测试完成，连接保持中")
-                } else {
-                    stopForegroundNotice(context)
-                }
+                stopForegroundNotice(context)
             }.onFailure { error ->
                 if (!manualStopRequested) {
                     val msg = error.message ?: error.javaClass.simpleName
@@ -389,41 +420,39 @@ private fun NetSessionTesterApp() {
         }
     }
 
-    fun stoppedStatsFor(protocol: IpProtocol, current: ProtocolStats): ProtocolStats {
+    fun stoppedStatsFor(protocol: IpProtocol, current: ProtocolStats, reason: String = "手动停止"): ProtocolStats {
         return current.copy(
-            phase = "手动停止",
-            errorSummary = current.errorSummary + ("手动停止" to 1)
+            phase = reason,
+            errorSummary = current.errorSummary + (reason to 1)
         )
     }
 
-    fun saveManualStopSummary() {
+    fun saveManualStopSummary(reason: String = "手动停止") {
         val config = currentTestConfig ?: buildConfig() ?: return
+        val ipv4 = when (config.mode) {
+            TestMode.IPV4_ONLY -> stoppedStatsFor(IpProtocol.IPV4, state.ipv4Stats, reason)
+            TestMode.IPV4_THEN_IPV6 -> stoppedStatsFor(IpProtocol.IPV4, state.ipv4Stats, reason)
+            TestMode.IPV6_ONLY -> null
+        }
+        val ipv6 = when (config.mode) {
+            TestMode.IPV6_ONLY -> stoppedStatsFor(IpProtocol.IPV6, state.ipv6Stats, reason)
+            TestMode.IPV4_THEN_IPV6 -> if (state.ipv6Stats.totalAttempts > 0) stoppedStatsFor(IpProtocol.IPV6, state.ipv6Stats, reason) else null
+            TestMode.IPV4_ONLY -> null
+        }
+        val summary = SessionSummary(
+            startedAtEpochMs = if (currentStartedAt > 0L) currentStartedAt else System.currentTimeMillis(),
+            host = config.host,
+            port = config.port,
+            mode = config.mode,
+            ipv4Stats = ipv4,
+            ipv6Stats = ipv6
+        )
         scope.launch {
-            val ipv4 = when (config.mode) {
-                TestMode.IPV4_ONLY -> stoppedStatsFor(IpProtocol.IPV4, state.ipv4Stats)
-                TestMode.IPV4_THEN_IPV6 -> stoppedStatsFor(IpProtocol.IPV4, state.ipv4Stats)
-                TestMode.IPV6_ONLY -> null
-            }
-            val ipv6 = when (config.mode) {
-                TestMode.IPV6_ONLY -> stoppedStatsFor(IpProtocol.IPV6, state.ipv6Stats)
-                TestMode.IPV4_THEN_IPV6 -> if (state.ipv6Stats.totalAttempts > 0) stoppedStatsFor(IpProtocol.IPV6, state.ipv6Stats) else null
-                TestMode.IPV4_ONLY -> null
-            }
-            val summary = SessionSummary(
-                startedAtEpochMs = if (currentStartedAt > 0L) currentStartedAt else System.currentTimeMillis(),
-                host = config.host,
-                port = config.port,
-                mode = config.mode,
-                ipv4Stats = ipv4,
-                ipv6Stats = ipv6
-            )
             historyStore.append(summary)
             historyStore.trim(100)
-            historySizeKb = historyStore.sizeKb()
-            val safeHistoryLimit = historyLimit.toIntOrNull()?.coerceIn(10, 100) ?: 30
+            refreshHistory()
             state = state.copy(
                 summary = summary,
-                history = historyStore.load(safeHistoryLimit),
                 ipv4Stats = ipv4 ?: state.ipv4Stats,
                 ipv6Stats = ipv6 ?: state.ipv6Stats
             )
@@ -434,23 +463,41 @@ private fun NetSessionTesterApp() {
         manualStopRequested = true
         runningJob?.cancel()
         runningJob = null
-        appendLog(LogLine(level = LogLevel.WARN, text = "手动停止；已建立连接继续保持。"))
-        saveManualStopSummary()
-        state = state.copy(isAdding = false, status = "手动停止")
-        updateForegroundNotice(context, "手动停止，连接保持中")
+        appendLog(LogLine(level = LogLevel.WARN, text = "手动停止；已停止新增并保存历史。"))
+        saveManualStopSummary("手动停止")
+        scope.launch {
+            val closed = tester.release()
+            appendLog(LogLine(level = LogLevel.WARN, text = "手动停止，已立即释放连接：$closed 条"))
+            state = state.copy(
+                isAdding = false,
+                status = "手动停止 · 已释放",
+                ipv4Stats = state.ipv4Stats.copy(activeSessions = 0, phase = if (state.ipv4Stats.totalAttempts > 0) "已释放" else state.ipv4Stats.phase),
+                ipv6Stats = state.ipv6Stats.copy(activeSessions = 0, phase = if (state.ipv6Stats.totalAttempts > 0) "已释放" else state.ipv6Stats.phase)
+            )
+            stopForegroundNotice(context)
+        }
     }
 
     fun releaseAll() {
-        runningJob?.cancel()
-        runningJob = null
+        val wasRunning = state.isAdding
+        if (wasRunning) {
+            manualStopRequested = true
+            runningJob?.cancel()
+            runningJob = null
+            appendLog(LogLine(level = LogLevel.WARN, text = "强制释放；已停止测试并保存历史。"))
+            saveManualStopSummary("强制释放")
+        } else {
+            runningJob?.cancel()
+            runningJob = null
+        }
         scope.launch {
             val closed = tester.release()
-            appendLog(LogLine(level = LogLevel.WARN, text = "已释放连接：$closed 条"))
+            appendLog(LogLine(level = LogLevel.WARN, text = "已强制释放连接：$closed 条"))
             state = state.copy(
                 isAdding = false,
-                status = "已释放",
-                ipv4Stats = state.ipv4Stats.copy(activeSessions = 0, phase = "已释放"),
-                ipv6Stats = state.ipv6Stats.copy(activeSessions = 0, phase = "已释放")
+                status = "已强制释放",
+                ipv4Stats = state.ipv4Stats.copy(activeSessions = 0, phase = if (state.ipv4Stats.totalAttempts > 0) "已释放" else state.ipv4Stats.phase),
+                ipv6Stats = state.ipv6Stats.copy(activeSessions = 0, phase = if (state.ipv6Stats.totalAttempts > 0) "已释放" else state.ipv6Stats.phase)
             )
             stopForegroundNotice(context)
         }
@@ -485,7 +532,7 @@ private fun NetSessionTesterApp() {
                         scope.launch {
                             historyStore.updateRemark(item.id, editingRemarkText)
                             val safeHistoryLimit = historyLimit.toIntOrNull()?.coerceIn(10, 100) ?: 30
-                            state = state.copy(history = historyStore.load(safeHistoryLimit))
+                            state = state.copy(history = historyStore.load(historyPeriod, safeHistoryLimit))
                             historyCounts = historyStore.counts()
                             historySavedCount = historyStore.count()
                             historySizeKb = historyStore.sizeKb()
@@ -574,6 +621,9 @@ private fun NetSessionTesterApp() {
                     port = port,
                     onPortChange = { port = it },
                     result = state.resolveResult,
+                    publicIpResult = publicIpResult,
+                    publicIpLoading = publicIpLoading,
+                    onRefreshPublicIp = { refreshPublicIp() },
                     maskPrivacy = maskPrivacy,
                     onMaskPrivacyChange = { maskPrivacy = it },
                     onResolve = { resolve() },
@@ -589,8 +639,6 @@ private fun NetSessionTesterApp() {
                     onSuccessLimitChange = { successLimit = it },
                     failureLimit = failureLimit,
                     onFailureLimitChange = { failureLimit = it },
-                    keepConnections = keepConnections,
-                    onKeepConnectionsChange = { keepConnections = it },
                     onSave = { scope.launch { snackbarHostState.showSnackbar("参数已保存") } },
                     onRestoreDefault = {
                         host = "www.baidu.com"; port = "80"; mode = TestMode.IPV4_THEN_IPV6
@@ -624,6 +672,7 @@ private fun NetSessionTesterApp() {
                     logs = state.logs,
                     history = state.history,
                     historyLimit = historyLimit,
+                    historyPeriod = historyPeriod,
                     historySizeKb = historySizeKb,
                     historySavedCount = historySavedCount,
                     historyCounts = historyCounts,
@@ -638,7 +687,13 @@ private fun NetSessionTesterApp() {
                             historySizeKb = historyStore.sizeKb()
                             historySavedCount = historyStore.count()
                             historyCounts = historyStore.counts()
-                            state = state.copy(history = historyStore.load(safeLimit))
+                            state = state.copy(history = historyStore.load(historyPeriod, safeLimit))
+                        }
+                    },
+                    onHistoryPeriodChange = { period ->
+                        historyPeriod = period
+                        scope.launch {
+                            state = state.copy(history = historyStore.load(period, safeHistoryLimit()))
                         }
                     },
                     onEditRemark = { summary ->
@@ -661,6 +716,9 @@ private fun SettingsPage(
     port: String,
     onPortChange: (String) -> Unit,
     result: com.demonv.netsessiontester.model.ResolveResult,
+    publicIpResult: PublicIpResult,
+    publicIpLoading: Boolean,
+    onRefreshPublicIp: () -> Unit,
     maskPrivacy: Boolean,
     onMaskPrivacyChange: (Boolean) -> Unit,
     onResolve: () -> Unit,
@@ -676,8 +734,6 @@ private fun SettingsPage(
     onSuccessLimitChange: (String) -> Unit,
     failureLimit: String,
     onFailureLimitChange: (String) -> Unit,
-    keepConnections: Boolean,
-    onKeepConnectionsChange: (Boolean) -> Unit,
     onSave: () -> Unit,
     onRestoreDefault: () -> Unit
 ) {
@@ -720,6 +776,20 @@ private fun SettingsPage(
         }
         item {
             SoftCard {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    SectionTitle("◎", "本机公网", Blue)
+                    Spacer(Modifier.weight(1f))
+                    TextButton(onClick = onRefreshPublicIp) {
+                        Text(if (publicIpLoading) "检测中" else "刷新", fontSize = 12.sp)
+                    }
+                }
+                InfoLine("IPv4", if (maskPrivacy) maskIpText(publicIpResult.ipv4) else publicIpResult.ipv4)
+                InfoLine("IPv6", if (maskPrivacy) maskIpText(publicIpResult.ipv6) else publicIpResult.ipv6)
+                Text("用于识别当前手机网络真实公网地址", color = Muted, fontSize = 11.sp)
+            }
+        }
+        item {
+            SoftCard {
                 SectionTitle("∿", "测试模式", Purple)
                 ModeSelector(mode, onModeChange)
                 Text("同时对 IPv4 与 IPv6 分别进行会话保持测试", color = Muted, fontSize = 12.sp, maxLines = 1)
@@ -737,10 +807,6 @@ private fun SettingsPage(
                     ParamField("失败停（次）", failureLimit, onFailureLimitChange, Modifier.weight(1f))
                 }
                 ParamField("目标会话（条）", successLimit, onSuccessLimitChange, Modifier.fillMaxWidth())
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("完成后保持连接", modifier = Modifier.weight(1f), color = TextDark, fontSize = 13.sp)
-                    Switch(checked = keepConnections, onCheckedChange = onKeepConnectionsChange)
-                }
                 Text("参数将用于后续测试，可随时修改并保存。", color = Muted, fontSize = 12.sp)
             }
         }
@@ -809,7 +875,7 @@ private fun TestPage(
                     ) { Icon(Icons.Filled.Stop, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("停止", fontSize = 13.sp) }
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    OutlinedButton(onClick = onRelease, modifier = Modifier.weight(1f).height(38.dp), shape = ShapeM) { Icon(Icons.Filled.DeleteOutline, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("释放", fontSize = 13.sp) }
+                    OutlinedButton(onClick = onRelease, modifier = Modifier.weight(1f).height(38.dp), shape = ShapeM) { Icon(Icons.Filled.DeleteOutline, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("强制释放", fontSize = 13.sp) }
                     OutlinedButton(onClick = onExport, modifier = Modifier.weight(1f).height(38.dp), shape = ShapeM) { Icon(Icons.Filled.Download, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("导出", fontSize = 13.sp) }
                 }
             }
@@ -892,6 +958,7 @@ private fun LogsPage(
     logs: List<LogLine>,
     history: List<SessionSummary>,
     historyLimit: String,
+    historyPeriod: String,
     historySizeKb: Int,
     historySavedCount: Int,
     historyCounts: HistoryCounts,
@@ -899,6 +966,7 @@ private fun LogsPage(
     onExport: () -> Unit,
     onClear: () -> Unit,
     onHistoryLimitChange: (String) -> Unit,
+    onHistoryPeriodChange: (String) -> Unit,
     onEditRemark: (SessionSummary) -> Unit,
     onHistoryDetail: (SessionSummary) -> Unit
 ) {
@@ -924,9 +992,9 @@ private fun LogsPage(
         }
         item {
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                PeriodCountChip("今天 ${historyCounts.today} 条", "最多 30 条", GreenSoft, Green)
-                PeriodCountChip("昨天 ${historyCounts.yesterday} 条", "最多 30 条", BlueSoft, Blue)
-                PeriodCountChip("本周 ${historyCounts.week} 条", "最多 100 条", Color(0xFFF3E8FF), Purple)
+                PeriodCountChip("今天 ${historyCounts.today} 条", "最多 30 条", GreenSoft, Green, historyPeriod == "TODAY") { onHistoryPeriodChange("TODAY") }
+                PeriodCountChip("昨天 ${historyCounts.yesterday} 条", "最多 30 条", BlueSoft, Blue, historyPeriod == "YESTERDAY") { onHistoryPeriodChange("YESTERDAY") }
+                PeriodCountChip("本周 ${historyCounts.week} 条", "最多 100 条", Color(0xFFF3E8FF), Purple, historyPeriod == "WEEK") { onHistoryPeriodChange("WEEK") }
             }
             Text(
                 "按周期保存：今天最多30条，昨天最多30条，本周最多100条",
@@ -961,12 +1029,12 @@ private fun LogsPage(
 }
 
 @Composable
-private fun PeriodCountChip(title: String, subtitle: String, bg: Color, fg: Color) {
+private fun PeriodCountChip(title: String, subtitle: String, bg: Color, fg: Color, selected: Boolean, onClick: () -> Unit) {
     Card(
         shape = ShapeM,
-        colors = CardDefaults.cardColors(containerColor = bg.copy(alpha = 0.65f)),
-        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
-        modifier = Modifier.width(104.dp)
+        colors = CardDefaults.cardColors(containerColor = if (selected) bg else Color.White),
+        elevation = CardDefaults.cardElevation(defaultElevation = if (selected) 1.dp else 0.dp),
+        modifier = Modifier.width(104.dp).clickable(onClick = onClick)
     ) {
         Column(Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
             Text(title, color = fg, fontWeight = FontWeight.Bold, fontSize = 12.sp, maxLines = 1)

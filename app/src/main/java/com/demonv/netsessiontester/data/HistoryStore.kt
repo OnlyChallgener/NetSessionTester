@@ -42,6 +42,13 @@ class HistoryStore(private val context: Context) {
             .take(limit.coerceIn(10, 100))
     }
 
+    suspend fun load(period: String, limit: Int = 30): List<SessionSummary> = withContext(Dispatchers.IO) {
+        loadAllInternal()
+            .filterByPeriod(period)
+            .sortedByDescending { it.startedAtEpochMs }
+            .take(limit.coerceIn(10, 100))
+    }
+
     suspend fun loadAll(): List<SessionSummary> = withContext(Dispatchers.IO) {
         loadAllInternal().sortedByDescending { it.startedAtEpochMs }
     }
@@ -94,6 +101,25 @@ class HistoryStore(private val context: Context) {
     fun count(): Int {
         if (!file.exists()) return 0
         return file.readLines().size
+    }
+
+
+    private fun List<SessionSummary>.filterByPeriod(period: String): List<SessionSummary> {
+        val today = LocalDate.now(zone)
+        val yesterday = today.minusDays(1)
+        val weekFields = WeekFields.of(Locale.getDefault())
+        val thisWeek = today.get(weekFields.weekOfWeekBasedYear())
+        val thisWeekYear = today.get(weekFields.weekBasedYear())
+        return filter { item ->
+            val date = Instant.ofEpochMilli(item.startedAtEpochMs).atZone(zone).toLocalDate()
+            when (period) {
+                "TODAY" -> date == today
+                "YESTERDAY" -> date == yesterday
+                "WEEK" -> date.get(weekFields.weekOfWeekBasedYear()) == thisWeek &&
+                    date.get(weekFields.weekBasedYear()) == thisWeekYear
+                else -> true
+            }
+        }
     }
 
     private fun trimByPeriodLimits() {
