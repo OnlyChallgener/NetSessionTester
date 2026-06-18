@@ -1,4 +1,4 @@
-# NetSessionTester v0.9.0 Session Total Fix
+# NetSessionTester v0.9.2 Subtitle Fix
 
 宽带会话测试器，Kotlin + Jetpack Compose 原生版。
 
@@ -28,7 +28,7 @@
 ## 构建
 
 上传完整项目后进入 GitHub Actions，运行 Build Android APK。
-Artifact：NetSessionTester-v0.9.0-session-total-fix-debug-apk
+Artifact：NetSessionTester-v0.9.2-subtitle-fix-debug-apk
 
 ## v0.6.1 修复
 
@@ -211,3 +211,19 @@ Artifact：NetSessionTester-v0.9.0-session-total-fix-debug-apk
 - 前台服务增加 WakeLock，推到后台或息屏时尽量继续测完自动停止。
 - 单条检测历史支持左滑删除。
 - 底部栏保持 60dp，高度内项目 56dp，文字居中不截断。
+
+
+## v0.9.1 修复
+
+- 标题旁增加小号版本号。
+- UI 副标题恢复为“测宽带总会话数”，不在首页写“不是压测工具”。
+- 测试控制、会话卡片标题、状态、最近日志标题等字体再缩小一号。
+- 修复日志已完成但测试控制仍显示运行中的状态同步问题，特别是移动网络/SIM 流量测试场景。
+- 底部栏高度改为 58dp，内部项目 54dp，文字居中。
+- 历史记录左滑删除改为更明显的长竖条删除区域。
+
+
+## v0.9.2
+
+- 首页副标题改为：网络总会话数测试 - IPV4/IPV6分别测试。
+- 字体不再继续缩小，保持当前字号。

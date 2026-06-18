@@ -30,6 +30,8 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.matchParentSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
@@ -94,6 +96,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
@@ -128,6 +131,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.io.OutputStreamWriter
 import kotlin.math.roundToInt
+
+private const val APP_VERSION_LABEL = "v0.9.1"
 
 private enum class MainTab(val label: String, val mark: String) {
     SETTINGS("设置", "settings"),
@@ -392,9 +397,22 @@ private fun NetSessionTesterApp() {
                 val pair = tester.runSessionHoldTest(
                     rawConfig = config,
                     onStats = { stats ->
+                        val terminal = stats.phase.contains("测试完成") ||
+                            stats.phase.contains("已释放") ||
+                            stats.phase.contains("地址丢失") ||
+                            stats.phase.contains("解析失败") ||
+                            stats.phase.contains("中断")
                         state = when (stats.protocol) {
-                            IpProtocol.IPV4 -> state.copy(ipv4Stats = stats, status = "${stats.protocol.label} ${stats.phase}")
-                            IpProtocol.IPV6 -> state.copy(ipv6Stats = stats, status = "${stats.protocol.label} ${stats.phase}")
+                            IpProtocol.IPV4 -> state.copy(
+                                ipv4Stats = stats,
+                                status = "${stats.protocol.label} ${stats.phase}",
+                                isAdding = if (terminal) false else state.isAdding
+                            )
+                            IpProtocol.IPV6 -> state.copy(
+                                ipv6Stats = stats,
+                                status = "${stats.protocol.label} ${stats.phase}",
+                                isAdding = if (terminal) false else state.isAdding
+                            )
                         }
                         updateForegroundNotice(context, "${stats.protocol.label} ${stats.phase}｜活动 ${stats.activeSessions}｜失败 ${stats.totalFailure}")
                     },
@@ -416,6 +434,7 @@ private fun NetSessionTesterApp() {
                         TestMode.IPV4_ONLY -> null
                     }
                 )
+                state = state.copy(isAdding = false, status = "测试完成 · 收尾中", summary = summary)
                 historyStore.append(summary!!)
                 historyStore.trim(100)
                 refreshHistory()
@@ -423,6 +442,7 @@ private fun NetSessionTesterApp() {
             } catch (error: Exception) {
                 if (!manualStopRequested) {
                     failureMsg = error.message ?: error.javaClass.simpleName
+                    state = state.copy(isAdding = false, status = "测试中断 · 收尾中", error = failureMsg)
                     appendLog(LogLine(level = LogLevel.ERROR, text = "测试中断：$failureMsg"))
                     val abortReason = failureMsg ?: "测试中断"
                     val abortIpv4 = if (config.mode != TestMode.IPV6_ONLY) {
@@ -523,6 +543,7 @@ private fun NetSessionTesterApp() {
 
     fun stopAdding() {
         manualStopRequested = true
+        state = state.copy(isAdding = false, status = "手动停止 · 收尾中")
         runningJob?.cancel()
         runningJob = null
         appendLog(LogLine(level = LogLevel.WARN, text = "手动停止；已停止新增并保存历史。"))
@@ -544,6 +565,7 @@ private fun NetSessionTesterApp() {
         val wasRunning = state.isAdding
         if (wasRunning) {
             manualStopRequested = true
+            state = state.copy(isAdding = false, status = "强制释放 · 收尾中")
             runningJob?.cancel()
             runningJob = null
             appendLog(LogLine(level = LogLevel.WARN, text = "强制释放；已停止测试并保存历史。"))
@@ -568,6 +590,7 @@ private fun NetSessionTesterApp() {
     fun abortRunningTest(reason: String) {
         if (!state.isAdding) return
         manualStopRequested = true
+        state = state.copy(isAdding = false, status = "$reason · 已中止")
         runningJob?.cancel()
         runningJob = null
         appendLog(LogLine(level = LogLevel.ERROR, text = "$reason，测试已中止"))
@@ -852,7 +875,7 @@ private fun SettingsPage(
             .padding(horizontal = 14.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
-        item { PageTitle("宽带会话测试器", "测宽带总会话数 · 不是压测工具") }
+        item { PageTitle("宽带会话测试器", "网络总会话数测试 - IPV4/IPV6分别测试。") }
         item {
             SoftCard {
                 SectionTitle("◎", "目标设置", Blue)
@@ -970,7 +993,7 @@ private fun TestPage(
         verticalArrangement = Arrangement.spacedBy(7.dp)
     ) {
         item {
-            PageTitle("宽带会话测试器", "测宽带总会话数 · 不是压测工具")
+            PageTitle("宽带会话测试器", "网络总会话数测试 - IPV4/IPV6分别测试。")
             FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
                 StatusChip(mode.label, BlueSoft, Blue)
                 StatusChip(if (isAdding) "● 运行中" else status, GreenSoft, Green)
@@ -980,7 +1003,7 @@ private fun TestPage(
         item {
             SoftCard {
                 SectionTitle("∿", "测试控制", Blue)
-                Text(if (isAdding) "● 正在运行 · 已连接目标" else "状态：$status", color = if (isAdding) Green else Muted, fontWeight = FontWeight.Medium, fontSize = 13.sp)
+                Text(if (isAdding) "● 正在运行 · 已连接目标" else "状态：$status", color = if (isAdding) Green else Muted, fontWeight = FontWeight.Medium, fontSize = 12.sp)
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     Button(onClick = onStart, enabled = !isAdding, modifier = Modifier.weight(1f).height(38.dp), shape = ShapeM) {
                         Icon(Icons.Filled.PlayArrow, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("开始", fontSize = 13.sp)
@@ -993,7 +1016,7 @@ private fun TestPage(
                         shape = ShapeM
                     ) { Icon(Icons.Filled.Stop, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("停止", fontSize = 13.sp) }
                 }
-                Spacer(Modifier.height(2.dp))
+                Spacer(Modifier.height(4.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     OutlinedButton(onClick = onRelease, modifier = Modifier.weight(1f).height(38.dp), shape = ShapeM) { Icon(Icons.Filled.DeleteOutline, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("强制释放", fontSize = 13.sp) }
                     OutlinedButton(onClick = onExport, modifier = Modifier.weight(1f).height(38.dp), shape = ShapeM) { Icon(Icons.Filled.Download, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("导出", fontSize = 13.sp) }
@@ -1167,7 +1190,13 @@ private fun PeriodCountChip(title: String, subtitle: String, bg: Color, fg: Colo
 @Composable
 private fun PageTitle(title: String, subtitle: String?) {
     Column(modifier = Modifier.padding(top = 4.dp, bottom = 2.dp)) {
-        Text(title, fontSize = 22.sp, lineHeight = 25.sp, fontWeight = FontWeight.ExtraBold, color = TextDark)
+        Row(verticalAlignment = Alignment.Bottom) {
+            Text(title, fontSize = 22.sp, lineHeight = 25.sp, fontWeight = FontWeight.ExtraBold, color = TextDark)
+            if (title == "宽带会话测试器") {
+                Spacer(Modifier.width(8.dp))
+                Text(APP_VERSION_LABEL, fontSize = 10.sp, color = Muted, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(bottom = 2.dp))
+            }
+        }
         subtitle?.let {
             Text(it, fontSize = 12.sp, color = Muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
@@ -1195,7 +1224,7 @@ private fun SectionTitle(mark: String, title: String, color: Color) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         MarkBox(mark, color.copy(alpha = 0.12f), color)
         Spacer(Modifier.width(10.dp))
-        Text(title, fontSize = 16.sp, fontWeight = FontWeight.Bold, color = TextDark)
+        Text(title, fontSize = 15.sp, fontWeight = FontWeight.Bold, color = TextDark)
     }
 }
 
@@ -1283,7 +1312,7 @@ private fun SessionStatsCard(title: String, stats: ProtocolStats, maskPrivacy: B
         Row(verticalAlignment = Alignment.CenterVertically) {
             SectionTitle("▮", title, Blue)
             Spacer(Modifier.weight(1f))
-            Text(stats.phase, color = Blue, fontWeight = FontWeight.Bold, fontSize = 13.sp, maxLines = 1)
+            Text(stats.phase, color = Blue, fontWeight = FontWeight.Bold, fontSize = 12.sp, maxLines = 1)
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             MetricTile("活动", stats.activeSessions.toString(), Blue, Modifier.weight(1f))
@@ -1435,20 +1464,31 @@ private fun SwipeDeleteHistoryCard(
     onDelete: () -> Unit
 ) {
     var offsetX by remember(item.id) { mutableStateOf(0f) }
-    val maxOffset = -112f
+    val density = LocalDensity.current
+    val maxOffset = with(density) { -108.dp.toPx() }
     Box(modifier = Modifier.fillMaxWidth()) {
         Box(
             modifier = Modifier
-                .align(Alignment.CenterEnd)
-                .width(96.dp)
-                .height(64.dp)
-                .background(ErrorRed.copy(alpha = 0.12f), RoundedCornerShape(18.dp))
-                .clickable { onDelete() },
-            contentAlignment = Alignment.Center
+                .matchParentSize()
+                .padding(vertical = 2.dp),
+            contentAlignment = Alignment.CenterEnd
         ) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Icon(Icons.Filled.DeleteOutline, contentDescription = null, tint = ErrorRed, modifier = Modifier.width(20.dp).height(20.dp))
-                Text("删除", color = ErrorRed, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            Box(
+                modifier = Modifier
+                    .width(96.dp)
+                    .fillMaxHeight()
+                    .background(
+                        Brush.horizontalGradient(listOf(Color(0xFFFFF1F2), ErrorRed.copy(alpha = 0.92f))),
+                        RoundedCornerShape(topEnd = 22.dp, bottomEnd = 22.dp, topStart = 12.dp, bottomStart = 12.dp)
+                    )
+                    .clickable { onDelete() },
+                contentAlignment = Alignment.Center
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+                    Icon(Icons.Filled.DeleteOutline, contentDescription = null, tint = Color.White, modifier = Modifier.width(23.dp).height(23.dp))
+                    Spacer(Modifier.height(5.dp))
+                    Text("删除", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                }
             }
         }
         Box(
@@ -1462,9 +1502,7 @@ private fun SwipeDeleteHistoryCard(
                         onDragEnd = {
                             offsetX = if (offsetX < maxOffset / 2f) maxOffset else 0f
                         },
-                        onDragCancel = {
-                            offsetX = 0f
-                        }
+                        onDragCancel = { offsetX = 0f }
                     )
                 }
         ) {
@@ -1653,7 +1691,7 @@ private fun BottomNav(selectedTab: MainTab, onSelect: (MainTab) -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .height(60.dp)
+            .height(58.dp)
             .background(Color(0xFFEAF2FF))
             .padding(horizontal = 22.dp, vertical = 2.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
@@ -1669,7 +1707,7 @@ private fun BottomNav(selectedTab: MainTab, onSelect: (MainTab) -> Unit) {
             Column(
                 modifier = Modifier
                     .width(86.dp)
-                    .height(56.dp)
+                    .height(54.dp)
                     .background(if (selected) Color(0xFFEBDCFD) else Color.Transparent, RoundedCornerShape(24.dp))
                     .clickable { onSelect(tab) }
                     .padding(vertical = 4.dp),
