@@ -1,4 +1,4 @@
-# NetSessionTester v0.6.10 Log Newest First
+# NetSessionTester v0.7.0 History Notes
 
 宽带会话测试器，Kotlin + Jetpack Compose 原生版。
 
@@ -28,7 +28,7 @@
 ## 构建
 
 上传完整项目后进入 GitHub Actions，运行 Build Android APK。
-Artifact：NetSessionTester-v0.6.10-log-newest-first-debug-apk
+Artifact：NetSessionTester-v0.7.0-history-notes-debug-apk
 
 ## v0.6.1 修复
 
@@ -104,3 +104,12 @@ Artifact：NetSessionTester-v0.6.10-log-newest-first-debug-apk
 - 第二次测试开始后，“目标 / 解析 / 新增 / 统计”等新日志会立即显示在顶部。
 - 测试页“最近日志”也改为最新 4 条倒序显示。
 - 底层运行日志仍累计保存最多 500 条，超过自动清旧日志。
+
+
+## v0.7.0
+
+- 检测历史改为按周期统计：今天 / 昨天 / 本周。
+- 保存规则：今天最多 30 条，昨天最多 30 条，本周最多 100 条。
+- 每条检测历史增加备注字段，可点击编辑并保存。
+- 地址解析结果 IPv4 / IPv6 支持横向滑动，长 IPv6 地址不再看不全。
+- 检测历史继续显示占用 KB。

@@ -9,23 +9,80 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
+import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneId
+import java.time.temporal.WeekFields
+import java.util.Locale
+
+data class HistoryCounts(
+    val today: Int = 0,
+    val yesterday: Int = 0,
+    val week: Int = 0,
+    val total: Int = 0,
+    val sizeKb: Int = 0
+)
 
 class HistoryStore(private val context: Context) {
     private val file: File get() = File(context.filesDir, "session_history_v6.jsonl")
+    private val zone: ZoneId get() = ZoneId.systemDefault()
 
     suspend fun append(summary: SessionSummary) = withContext(Dispatchers.IO) {
         file.appendText(summary.toJson().toString() + "\n")
+        trimByPeriodLimits()
     }
 
     suspend fun clear() = withContext(Dispatchers.IO) {
         if (file.exists()) file.delete()
     }
 
+    suspend fun load(limit: Int = 30): List<SessionSummary> = withContext(Dispatchers.IO) {
+        loadAllInternal()
+            .sortedByDescending { it.startedAtEpochMs }
+            .take(limit.coerceIn(10, 100))
+    }
+
+    suspend fun loadAll(): List<SessionSummary> = withContext(Dispatchers.IO) {
+        loadAllInternal().sortedByDescending { it.startedAtEpochMs }
+    }
+
+    suspend fun updateRemark(id: String, remark: String) = withContext(Dispatchers.IO) {
+        val all = loadAllInternal()
+        val updated = all.map { item ->
+            if (item.id == id) item.copy(remark = remark.take(120)) else item
+        }
+        writeAll(updated)
+    }
+
+    suspend fun counts(): HistoryCounts = withContext(Dispatchers.IO) {
+        val all = loadAllInternal()
+        val today = LocalDate.now(zone)
+        val yesterday = today.minusDays(1)
+        val weekFields = WeekFields.of(Locale.getDefault())
+        val thisWeek = today.get(weekFields.weekOfWeekBasedYear())
+        val thisWeekYear = today.get(weekFields.weekBasedYear())
+        var todayCount = 0
+        var yesterdayCount = 0
+        var weekCount = 0
+        all.forEach { item ->
+            val date = Instant.ofEpochMilli(item.startedAtEpochMs).atZone(zone).toLocalDate()
+            if (date == today) todayCount++
+            if (date == yesterday) yesterdayCount++
+            if (date.get(weekFields.weekOfWeekBasedYear()) == thisWeek &&
+                date.get(weekFields.weekBasedYear()) == thisWeekYear
+            ) weekCount++
+        }
+        HistoryCounts(
+            today = todayCount,
+            yesterday = yesterdayCount,
+            week = weekCount,
+            total = all.size,
+            sizeKb = sizeKb()
+        )
+    }
+
     suspend fun trim(limit: Int) = withContext(Dispatchers.IO) {
-        if (!file.exists()) return@withContext
-        val safeLimit = limit.coerceIn(10, 100)
-        val lines = file.readLines().takeLast(safeLimit)
-        file.writeText(lines.joinToString("\n") + if (lines.isNotEmpty()) "\n" else "")
+        trimByPeriodLimits()
     }
 
     fun sizeKb(): Int {
@@ -39,18 +96,58 @@ class HistoryStore(private val context: Context) {
         return file.readLines().size
     }
 
-    suspend fun load(limit: Int = 30): List<SessionSummary> = withContext(Dispatchers.IO) {
-        if (!file.exists()) return@withContext emptyList()
-        file.readLines().takeLast(limit).mapNotNull { line ->
+    private fun trimByPeriodLimits() {
+        val all = loadAllInternal().sortedByDescending { it.startedAtEpochMs }
+        val today = LocalDate.now(zone)
+        val yesterday = today.minusDays(1)
+        val weekFields = WeekFields.of(Locale.getDefault())
+        val thisWeek = today.get(weekFields.weekOfWeekBasedYear())
+        val thisWeekYear = today.get(weekFields.weekBasedYear())
+
+        val todayItems = mutableListOf<SessionSummary>()
+        val yesterdayItems = mutableListOf<SessionSummary>()
+        val weekOtherItems = mutableListOf<SessionSummary>()
+
+        all.forEach { item ->
+            val date = Instant.ofEpochMilli(item.startedAtEpochMs).atZone(zone).toLocalDate()
+            val inThisWeek = date.get(weekFields.weekOfWeekBasedYear()) == thisWeek &&
+                date.get(weekFields.weekBasedYear()) == thisWeekYear
+            when {
+                date == today -> todayItems += item
+                date == yesterday -> yesterdayItems += item
+                inThisWeek -> weekOtherItems += item
+            }
+        }
+
+        val keptToday = todayItems.take(30)
+        val keptYesterday = yesterdayItems.take(30)
+        val remainingWeekSlots = (100 - keptToday.size - keptYesterday.size).coerceAtLeast(0)
+        val keptWeekOther = weekOtherItems.take(remainingWeekSlots)
+        writeAll((keptToday + keptYesterday + keptWeekOther).sortedBy { it.startedAtEpochMs })
+    }
+
+    private fun loadAllInternal(): List<SessionSummary> {
+        if (!file.exists()) return emptyList()
+        return file.readLines().mapNotNull { line ->
             runCatching { JSONObject(line).toSummary() }.getOrNull()
-        }.reversed()
+        }
+    }
+
+    private fun writeAll(items: List<SessionSummary>) {
+        if (items.isEmpty()) {
+            if (file.exists()) file.delete()
+            return
+        }
+        file.writeText(items.joinToString("\n") { it.toJson().toString() } + "\n")
     }
 
     private fun SessionSummary.toJson(): JSONObject = JSONObject()
+        .put("id", id)
         .put("startedAtEpochMs", startedAtEpochMs)
         .put("host", host)
         .put("port", port)
         .put("mode", mode.name)
+        .put("remark", remark)
         .put("ipv4Stats", ipv4Stats?.toJson())
         .put("ipv6Stats", ipv6Stats?.toJson())
 
@@ -67,14 +164,19 @@ class HistoryStore(private val context: Context) {
         .put("stable", maxStableSessions)
         .put("errors", JSONObject(errorSummary))
 
-    private fun JSONObject.toSummary(): SessionSummary = SessionSummary(
-        startedAtEpochMs = optLong("startedAtEpochMs"),
-        host = optString("host", "www.baidu.com"),
-        port = optInt("port", 80),
-        mode = runCatching { TestMode.valueOf(optString("mode", TestMode.IPV4_THEN_IPV6.name)) }.getOrDefault(TestMode.IPV4_THEN_IPV6),
-        ipv4Stats = optJSONObject("ipv4Stats")?.toStats(),
-        ipv6Stats = optJSONObject("ipv6Stats")?.toStats()
-    )
+    private fun JSONObject.toSummary(): SessionSummary {
+        val started = optLong("startedAtEpochMs")
+        return SessionSummary(
+            id = optString("id", started.toString()),
+            startedAtEpochMs = started,
+            host = optString("host", "www.baidu.com"),
+            port = optInt("port", 80),
+            mode = runCatching { TestMode.valueOf(optString("mode", TestMode.IPV4_THEN_IPV6.name)) }.getOrDefault(TestMode.IPV4_THEN_IPV6),
+            ipv4Stats = optJSONObject("ipv4Stats")?.toStats(),
+            ipv6Stats = optJSONObject("ipv6Stats")?.toStats(),
+            remark = optString("remark", "")
+        )
+    }
 
     private fun JSONObject.toStats(): ProtocolStats {
         val errorsObj = optJSONObject("errors") ?: JSONObject()

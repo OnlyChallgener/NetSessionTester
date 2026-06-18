@@ -73,11 +73,13 @@ enum class LogLevel { INFO, SUCCESS, WARN, ERROR, STAT }
 
 data class SessionSummary(
     val startedAtEpochMs: Long,
+    val id: String = startedAtEpochMs.toString(),
     val host: String,
     val port: Int,
     val mode: TestMode,
     val ipv4Stats: ProtocolStats?,
-    val ipv6Stats: ProtocolStats?
+    val ipv6Stats: ProtocolStats?,
+    val remark: String = ""
 ) {
     val startedAtText: String
         get() = DateTimeFormatter.ofPattern("MM-dd HH:mm:ss")

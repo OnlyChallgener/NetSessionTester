@@ -98,6 +98,7 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import com.demonv.netsessiontester.data.HistoryStore
+import com.demonv.netsessiontester.data.HistoryCounts
 import com.demonv.netsessiontester.data.LogStore
 import com.demonv.netsessiontester.data.SavedSettings
 import com.demonv.netsessiontester.data.SettingsStore
@@ -170,12 +171,15 @@ private fun NetSessionTesterApp() {
     var logSizeKb by remember { mutableStateOf(0) }
     var historySizeKb by remember { mutableStateOf(0) }
     var historySavedCount by remember { mutableStateOf(0) }
+    var historyCounts by remember { mutableStateOf(HistoryCounts()) }
     var manualStopRequested by remember { mutableStateOf(false) }
     var currentTestConfig by remember { mutableStateOf<SessionConfig?>(null) }
     var currentStartedAt by remember { mutableStateOf(0L) }
 
     var detailTitle by remember { mutableStateOf<String?>(null) }
     var detailLines by remember { mutableStateOf<List<String>>(emptyList()) }
+    var editingRemarkSummary by remember { mutableStateOf<SessionSummary?>(null) }
+    var editingRemarkText by remember { mutableStateOf("") }
     var showRunLogDetail by remember { mutableStateOf(false) }
 
     BackHandler(enabled = showRunLogDetail) { showRunLogDetail = false }
@@ -216,6 +220,7 @@ private fun NetSessionTesterApp() {
         logSizeKb = logStore.sizeKb()
         historySizeKb = historyStore.sizeKb()
         historySavedCount = historyStore.count()
+        historyCounts = historyStore.counts()
         val saved = settingsStore.load()
         host = saved.host.ifBlank { "www.baidu.com" }
         port = saved.port
@@ -230,6 +235,7 @@ private fun NetSessionTesterApp() {
         historyLimit = if (saved.historyLimit in listOf("10", "30", "100")) saved.historyLimit else "30"
         state = state.copy(history = historyStore.load(historyLimit.toIntOrNull()?.coerceIn(10, 100) ?: 30))
         historySavedCount = historyStore.count()
+        historyCounts = historyStore.counts()
         settingsLoaded = true
     }
 
@@ -359,6 +365,7 @@ private fun NetSessionTesterApp() {
                 historyStore.trim(100)
                 historySizeKb = historyStore.sizeKb()
                 historySavedCount = historyStore.count()
+                historyCounts = historyStore.counts()
                 val safeHistoryLimit = historyLimit.toIntOrNull()?.coerceIn(10, 100) ?: 30
                 state = state.copy(
                     isAdding = false,
@@ -461,9 +468,49 @@ private fun NetSessionTesterApp() {
             historyStore.clear()
             historySizeKb = 0
             historySavedCount = 0
+            historyCounts = HistoryCounts()
             state = state.copy(history = emptyList())
             snackbarHostState.showSnackbar("检测历史已清理")
         }
+    }
+
+
+    if (editingRemarkSummary != null) {
+        AlertDialog(
+            onDismissRequest = { editingRemarkSummary = null },
+            confirmButton = {
+                TextButton(onClick = {
+                    val item = editingRemarkSummary
+                    if (item != null) {
+                        scope.launch {
+                            historyStore.updateRemark(item.id, editingRemarkText)
+                            val safeHistoryLimit = historyLimit.toIntOrNull()?.coerceIn(10, 100) ?: 30
+                            state = state.copy(history = historyStore.load(safeHistoryLimit))
+                            historyCounts = historyStore.counts()
+                            historySavedCount = historyStore.count()
+                            historySizeKb = historyStore.sizeKb()
+                            snackbarHostState.showSnackbar("备注已保存")
+                        }
+                    }
+                    editingRemarkSummary = null
+                }) { Text("保存", fontSize = 13.sp) }
+            },
+            dismissButton = {
+                TextButton(onClick = { editingRemarkSummary = null }) { Text("取消", fontSize = 13.sp) }
+            },
+            title = { Text("编辑备注", fontWeight = FontWeight.Bold) },
+            text = {
+                OutlinedTextField(
+                    value = editingRemarkText,
+                    onValueChange = { editingRemarkText = it.take(120) },
+                    placeholder = { Text("输入备注，例如：晚高峰测试", fontSize = 12.sp) },
+                    minLines = 2,
+                    maxLines = 4,
+                    shape = ShapeM,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        )
     }
 
     if (detailTitle != null) {
@@ -579,6 +626,7 @@ private fun NetSessionTesterApp() {
                     historyLimit = historyLimit,
                     historySizeKb = historySizeKb,
                     historySavedCount = historySavedCount,
+                    historyCounts = historyCounts,
                     maskPrivacy = maskPrivacy,
                     onExport = { exportLogs() },
                     onClear = { clearHistoryOnly() },
@@ -589,8 +637,13 @@ private fun NetSessionTesterApp() {
                             historyStore.trim(100)
                             historySizeKb = historyStore.sizeKb()
                             historySavedCount = historyStore.count()
+                            historyCounts = historyStore.counts()
                             state = state.copy(history = historyStore.load(safeLimit))
                         }
+                    },
+                    onEditRemark = { summary ->
+                        editingRemarkSummary = summary
+                        editingRemarkText = summary.remark
                     },
                     onHistoryDetail = { summary ->
                         showDetail("检测详情", historyDetailLines(summary, maskPrivacy))
@@ -833,6 +886,7 @@ private fun FullRunLogPage(
     }
 }
 
+
 @Composable
 private fun LogsPage(
     logs: List<LogLine>,
@@ -840,10 +894,12 @@ private fun LogsPage(
     historyLimit: String,
     historySizeKb: Int,
     historySavedCount: Int,
+    historyCounts: HistoryCounts,
     maskPrivacy: Boolean,
     onExport: () -> Unit,
     onClear: () -> Unit,
     onHistoryLimitChange: (String) -> Unit,
+    onEditRemark: (SessionSummary) -> Unit,
     onHistoryDetail: (SessionSummary) -> Unit
 ) {
     LazyColumn(
@@ -851,7 +907,7 @@ private fun LogsPage(
             .fillMaxSize()
             .statusBarsPadding()
             .padding(horizontal = 14.dp),
-        verticalArrangement = Arrangement.spacedBy(7.dp)
+        verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         item {
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 10.dp, bottom = 6.dp)) {
@@ -865,6 +921,21 @@ private fun LogsPage(
                     Text("清理", fontSize = 11.sp)
                 }
             }
+        }
+        item {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                PeriodCountChip("今天 ${historyCounts.today} 条", "最多 30 条", GreenSoft, Green)
+                PeriodCountChip("昨天 ${historyCounts.yesterday} 条", "最多 30 条", BlueSoft, Blue)
+                PeriodCountChip("本周 ${historyCounts.week} 条", "最多 100 条", Color(0xFFF3E8FF), Purple)
+            }
+            Text(
+                "按周期保存：今天最多30条，昨天最多30条，本周最多100条",
+                color = Muted,
+                fontSize = 11.sp,
+                modifier = Modifier.padding(top = 6.dp)
+            )
+        }
+        item {
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 listOf("10", "30", "100").forEach { limit ->
                     Box(modifier = Modifier.clickable { onHistoryLimitChange(limit) }) {
@@ -877,12 +948,33 @@ private fun LogsPage(
             item { SoftCard { Text("暂无历史记录", color = TextDark, fontSize = 13.sp) } }
         } else {
             items(history.take(historyLimit.toIntOrNull()?.coerceIn(10, 100) ?: 30)) { item ->
-                HistoryCard(item, maskPrivacy, onClick = { onHistoryDetail(item) })
+                HistoryCard(
+                    item = item,
+                    maskPrivacy = maskPrivacy,
+                    onClick = { onHistoryDetail(item) },
+                    onEditRemark = { onEditRemark(item) }
+                )
             }
         }
         item { Spacer(Modifier.height(72.dp)) }
     }
 }
+
+@Composable
+private fun PeriodCountChip(title: String, subtitle: String, bg: Color, fg: Color) {
+    Card(
+        shape = ShapeM,
+        colors = CardDefaults.cardColors(containerColor = bg.copy(alpha = 0.65f)),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+        modifier = Modifier.width(104.dp)
+    ) {
+        Column(Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
+            Text(title, color = fg, fontWeight = FontWeight.Bold, fontSize = 12.sp, maxLines = 1)
+            Text(subtitle, color = Muted, fontSize = 10.sp, maxLines = 1)
+        }
+    }
+}
+
 
 @Composable
 private fun PageTitle(title: String, subtitle: String?) {
@@ -1143,8 +1235,14 @@ private fun CompactLogLine(line: LogLine, maskPrivacy: Boolean) {
     }
 }
 
+
 @Composable
-private fun HistoryCard(item: SessionSummary, maskPrivacy: Boolean, onClick: () -> Unit) {
+private fun HistoryCard(
+    item: SessionSummary,
+    maskPrivacy: Boolean,
+    onClick: () -> Unit,
+    onEditRemark: () -> Unit
+) {
     val mainStats = item.ipv4Stats ?: item.ipv6Stats
     val protocol = when {
         item.ipv4Stats != null && item.ipv6Stats != null -> "分别测试"
@@ -1155,12 +1253,10 @@ private fun HistoryCard(item: SessionSummary, maskPrivacy: Boolean, onClick: () 
     val address = mainStats?.resolvedAddresses?.firstOrNull().orEmpty()
     SoftCard {
         Column(
-            Modifier
-                .fillMaxWidth()
-                .clickable(onClick = onClick),
-            verticalArrangement = Arrangement.spacedBy(7.dp)
+            Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.clickable(onClick = onClick)) {
                 Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
                     Icon(Icons.Filled.History, contentDescription = null, tint = Muted, modifier = Modifier.width(15.dp).height(15.dp))
                     Spacer(Modifier.width(6.dp))
@@ -1195,6 +1291,26 @@ private fun HistoryCard(item: SessionSummary, maskPrivacy: Boolean, onClick: () 
                     }
                 }
             }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(BlueSoft.copy(alpha = 0.45f), RoundedCornerShape(12.dp))
+                    .clickable(onClick = onEditRemark)
+                    .padding(horizontal = 10.dp, vertical = 9.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(Icons.Filled.Info, contentDescription = null, tint = Blue, modifier = Modifier.width(14.dp).height(14.dp))
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    if (item.remark.isBlank()) "备注：点击添加备注" else "备注：${item.remark}",
+                    color = if (item.remark.isBlank()) Muted else TextDark,
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                Text("编辑", color = Blue, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            }
         }
     }
 }
@@ -1214,6 +1330,7 @@ private fun DetailItem(icon: androidx.compose.ui.graphics.vector.ImageVector, la
         Text(value, color = TextDark, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.SemiBold)
     }
 }
+
 
 @Composable
 private fun StatusChip(text: String, bg: Color, fg: Color, compact: Boolean = false) {
@@ -1240,9 +1357,21 @@ private fun iconFor(mark: String) = when (mark) {
 
 @Composable
 private fun InfoLine(label: String, value: String, color: Color = TextDark) {
-    Row {
+    Row(verticalAlignment = Alignment.CenterVertically) {
         Text("$label：", color = Muted, fontSize = 12.sp, modifier = Modifier.width(54.dp))
-        Text(value, color = color, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .horizontalScroll(rememberScrollState())
+        ) {
+            Text(
+                value,
+                color = color,
+                fontSize = 12.sp,
+                maxLines = 1,
+                softWrap = false
+            )
+        }
     }
 }
 
