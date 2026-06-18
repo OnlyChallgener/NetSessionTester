@@ -83,10 +83,10 @@ class TcpTester {
         release(protocol)
         val addresses = resolveInetAddresses(config.host, protocol)
         if (addresses.isEmpty()) {
-            val stats = ProtocolStats(protocol = protocol, phase = "解析失败")
+            val stats = ProtocolStats(protocol = protocol, phase = "地址丢失")
             onStats(stats)
-            onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 没有解析到可用地址"))
-            return stats
+            onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 地址丢失或解析失败"))
+            throw IllegalStateException("${protocol.label} 地址丢失或解析失败")
         }
 
         val addressText = addresses.mapNotNull { it.hostAddress }.distinct()
@@ -102,7 +102,9 @@ class TcpTester {
         onStats(stats)
 
         while (currentCoroutineContext().isActive && totalSuccess < config.successLimit && totalFailure < config.failureLimit) {
-            val targetBatch = minOf(config.batchSize, config.successLimit - totalSuccess)
+            val remainingSuccess = config.successLimit - totalSuccess
+            val remainingFailure = config.failureLimit - totalFailure
+            val targetBatch = minOf(config.batchSize, remainingSuccess, remainingFailure)
             if (targetBatch <= 0) break
             val batchResult = openBatch(addresses, config.port, config.timeoutMs, targetBatch)
 

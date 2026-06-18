@@ -1,4 +1,4 @@
-# NetSessionTester v0.8.2 Bottom 60
+# NetSessionTester v0.9.0 Session Total Fix
 
 宽带会话测试器，Kotlin + Jetpack Compose 原生版。
 
@@ -28,7 +28,7 @@
 ## 构建
 
 上传完整项目后进入 GitHub Actions，运行 Build Android APK。
-Artifact：NetSessionTester-v0.8.2-bottom-60-debug-apk
+Artifact：NetSessionTester-v0.9.0-session-total-fix-debug-apk
 
 ## v0.6.1 修复
 
@@ -198,3 +198,16 @@ Artifact：NetSessionTester-v0.8.2-bottom-60-debug-apk
 - 每个底部按钮区域固定 56dp 高度。
 - 底部按钮图标和文字继续居中显示，避免文字被遮挡。
 - 保留 v0.8.1 的顶部留白优化和其他功能。
+
+
+## v0.9.0
+
+- 明确定位：本 APP 用于检测宽带/路由器 TCP 总会话保持能力，不是压测工具。
+- 测试页重点文字整体缩小一号。
+- 测试控制按钮上下两行间距增加。
+- IPv4 / IPv6 会话卡片新增“上次活动”统计，便于截图分享。
+- 失败停止改为接近硬限制：剩余失败额度不足一批时自动缩小本批数量。
+- 网络切换 / 地址丢失时自动中止测试，UI 不再继续显示正在运行。
+- 前台服务增加 WakeLock，推到后台或息屏时尽量继续测完自动停止。
+- 单条检测历史支持左滑删除。
+- 底部栏保持 60dp，高度内项目 56dp，文字居中不截断。

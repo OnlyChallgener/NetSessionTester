@@ -61,6 +61,11 @@ class HistoryStore(private val context: Context) {
         writeAll(updated)
     }
 
+    suspend fun delete(id: String) = withContext(Dispatchers.IO) {
+        val kept = loadAllInternal().filterNot { it.id == id }
+        writeAll(kept)
+    }
+
     suspend fun counts(): HistoryCounts = withContext(Dispatchers.IO) {
         val all = loadAllInternal()
         val today = LocalDate.now(zone)

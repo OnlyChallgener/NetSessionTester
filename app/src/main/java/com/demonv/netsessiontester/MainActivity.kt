@@ -7,6 +7,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -16,6 +18,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -29,6 +32,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
@@ -88,6 +92,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
@@ -95,6 +100,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
@@ -118,8 +124,10 @@ import com.demonv.netsessiontester.network.PublicIpResult
 import com.demonv.netsessiontester.ui.theme.NetSessionTesterTheme
 import com.demonv.netsessiontester.util.CsvExporter
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.io.OutputStreamWriter
+import kotlin.math.roundToInt
 
 private enum class MainTab(val label: String, val mark: String) {
     SETTINGS("设置", "settings"),
@@ -183,6 +191,7 @@ private fun NetSessionTesterApp() {
     var manualStopRequested by remember { mutableStateOf(false) }
     var currentTestConfig by remember { mutableStateOf<SessionConfig?>(null) }
     var currentStartedAt by remember { mutableStateOf(0L) }
+    var testNetworkSignature by remember { mutableStateOf("") }
 
     var detailTitle by remember { mutableStateOf<String?>(null) }
     var detailLines by remember { mutableStateOf<List<String>>(emptyList()) }
@@ -359,6 +368,7 @@ private fun NetSessionTesterApp() {
         val startedAt = System.currentTimeMillis()
         currentStartedAt = startedAt
         currentTestConfig = config
+        testNetworkSignature = currentNetworkSignature(context)
         manualStopRequested = false
         state = state.copy(
             isAdding = true,
@@ -414,6 +424,31 @@ private fun NetSessionTesterApp() {
                 if (!manualStopRequested) {
                     failureMsg = error.message ?: error.javaClass.simpleName
                     appendLog(LogLine(level = LogLevel.ERROR, text = "测试中断：$failureMsg"))
+                    val abortReason = failureMsg ?: "测试中断"
+                    val abortIpv4 = if (config.mode != TestMode.IPV6_ONLY) {
+                        state.ipv4Stats.copy(
+                            phase = abortReason,
+                            errorSummary = state.ipv4Stats.errorSummary + (abortReason to 1)
+                        )
+                    } else null
+                    val abortIpv6 = if (config.mode != TestMode.IPV4_ONLY && state.ipv6Stats.totalAttempts > 0) {
+                        state.ipv6Stats.copy(
+                            phase = abortReason,
+                            errorSummary = state.ipv6Stats.errorSummary + (abortReason to 1)
+                        )
+                    } else null
+                    val abortSummary = SessionSummary(
+                        startedAtEpochMs = startedAt,
+                        host = config.host,
+                        port = config.port,
+                        mode = config.mode,
+                        ipv4Stats = abortIpv4,
+                        ipv6Stats = abortIpv6
+                    )
+                    summary = abortSummary
+                    historyStore.append(abortSummary)
+                    historyStore.trim(100)
+                    refreshHistory()
                 }
             } finally {
                 if (!manualStopRequested) {
@@ -527,6 +562,40 @@ private fun NetSessionTesterApp() {
                 ipv6Stats = state.ipv6Stats.copy(activeSessions = 0, phase = if (state.ipv6Stats.totalAttempts > 0) "已释放" else state.ipv6Stats.phase)
             )
             stopForegroundNotice(context)
+        }
+    }
+
+    fun abortRunningTest(reason: String) {
+        if (!state.isAdding) return
+        manualStopRequested = true
+        runningJob?.cancel()
+        runningJob = null
+        appendLog(LogLine(level = LogLevel.ERROR, text = "$reason，测试已中止"))
+        saveManualStopSummary(reason)
+        scope.launch {
+            val closed = tester.release()
+            appendLog(LogLine(level = LogLevel.WARN, text = "$reason，已释放连接：$closed 条"))
+            state = state.copy(
+                isAdding = false,
+                status = "$reason · 已中止",
+                ipv4Stats = state.ipv4Stats.copy(activeSessions = 0, phase = if (state.ipv4Stats.totalAttempts > 0) "已中止" else state.ipv4Stats.phase),
+                ipv6Stats = state.ipv6Stats.copy(activeSessions = 0, phase = if (state.ipv6Stats.totalAttempts > 0) "已中止" else state.ipv6Stats.phase)
+            )
+            updateForegroundNotice(context, "$reason，测试已中止")
+            stopForegroundNotice(context)
+        }
+    }
+
+    LaunchedEffect(state.isAdding, testNetworkSignature) {
+        if (state.isAdding && testNetworkSignature.isNotBlank()) {
+            while (state.isAdding) {
+                delay(1000)
+                val nowSignature = currentNetworkSignature(context)
+                if (nowSignature == "NONE" || nowSignature != testNetworkSignature) {
+                    abortRunningTest("网络切换或地址丢失")
+                    break
+                }
+            }
         }
     }
 
@@ -687,6 +756,8 @@ private fun NetSessionTesterApp() {
                     onExport = { exportLogs() },
                     ipv4Stats = state.ipv4Stats,
                     ipv6Stats = state.ipv6Stats,
+                    lastIpv4Active = latestActiveFromHistory(state.history, IpProtocol.IPV4),
+                    lastIpv6Active = latestActiveFromHistory(state.history, IpProtocol.IPV6),
                     showIpv4 = mode != TestMode.IPV6_ONLY,
                     showIpv6 = mode != TestMode.IPV4_ONLY,
                     maskPrivacy = maskPrivacy,
@@ -728,6 +799,13 @@ private fun NetSessionTesterApp() {
                     onEditRemark = { summary ->
                         editingRemarkSummary = summary
                         editingRemarkText = summary.remark
+                    },
+                    onDeleteHistory = { summary ->
+                        scope.launch {
+                            historyStore.delete(summary.id)
+                            refreshHistory()
+                            snackbarHostState.showSnackbar("已删除该条检测历史")
+                        }
                     },
                     onHistoryDetail = { summary ->
                         showDetail("检测详情", historyDetailLines(summary, maskPrivacy))
@@ -774,7 +852,7 @@ private fun SettingsPage(
             .padding(horizontal = 14.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
-        item { PageTitle("宽带会话测试器", "TCP 会话保持 · IPv4 / IPv6 分别测试") }
+        item { PageTitle("宽带会话测试器", "测宽带总会话数 · 不是压测工具") }
         item {
             SoftCard {
                 SectionTitle("◎", "目标设置", Blue)
@@ -876,6 +954,8 @@ private fun TestPage(
     onExport: () -> Unit,
     ipv4Stats: ProtocolStats,
     ipv6Stats: ProtocolStats,
+    lastIpv4Active: Int,
+    lastIpv6Active: Int,
     showIpv4: Boolean,
     showIpv6: Boolean,
     maskPrivacy: Boolean,
@@ -890,7 +970,7 @@ private fun TestPage(
         verticalArrangement = Arrangement.spacedBy(7.dp)
     ) {
         item {
-            PageTitle("宽带会话测试器", null)
+            PageTitle("宽带会话测试器", "测宽带总会话数 · 不是压测工具")
             FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
                 StatusChip(mode.label, BlueSoft, Blue)
                 StatusChip(if (isAdding) "● 运行中" else status, GreenSoft, Green)
@@ -900,7 +980,7 @@ private fun TestPage(
         item {
             SoftCard {
                 SectionTitle("∿", "测试控制", Blue)
-                Text(if (isAdding) "● 正在运行 · 已连接目标" else "状态：$status", color = if (isAdding) Green else Muted, fontWeight = FontWeight.Medium)
+                Text(if (isAdding) "● 正在运行 · 已连接目标" else "状态：$status", color = if (isAdding) Green else Muted, fontWeight = FontWeight.Medium, fontSize = 13.sp)
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     Button(onClick = onStart, enabled = !isAdding, modifier = Modifier.weight(1f).height(38.dp), shape = ShapeM) {
                         Icon(Icons.Filled.PlayArrow, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("开始", fontSize = 13.sp)
@@ -913,14 +993,15 @@ private fun TestPage(
                         shape = ShapeM
                     ) { Icon(Icons.Filled.Stop, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("停止", fontSize = 13.sp) }
                 }
+                Spacer(Modifier.height(2.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     OutlinedButton(onClick = onRelease, modifier = Modifier.weight(1f).height(38.dp), shape = ShapeM) { Icon(Icons.Filled.DeleteOutline, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("强制释放", fontSize = 13.sp) }
                     OutlinedButton(onClick = onExport, modifier = Modifier.weight(1f).height(38.dp), shape = ShapeM) { Icon(Icons.Filled.Download, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("导出", fontSize = 13.sp) }
                 }
             }
         }
-        if (showIpv4) item { SessionStatsCard("IPv4 会话", ipv4Stats, maskPrivacy) }
-        if (showIpv6) item { SessionStatsCard("IPv6 会话", ipv6Stats, maskPrivacy) }
+        if (showIpv4) item { SessionStatsCard("IPv4 会话", ipv4Stats, maskPrivacy, lastIpv4Active) }
+        if (showIpv6) item { SessionStatsCard("IPv6 会话", ipv6Stats, maskPrivacy, lastIpv6Active) }
         item { RecentLogCard(logs, maskPrivacy, onMoreLogs) }
         item { Spacer(Modifier.height(70.dp)) }
     }
@@ -1006,6 +1087,7 @@ private fun LogsPage(
     onHistoryLimitChange: (String) -> Unit,
     onHistoryPeriodChange: (String) -> Unit,
     onEditRemark: (SessionSummary) -> Unit,
+    onDeleteHistory: (SessionSummary) -> Unit,
     onHistoryDetail: (SessionSummary) -> Unit
 ) {
     LazyColumn(
@@ -1053,11 +1135,12 @@ private fun LogsPage(
             item { SoftCard { Text("暂无历史记录", color = TextDark, fontSize = 13.sp) } }
         } else {
             items(history.take(historyLimit.toIntOrNull()?.coerceIn(10, 100) ?: 30)) { item ->
-                HistoryCard(
+                SwipeDeleteHistoryCard(
                     item = item,
                     maskPrivacy = maskPrivacy,
                     onClick = { onHistoryDetail(item) },
-                    onEditRemark = { onEditRemark(item) }
+                    onEditRemark = { onEditRemark(item) },
+                    onDelete = { onDeleteHistory(item) }
                 )
             }
         }
@@ -1112,7 +1195,7 @@ private fun SectionTitle(mark: String, title: String, color: Color) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         MarkBox(mark, color.copy(alpha = 0.12f), color)
         Spacer(Modifier.width(10.dp))
-        Text(title, fontSize = 17.sp, fontWeight = FontWeight.Bold, color = TextDark)
+        Text(title, fontSize = 16.sp, fontWeight = FontWeight.Bold, color = TextDark)
     }
 }
 
@@ -1195,18 +1278,19 @@ private fun ModeSelector(mode: TestMode, onModeChange: (TestMode) -> Unit) {
 }
 
 @Composable
-private fun SessionStatsCard(title: String, stats: ProtocolStats, maskPrivacy: Boolean) {
+private fun SessionStatsCard(title: String, stats: ProtocolStats, maskPrivacy: Boolean, lastActive: Int) {
     SoftCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
             SectionTitle("▮", title, Blue)
             Spacer(Modifier.weight(1f))
-            Text(stats.phase, color = Blue, fontWeight = FontWeight.Bold, maxLines = 1)
+            Text(stats.phase, color = Blue, fontWeight = FontWeight.Bold, fontSize = 13.sp, maxLines = 1)
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             MetricTile("活动", stats.activeSessions.toString(), Blue, Modifier.weight(1f))
+            MetricTile("上次活动", if (lastActive > 0) lastActive.toString() else "—", Navy, Modifier.weight(1f))
             MetricTile("失败", stats.totalFailure.toString(), ErrorRed, Modifier.weight(1f))
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             MetricTile("总计", stats.totalAttempts.toString(), Navy, Modifier.weight(1f))
             MetricTile("新增", stats.lastAdded.toString(), Blue, Modifier.weight(1f))
             MetricTile("CPS", "${stats.cps}/s", Blue, Modifier.weight(1f))
@@ -1341,6 +1425,59 @@ private fun CompactLogLine(line: LogLine, maskPrivacy: Boolean) {
 }
 
 
+
+@Composable
+private fun SwipeDeleteHistoryCard(
+    item: SessionSummary,
+    maskPrivacy: Boolean,
+    onClick: () -> Unit,
+    onEditRemark: () -> Unit,
+    onDelete: () -> Unit
+) {
+    var offsetX by remember(item.id) { mutableStateOf(0f) }
+    val maxOffset = -112f
+    Box(modifier = Modifier.fillMaxWidth()) {
+        Box(
+            modifier = Modifier
+                .align(Alignment.CenterEnd)
+                .width(96.dp)
+                .height(64.dp)
+                .background(ErrorRed.copy(alpha = 0.12f), RoundedCornerShape(18.dp))
+                .clickable { onDelete() },
+            contentAlignment = Alignment.Center
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Icon(Icons.Filled.DeleteOutline, contentDescription = null, tint = ErrorRed, modifier = Modifier.width(20.dp).height(20.dp))
+                Text("删除", color = ErrorRed, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            }
+        }
+        Box(
+            modifier = Modifier
+                .offset { IntOffset(offsetX.roundToInt(), 0) }
+                .pointerInput(item.id) {
+                    detectHorizontalDragGestures(
+                        onHorizontalDrag = { _, dragAmount ->
+                            offsetX = (offsetX + dragAmount).coerceIn(maxOffset, 0f)
+                        },
+                        onDragEnd = {
+                            offsetX = if (offsetX < maxOffset / 2f) maxOffset else 0f
+                        },
+                        onDragCancel = {
+                            offsetX = 0f
+                        }
+                    )
+                }
+        ) {
+            HistoryCard(
+                item = item,
+                maskPrivacy = maskPrivacy,
+                onClick = onClick,
+                onEditRemark = onEditRemark
+            )
+        }
+    }
+}
+
 @Composable
 private fun HistoryCard(
     item: SessionSummary,
@@ -1444,7 +1581,7 @@ private fun StatusChip(text: String, bg: Color, fg: Color, compact: Boolean = fa
             .background(bg, RoundedCornerShape(if (compact) 12.dp else 14.dp))
             .padding(horizontal = if (compact) 9.dp else 11.dp, vertical = if (compact) 5.dp else 7.dp)
     ) {
-        Text(text, color = fg, fontWeight = FontWeight.Bold, fontSize = if (compact) 11.sp else 12.sp, maxLines = 1)
+        Text(text, color = fg, fontWeight = FontWeight.Bold, fontSize = if (compact) 10.sp else 11.sp, maxLines = 1)
     }
 }
 
@@ -1535,7 +1672,7 @@ private fun BottomNav(selectedTab: MainTab, onSelect: (MainTab) -> Unit) {
                     .height(56.dp)
                     .background(if (selected) Color(0xFFEBDCFD) else Color.Transparent, RoundedCornerShape(24.dp))
                     .clickable { onSelect(tab) }
-                    .padding(vertical = 5.dp),
+                    .padding(vertical = 4.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Center
             ) {
@@ -1546,10 +1683,40 @@ private fun BottomNav(selectedTab: MainTab, onSelect: (MainTab) -> Unit) {
                     modifier = Modifier.width(22.dp).height(22.dp)
                 )
                 Spacer(Modifier.height(3.dp))
-                Text(tab.label, color = TextDark, fontSize = 11.sp, lineHeight = 13.sp, maxLines = 1)
+                Text(tab.label, color = TextDark, fontSize = 11.sp, lineHeight = 12.sp, maxLines = 1)
             }
         }
     }
+}
+
+
+private fun currentNetworkSignature(context: Context): String {
+    val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+    val network = connectivityManager.activeNetwork ?: return "NONE"
+    val caps = connectivityManager.getNetworkCapabilities(network) ?: return "NONE"
+    if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) return "NONE"
+    val transport = when {
+        caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "WIFI"
+        caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "CELLULAR"
+        caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "ETHERNET"
+        caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) -> "VPN"
+        else -> "OTHER"
+    }
+    return "$transport:${network.hashCode()}"
+}
+
+private fun latestActiveFromHistory(history: List<SessionSummary>, protocol: IpProtocol): Int {
+    return history
+        .asSequence()
+        .sortedByDescending { it.startedAtEpochMs }
+        .mapNotNull { summary ->
+            val stats = when (protocol) {
+                IpProtocol.IPV4 -> summary.ipv4Stats
+                IpProtocol.IPV6 -> summary.ipv6Stats
+            }
+            stats?.let { maxOf(it.maxStableSessions, it.activeSessions, it.totalSuccess) }
+        }
+        .firstOrNull() ?: 0
 }
 
 private fun startForegroundNotice(context: Context, text: String) {
@@ -1681,3 +1848,4 @@ private val Navy = Color(0xFF0F2F6E)
 private val ShapeL = RoundedCornerShape(20.dp)
 private val ShapeM = RoundedCornerShape(14.dp)
 private val ShapeS = RoundedCornerShape(10.dp)
+
