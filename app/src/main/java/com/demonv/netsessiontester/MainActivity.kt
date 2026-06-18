@@ -89,6 +89,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -146,6 +148,7 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun NetSessionTesterApp() {
     val context = LocalContext.current
+    val clipboardManager = LocalClipboardManager.current
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
     val tester = remember { TcpTester() }
@@ -218,6 +221,17 @@ private fun NetSessionTesterApp() {
     fun showDetail(title: String, lines: List<String>) {
         detailTitle = title
         detailLines = lines
+    }
+
+
+    fun copyText(value: String, label: String) {
+        val clean = value.trim()
+        if (clean.isBlank() || clean == "不可用" || clean == "检测中") {
+            scope.launch { snackbarHostState.showSnackbar("$label 暂不可复制") }
+            return
+        }
+        clipboardManager.setText(AnnotatedString(clean))
+        scope.launch { snackbarHostState.showSnackbar("已复制$label：$clean") }
     }
 
 
@@ -357,12 +371,15 @@ private fun NetSessionTesterApp() {
         appendLog(LogLine(level = LogLevel.INFO, text = "目标：${config.host}:${config.port} | 模式：${config.mode.label} | 新增：${config.batchSize} | 间隔：${config.intervalMs}ms"))
 
         runningJob = scope.launch {
-            val oldClosed = tester.release()
-            if (oldClosed > 0) {
-                appendLog(LogLine(level = LogLevel.WARN, text = "开始新测试前释放旧连接：$oldClosed 条"))
-            }
-            runCatching {
-                tester.runSessionHoldTest(
+            var summary: SessionSummary? = null
+            var completedNormally = false
+            var failureMsg: String? = null
+            try {
+                val oldClosed = tester.release()
+                if (oldClosed > 0) {
+                    appendLog(LogLine(level = LogLevel.WARN, text = "开始新测试前释放旧连接：$oldClosed 条"))
+                }
+                val pair = tester.runSessionHoldTest(
                     rawConfig = config,
                     onStats = { stats ->
                         state = when (stats.protocol) {
@@ -373,8 +390,7 @@ private fun NetSessionTesterApp() {
                     },
                     onLog = { line -> appendLog(line) }
                 )
-            }.onSuccess { pair ->
-                val summary = SessionSummary(
+                summary = SessionSummary(
                     startedAtEpochMs = startedAt,
                     host = config.host,
                     port = config.port,
@@ -390,32 +406,43 @@ private fun NetSessionTesterApp() {
                         TestMode.IPV4_ONLY -> null
                     }
                 )
-                historyStore.append(summary)
+                historyStore.append(summary!!)
                 historyStore.trim(100)
                 refreshHistory()
-                val closed = tester.release()
-                if (closed > 0) {
-                    appendLog(LogLine(level = LogLevel.WARN, text = "测试完成，已立即释放连接：$closed 条"))
-                } else {
-                    appendLog(LogLine(level = LogLevel.WARN, text = "测试完成，未发现需要释放的连接"))
-                }
-                val finalIpv4 = summary.ipv4Stats ?: state.ipv4Stats
-                val finalIpv6 = summary.ipv6Stats ?: state.ipv6Stats
-                state = state.copy(
-                    isAdding = false,
-                    status = "测试完成 · 已释放",
-                    summary = summary,
-                    ipv4Stats = if (summary.ipv4Stats != null) finalIpv4.copy(activeSessions = 0, phase = "已释放") else state.ipv4Stats,
-                    ipv6Stats = if (summary.ipv6Stats != null) finalIpv6.copy(activeSessions = 0, phase = "已释放") else state.ipv6Stats
-                )
-                stopForegroundNotice(context)
-            }.onFailure { error ->
+                completedNormally = true
+            } catch (error: Exception) {
                 if (!manualStopRequested) {
-                    val msg = error.message ?: error.javaClass.simpleName
-                    appendLog(LogLine(level = LogLevel.ERROR, text = "测试中断：$msg"))
-                    state = state.copy(isAdding = false, status = "已停止新增", error = msg)
-                    updateForegroundNotice(context, "测试中断：$msg")
+                    failureMsg = error.message ?: error.javaClass.simpleName
+                    appendLog(LogLine(level = LogLevel.ERROR, text = "测试中断：$failureMsg"))
                 }
+            } finally {
+                if (!manualStopRequested) {
+                    val closed = tester.release()
+                    if (completedNormally) {
+                        appendLog(LogLine(level = LogLevel.WARN, text = "测试完成，已立即释放连接：$closed 条"))
+                    } else {
+                        appendLog(LogLine(level = LogLevel.WARN, text = "测试结束收尾，已释放连接：$closed 条"))
+                    }
+
+                    val finalSummary = summary
+                    val finalIpv4 = finalSummary?.ipv4Stats ?: state.ipv4Stats
+                    val finalIpv6 = finalSummary?.ipv6Stats ?: state.ipv6Stats
+
+                    state = state.copy(
+                        isAdding = false,
+                        status = if (completedNormally) "测试完成 · 已释放" else "测试中断 · 已释放",
+                        summary = finalSummary ?: state.summary,
+                        error = failureMsg,
+                        ipv4Stats = if (config.mode != TestMode.IPV6_ONLY) {
+                            finalIpv4.copy(activeSessions = 0, phase = if (finalIpv4.totalAttempts > 0) "已释放" else finalIpv4.phase)
+                        } else state.ipv4Stats,
+                        ipv6Stats = if (config.mode != TestMode.IPV4_ONLY) {
+                            finalIpv6.copy(activeSessions = 0, phase = if (finalIpv6.totalAttempts > 0) "已释放" else finalIpv6.phase)
+                        } else state.ipv6Stats
+                    )
+                    stopForegroundNotice(context)
+                }
+                runningJob = null
             }
         }
     }
@@ -624,6 +651,8 @@ private fun NetSessionTesterApp() {
                     publicIpResult = publicIpResult,
                     publicIpLoading = publicIpLoading,
                     onRefreshPublicIp = { refreshPublicIp() },
+                    onCopyPublicIpv4 = { copyText(publicIpResult.ipv4, "IPv4出口地址") },
+                    onCopyPublicIpv6 = { copyText(publicIpResult.ipv6, "IPv6出口地址") },
                     maskPrivacy = maskPrivacy,
                     onMaskPrivacyChange = { maskPrivacy = it },
                     onResolve = { resolve() },
@@ -719,6 +748,8 @@ private fun SettingsPage(
     publicIpResult: PublicIpResult,
     publicIpLoading: Boolean,
     onRefreshPublicIp: () -> Unit,
+    onCopyPublicIpv4: () -> Unit,
+    onCopyPublicIpv6: () -> Unit,
     maskPrivacy: Boolean,
     onMaskPrivacyChange: (Boolean) -> Unit,
     onResolve: () -> Unit,
@@ -742,7 +773,7 @@ private fun SettingsPage(
             .fillMaxSize()
             .statusBarsPadding()
             .padding(horizontal = 14.dp),
-        verticalArrangement = Arrangement.spacedBy(7.dp)
+        verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
         item { PageTitle("宽带会话测试器", "TCP 会话保持 · IPv4 / IPv6 分别测试") }
         item {
@@ -783,9 +814,19 @@ private fun SettingsPage(
                         Text(if (publicIpLoading) "检测中" else "刷新", fontSize = 12.sp)
                     }
                 }
-                InfoLine("IPv4出口", if (maskPrivacy) maskIpText(publicIpResult.ipv4) else publicIpResult.ipv4)
-                InfoLine("IPv6出口", if (maskPrivacy) maskIpText(publicIpResult.ipv6) else publicIpResult.ipv6)
-                Text("显示当前网络访问互联网时对外可见的出口地址", color = Muted, fontSize = 11.sp)
+                PublicExitLine(
+                    label = "IPv4 出口地址",
+                    value = if (maskPrivacy) maskIpText(publicIpResult.ipv4) else publicIpResult.ipv4,
+                    copyValue = publicIpResult.ipv4,
+                    onCopy = onCopyPublicIpv4
+                )
+                PublicExitLine(
+                    label = "IPv6 出口地址",
+                    value = if (maskPrivacy) maskIpText(publicIpResult.ipv6) else publicIpResult.ipv6,
+                    copyValue = publicIpResult.ipv6,
+                    onCopy = onCopyPublicIpv6
+                )
+                Text("点击地址可复制。显示当前网络访问互联网时对外可见的出口地址", color = Muted, fontSize = 10.sp, maxLines = 1)
             }
         }
         item {
@@ -1046,10 +1087,10 @@ private fun PeriodCountChip(title: String, subtitle: String, bg: Color, fg: Colo
 
 @Composable
 private fun PageTitle(title: String, subtitle: String?) {
-    Column(modifier = Modifier.padding(top = 12.dp, bottom = 4.dp)) {
-        Text(title, fontSize = 23.sp, lineHeight = 27.sp, fontWeight = FontWeight.ExtraBold, color = TextDark)
+    Column(modifier = Modifier.padding(top = 0.dp, bottom = 2.dp)) {
+        Text(title, fontSize = 22.sp, lineHeight = 25.sp, fontWeight = FontWeight.ExtraBold, color = TextDark)
         subtitle?.let {
-            Text(it, fontSize = 13.sp, color = Muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(it, fontSize = 12.sp, color = Muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
     }
 }
@@ -1063,8 +1104,8 @@ private fun SoftCard(content: @Composable ColumnScope.() -> Unit) {
         elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
     ) {
         Column(
-            modifier = Modifier.padding(10.dp),
-            verticalArrangement = Arrangement.spacedBy(7.dp),
+            modifier = Modifier.padding(9.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
             content = content
         )
     }
@@ -1443,27 +1484,73 @@ private fun InfoLine(label: String, value: String, color: Color = TextDark) {
     }
 }
 
+
+@Composable
+private fun PublicExitLine(
+    label: String,
+    value: String,
+    copyValue: String,
+    onCopy: () -> Unit,
+    color: Color = TextDark
+) {
+    val canCopy = copyValue.isNotBlank() && copyValue != "不可用" && copyValue != "检测中"
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState())
+            .clickable(enabled = canCopy, onClick = onCopy)
+            .background(if (canCopy) BlueSoft.copy(alpha = 0.28f) else Color.Transparent, RoundedCornerShape(8.dp))
+            .padding(horizontal = 6.dp, vertical = 4.dp)
+    ) {
+        Text(
+            "$label：$value",
+            color = if (canCopy) Blue else color,
+            fontSize = 12.sp,
+            fontWeight = if (canCopy) FontWeight.SemiBold else FontWeight.Normal,
+            maxLines = 1,
+            softWrap = false
+        )
+    }
+}
+
+
+
 @Composable
 private fun BottomNav(selectedTab: MainTab, onSelect: (MainTab) -> Unit) {
-    NavigationBar(
-        containerColor = Color.White,
-        tonalElevation = 4.dp,
-        modifier = Modifier.navigationBarsPadding()
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(58.dp)
+            .background(Color(0xFFEAF2FF))
+            .navigationBarsPadding()
+            .padding(horizontal = 22.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
     ) {
         MainTab.entries.forEach { tab ->
-            NavigationBarItem(
-                selected = selectedTab == tab,
-                onClick = { onSelect(tab) },
-                icon = {
-                    val image = when (tab) {
-                        MainTab.SETTINGS -> Icons.Filled.Settings
-                        MainTab.TEST -> Icons.Filled.PlayArrow
-                        MainTab.LOGS -> Icons.Filled.Article
-                    }
-                    Icon(image, contentDescription = tab.label, tint = if (selectedTab == tab) Blue else Muted)
-                },
-                label = { Text(tab.label) }
-            )
+            val selected = selectedTab == tab
+            val image = when (tab) {
+                MainTab.SETTINGS -> Icons.Filled.Settings
+                MainTab.TEST -> Icons.Filled.PlayArrow
+                MainTab.LOGS -> Icons.Filled.Article
+            }
+            Column(
+                modifier = Modifier
+                    .width(82.dp)
+                    .background(if (selected) Color(0xFFEBDCFD) else Color.Transparent, RoundedCornerShape(24.dp))
+                    .clickable { onSelect(tab) }
+                    .padding(vertical = 4.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Icon(
+                    image,
+                    contentDescription = tab.label,
+                    tint = if (selected) Blue else Muted,
+                    modifier = Modifier.width(22.dp).height(22.dp)
+                )
+                Spacer(Modifier.height(2.dp))
+                Text(tab.label, color = TextDark, fontSize = 11.sp, maxLines = 1)
+            }
         }
     }
 }
