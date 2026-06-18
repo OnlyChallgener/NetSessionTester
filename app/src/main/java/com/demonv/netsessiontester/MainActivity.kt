@@ -777,15 +777,15 @@ private fun SettingsPage(
         item {
             SoftCard {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    SectionTitle("◎", "本机公网", Blue)
+                    SectionTitle("◎", "公网出口", Blue)
                     Spacer(Modifier.weight(1f))
                     TextButton(onClick = onRefreshPublicIp) {
                         Text(if (publicIpLoading) "检测中" else "刷新", fontSize = 12.sp)
                     }
                 }
-                InfoLine("IPv4", if (maskPrivacy) maskIpText(publicIpResult.ipv4) else publicIpResult.ipv4)
-                InfoLine("IPv6", if (maskPrivacy) maskIpText(publicIpResult.ipv6) else publicIpResult.ipv6)
-                Text("用于识别当前手机网络真实公网地址", color = Muted, fontSize = 11.sp)
+                InfoLine("IPv4出口", if (maskPrivacy) maskIpText(publicIpResult.ipv4) else publicIpResult.ipv4)
+                InfoLine("IPv6出口", if (maskPrivacy) maskIpText(publicIpResult.ipv6) else publicIpResult.ipv6)
+                Text("显示当前网络访问互联网时对外可见的出口地址", color = Muted, fontSize = 11.sp)
             }
         }
         item {

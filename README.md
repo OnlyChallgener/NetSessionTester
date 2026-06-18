@@ -1,4 +1,4 @@
-# NetSessionTester v0.7.4 Stop Release Force
+# NetSessionTester v0.7.5 Public Exit IP
 
 宽带会话测试器，Kotlin + Jetpack Compose 原生版。
 
@@ -28,7 +28,7 @@
 ## 构建
 
 上传完整项目后进入 GitHub Actions，运行 Build Android APK。
-Artifact：NetSessionTester-v0.7.4-stop-release-force-debug-apk
+Artifact：NetSessionTester-v0.7.5-public-exit-ip-debug-apk
 
 ## v0.6.1 修复
 
@@ -120,7 +120,7 @@ Artifact：NetSessionTester-v0.7.4-stop-release-force-debug-apk
 - 底部“日志”改为“历史”。
 - 检测历史支持按“今天 / 昨天 / 本周”筛选，并与“显示10/30/100条”联动。
 - 检测历史保留机制：今天最多30条，昨天最多30条，本周最多100条。
-- 测试页/设置页新增本机公网 IPv4 / IPv6 探测。
+- 测试页/设置页新增公网出口 IPv4 / IPv6 探测。
 - 去除“完成后保持连接”开关。
 - 新一轮测试开始前强制释放旧连接，保证基准测试更干净。
 
@@ -149,4 +149,12 @@ Artifact：NetSessionTester-v0.7.4-stop-release-force-debug-apk
 - 手动停止：文案保持“停止”，保存“手动停止”历史后立即释放连接。
 - “释放”按钮改为“强制释放”。
 - 强制释放：用于异常兜底；如果测试中点击，会保存“强制释放”历史后释放连接。
-- 保留 v0.7.1 的历史筛选、本机公网、备注、运行日志体验。
+- 保留 v0.7.1 的历史筛选、公网出口、备注、运行日志体验。
+
+
+## v0.7.5
+
+- “公网出口”改为“公网出口”。
+- IPv4 / IPv6 统一显示为“出口地址”，避免误导为手机独占公网 IP。
+- 公网出口说明改为：显示当前网络访问互联网时对外可见的出口地址。
+- IPv4 / IPv6 出口检测增加多源 fallback，提升不同运营商、Wi-Fi、移动网络、IPv6-only 场景下的成功率。
