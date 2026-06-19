@@ -96,6 +96,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
@@ -131,7 +132,8 @@ import kotlinx.coroutines.launch
 import java.io.OutputStreamWriter
 import kotlin.math.roundToInt
 
-private const val APP_VERSION_LABEL = "v0.9.1"
+private val APP_VERSION_LABEL: String = "v${BuildConfig.VERSION_NAME.substringBefore("-")}"
+private const val APP_GITHUB_URL = "https://github.com/OnlyChallgener/NetSessionTester"
 
 private enum class MainTab(val label: String, val mark: String) {
     SETTINGS("设置", "settings"),
@@ -405,12 +407,12 @@ private fun NetSessionTesterApp() {
                             IpProtocol.IPV4 -> state.copy(
                                 ipv4Stats = stats,
                                 status = "${stats.protocol.label} ${stats.phase}",
-                                isAdding = if (terminal) false else state.isAdding
+                                isAdding = !terminal
                             )
                             IpProtocol.IPV6 -> state.copy(
                                 ipv6Stats = stats,
                                 status = "${stats.protocol.label} ${stats.phase}",
-                                isAdding = if (terminal) false else state.isAdding
+                                isAdding = !terminal
                             )
                         }
                         updateForegroundNotice(context, "${stats.protocol.label} ${stats.phase}｜活动 ${stats.activeSessions}｜失败 ${stats.totalFailure}")
@@ -473,10 +475,11 @@ private fun NetSessionTesterApp() {
                 if (!manualStopRequested) {
                     val closed = tester.release()
                     if (completedNormally) {
-                        appendLog(LogLine(level = LogLevel.WARN, text = "测试完成，已立即释放连接：$closed 条"))
+                        appendLog(LogLine(level = LogLevel.WARN, text = "测试完成，本机已释放：$closed 条；路由器会话表可能延迟数秒下降"))
                     } else {
-                        appendLog(LogLine(level = LogLevel.WARN, text = "测试结束收尾，已释放连接：$closed 条"))
+                        appendLog(LogLine(level = LogLevel.WARN, text = "测试结束收尾，本机已释放：$closed 条；路由器会话表可能延迟数秒下降"))
                     }
+                    snackbarHostState.showSnackbar("本机已释放，路由器会话表可能延迟数秒下降")
 
                     val finalSummary = summary
                     val finalIpv4 = finalSummary?.ipv4Stats ?: state.ipv4Stats
@@ -549,7 +552,8 @@ private fun NetSessionTesterApp() {
         saveManualStopSummary("手动停止")
         scope.launch {
             val closed = tester.release()
-            appendLog(LogLine(level = LogLevel.WARN, text = "手动停止，已立即释放连接：$closed 条"))
+            appendLog(LogLine(level = LogLevel.WARN, text = "手动停止，本机已释放：$closed 条；路由器会话表可能延迟数秒下降"))
+            snackbarHostState.showSnackbar("本机已释放，路由器会话表可能延迟数秒下降")
             state = state.copy(
                 isAdding = false,
                 status = "手动停止 · 已释放",
@@ -575,10 +579,11 @@ private fun NetSessionTesterApp() {
         }
         scope.launch {
             val closed = tester.release()
-            appendLog(LogLine(level = LogLevel.WARN, text = "已强制释放连接：$closed 条"))
+            appendLog(LogLine(level = LogLevel.WARN, text = "本机已释放：$closed 条；路由器会话表可能延迟数秒下降"))
+            snackbarHostState.showSnackbar("本机已释放，路由器会话表可能延迟数秒下降")
             state = state.copy(
                 isAdding = false,
-                status = "已强制释放",
+                status = "本机已释放",
                 ipv4Stats = state.ipv4Stats.copy(activeSessions = 0, phase = if (state.ipv4Stats.totalAttempts > 0) "已释放" else state.ipv4Stats.phase),
                 ipv6Stats = state.ipv6Stats.copy(activeSessions = 0, phase = if (state.ipv6Stats.totalAttempts > 0) "已释放" else state.ipv6Stats.phase)
             )
@@ -596,7 +601,8 @@ private fun NetSessionTesterApp() {
         saveManualStopSummary(reason)
         scope.launch {
             val closed = tester.release()
-            appendLog(LogLine(level = LogLevel.WARN, text = "$reason，已释放连接：$closed 条"))
+            appendLog(LogLine(level = LogLevel.WARN, text = "$reason，本机已释放：$closed 条；路由器会话表可能延迟数秒下降"))
+            snackbarHostState.showSnackbar("本机已释放，路由器会话表可能延迟数秒下降")
             state = state.copy(
                 isAdding = false,
                 status = "$reason · 已中止",
@@ -771,7 +777,12 @@ private fun NetSessionTesterApp() {
                     mode = mode,
                     status = state.status,
                     target = successLimit,
-                    isAdding = state.isAdding,
+                    isAdding = state.isAdding ||
+                        (runningJob?.isActive == true) ||
+                        state.status.contains("建连中") ||
+                        state.status.contains("运行") ||
+                        state.ipv4Stats.phase.contains("建连中") ||
+                        state.ipv6Stats.phase.contains("建连中"),
                     onStart = { startTest() },
                     onStopAdding = { stopAdding() },
                     onRelease = { releaseAll() },
@@ -1188,17 +1199,77 @@ private fun PeriodCountChip(title: String, subtitle: String, bg: Color, fg: Colo
 
 @Composable
 private fun PageTitle(title: String, subtitle: String?) {
+    var showVersionDialog by remember { mutableStateOf(false) }
+    val uriHandler = LocalUriHandler.current
+
     Column(modifier = Modifier.padding(top = 4.dp, bottom = 2.dp)) {
         Row(verticalAlignment = Alignment.Bottom) {
             Text(title, fontSize = 22.sp, lineHeight = 25.sp, fontWeight = FontWeight.ExtraBold, color = TextDark)
             if (title == "宽带会话测试器") {
                 Spacer(Modifier.width(8.dp))
-                Text(APP_VERSION_LABEL, fontSize = 10.sp, color = Muted, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(bottom = 2.dp))
+                Text(
+                    APP_VERSION_LABEL,
+                    fontSize = 10.sp,
+                    color = Muted,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier
+                        .padding(bottom = 2.dp)
+                        .clickable { showVersionDialog = true }
+                )
             }
         }
         subtitle?.let {
             Text(it, fontSize = 12.sp, color = Muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
+    }
+
+    if (showVersionDialog) {
+        AlertDialog(
+            onDismissRequest = { showVersionDialog = false },
+            confirmButton = {
+                TextButton(onClick = {
+                    showVersionDialog = false
+                    uriHandler.openUri(APP_GITHUB_URL)
+                }) {
+                    Text("打开 GitHub", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showVersionDialog = false }) {
+                    Text("关闭", fontSize = 13.sp)
+                }
+            },
+            title = {
+                Column {
+                    Text("当前版本 $APP_VERSION_LABEL", fontWeight = FontWeight.ExtraBold, color = TextDark, fontSize = 18.sp)
+                    Text("网络总会话数测试", color = Muted, fontSize = 12.sp)
+                }
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    VersionLine("v0.9.5", "修复停止按钮、通知跳转、新增批次被 200 锁死的问题。")
+                    VersionLine("v0.9.4", "分批并发普通释放；增加本机已释放、路由器会话表可能延迟下降提示。")
+                    VersionLine("v0.9.3", "修复 GitHub Actions 编译错误。")
+                    VersionLine("v0.9.2", "首页副标题改为网络总会话数测试 - IPV4/IPV6分别测试。")
+                }
+            },
+            shape = ShapeL,
+            containerColor = Color.White
+        )
+    }
+}
+
+@Composable
+private fun VersionLine(version: String, text: String) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color(0xFFF8FAFC), RoundedCornerShape(12.dp))
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.Top
+    ) {
+        Text(version, color = Blue, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(54.dp))
+        Text(text, color = TextDark, fontSize = 12.sp, lineHeight = 16.sp, modifier = Modifier.weight(1f))
     }
 }
 
