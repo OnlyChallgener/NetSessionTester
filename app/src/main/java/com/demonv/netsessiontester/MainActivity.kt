@@ -272,6 +272,16 @@ private fun NetSessionTesterApp() {
         }
     }
 
+    fun appendLog(line: LogLine) {
+        state = state.copy(logs = (state.logs + line).takeLast(500))
+        scope.launch {
+            runCatching {
+                logStore.append(line)
+                logSizeKb = logStore.sizeKb()
+            }
+        }
+    }
+
     fun isFdLimitSummary(summary: SessionSummary): Boolean {
         return listOfNotNull(summary.ipv4Stats, summary.ipv6Stats).any { stats ->
             stats.phase.contains("FD", ignoreCase = true) ||
@@ -365,16 +375,6 @@ private fun NetSessionTesterApp() {
                     historyLimit = historyLimit
                 )
             )
-        }
-    }
-
-    fun appendLog(line: LogLine) {
-        state = state.copy(logs = (state.logs + line).takeLast(500))
-        scope.launch {
-            runCatching {
-                logStore.append(line)
-                logSizeKb = logStore.sizeKb()
-            }
         }
     }
 

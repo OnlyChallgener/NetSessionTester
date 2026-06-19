@@ -1,4 +1,4 @@
-# NetSessionTester v0.9.7 Changelog Fix
+# NetSessionTester v0.9.7 Compile Fix
 
 宽带会话测试器，Kotlin + Jetpack Compose 原生版。
 
@@ -28,7 +28,7 @@
 ## 构建
 
 上传完整项目后进入 GitHub Actions，运行 Build Android APK。
-Artifact：NetSessionTester-v0.9.7-changelog-fix-debug-apk
+Artifact：NetSessionTester-v0.9.7-compile-fix-debug-apk
 
 ## v0.6.1 修复
 
@@ -289,3 +289,10 @@ Artifact：NetSessionTester-v0.9.7-changelog-fix-debug-apk
 - 版本仍显示 v0.9.7。
 - 修复版本弹窗：更新内容列表第一条显示当前版本 v0.9.7，不再只显示旧版本。
 - 保留 FD 闪退修复逻辑：真实 FD上限时先释放文件句柄再保存历史。
+
+
+## v0.9.7 Compile Fix
+
+- 修复 MainActivity.kt 本地函数声明顺序导致的 Kotlin 编译失败。
+- 版本仍显示 v0.9.7。
+- 保留 FD 闪退修复和版本弹窗当前版本显示。
