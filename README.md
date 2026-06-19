@@ -1,4 +1,4 @@
-# NetSessionTester v0.9.8 History Detail
+# NetSessionTester v0.9.8 Detail Export Chart Fix
 
 宽带会话测试器，Kotlin + Jetpack Compose 原生版。
 
@@ -28,7 +28,7 @@
 ## 构建
 
 上传完整项目后进入 GitHub Actions，运行 Build Android APK。
-Artifact：NetSessionTester-v0.9.8-history-detail-debug-apk
+Artifact：NetSessionTester-v0.9.8-detail-export-chart-fix-debug-apk
 
 ## v0.6.1 修复
 
@@ -315,3 +315,22 @@ Artifact：NetSessionTester-v0.9.8-history-detail-debug-apk
 - 非正常中断会显示“异常中断 / 可信度低”，并提示网络切换、地址丢失、VPN变化、后台限制等复测建议。
 - 历史图表暂使用活动/失败/总计摘要条形图，不保存大量曲线点，避免影响稳定性。
 - 继续保持 v0.9.8 版本线，不改 TCP 会话测试核心逻辑。
+
+
+## v0.9.8 Detail Export Chart Fix
+
+- 检测详情页右上角新增下载图标，可保存检测详情快照图片到相册。
+- 测试页新增真实网络环境卡和诊断建议卡，显示 WiFi/蜂窝/VPN、运营商、4G/5G、IPv4/IPv6出口、DNS解析数量。
+- 新增真实 Ping 测试图表，1s/次采样，显示当前/平均/最高/最低/丢包率/运行时间。
+- 会话图表显示 1s 采样点当前数值，并绘制采样点圆点。
+- 分别测试时 IPv6 图表按全局测试时间显示，例如 IPv4 已测30s后，IPv6从31s开始标注，不再误导为从0s开始。
+- 保留 v0.9.8 历史详情、图表模式和 v0.9.7 FD保护逻辑。
+
+
+## v0.9.8 Detail Content Refinement
+
+- 检测详情页弱化原来的长文字说明，改为“分享结论 + 关键数字 + 结果图表 + 诊断建议 + 失败原因”的组合。
+- 删除/替换历史详情中的占位式网络环境说明，避免和图表、诊断建议重复。
+- 结果图表备注缩短，避免图表卡片内容过长。
+- 诊断建议默认展示最关键 3 条，适合截图分享。
+- 版本号保持不变。

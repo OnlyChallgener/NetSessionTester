@@ -12,8 +12,8 @@ android {
         applicationId = "com.demonv.netsessiontester"
         minSdk = 26
         targetSdk = 35
-        versionCode = 54
-        versionName = "0.9.8-history-detail"
+        versionCode = 55
+        versionName = "0.9.8-detail-export-chart-fix"
         vectorDrawables { useSupportLibrary = true }
     }
 
