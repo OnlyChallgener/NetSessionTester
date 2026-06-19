@@ -1,4 +1,4 @@
-# NetSessionTester v0.9.6 BuildConfig Fix
+# NetSessionTester v0.9.7 Changelog Fix
 
 宽带会话测试器，Kotlin + Jetpack Compose 原生版。
 
@@ -28,7 +28,7 @@
 ## 构建
 
 上传完整项目后进入 GitHub Actions，运行 Build Android APK。
-Artifact：NetSessionTester-v0.9.6-buildconfig-fix-debug-apk
+Artifact：NetSessionTester-v0.9.7-changelog-fix-debug-apk
 
 ## v0.6.1 修复
 
@@ -257,3 +257,35 @@ Artifact：NetSessionTester-v0.9.6-buildconfig-fix-debug-apk
 - 修复 GitHub Actions 编译失败：不再直接引用 `BuildConfig.VERSION_NAME`。
 - 顶部小版本号改为从 APK 安装包信息读取 `versionName`，仍会跟随最新版。
 - 保留 v0.9.5 的停止按钮、通知跳转、新增批次修复和版本弹窗。
+
+
+## v0.9.7
+
+- 增加 Android FD 上限保护：接近文件描述符上限时自动停止新增，避免闪退。
+- FD 保护触发时会先生成检测历史，再释放连接。
+- 失败原因会显示“Android FD保护”或“FD上限”。
+- 日志增加 FD 使用量提示，便于判断是手机端限制还是宽带/路由器限制。
+
+
+## v0.9.8
+
+- 更换 FD 策略：取消 v0.9.7 的“按 FD 数量提前保护性停止”。
+- 仅在真正出现 `FD上限 / too many open files / EMFILE` 错误时，才停止新增并保存检测历史。
+- 避免误把手机端 FD 数量接近保护线当成测试终点。
+- 保留 v0.9.6 之前的跑满逻辑，更适合测试宽带/路由器网络总会话数。
+
+
+## v0.9.7 FD Crash Fix
+
+- 版本号暂时固定在 v0.9.7，不再继续跳版本。
+- 重点修复达到 Android FD 上限附近可能闪退的问题。
+- 不提前按 FD 数量截停；仅在真实出现 FD上限/too many open files 时触发保护。
+- 触发 FD上限时先用内存快照保存测试结果，再释放连接释放文件句柄，然后写入检测历史，避免“有日志无历史”。
+- 日志写入失败不再导致主测试流程崩溃。
+
+
+## v0.9.7 Changelog Fix
+
+- 版本仍显示 v0.9.7。
+- 修复版本弹窗：更新内容列表第一条显示当前版本 v0.9.7，不再只显示旧版本。
+- 保留 FD 闪退修复逻辑：真实 FD上限时先释放文件句柄再保存历史。

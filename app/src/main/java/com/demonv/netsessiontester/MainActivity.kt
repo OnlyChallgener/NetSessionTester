@@ -272,6 +272,46 @@ private fun NetSessionTesterApp() {
         }
     }
 
+    fun isFdLimitSummary(summary: SessionSummary): Boolean {
+        return listOfNotNull(summary.ipv4Stats, summary.ipv6Stats).any { stats ->
+            stats.phase.contains("FD", ignoreCase = true) ||
+                stats.errorSummary.keys.any { key ->
+                    key.contains("FD", ignoreCase = true) ||
+                        key.contains("too many open files", ignoreCase = true) ||
+                        key.contains("EMFILE", ignoreCase = true)
+                }
+        }
+    }
+
+    suspend fun persistHistorySafely(summary: SessionSummary) {
+        val fdLimited = isFdLimitSummary(summary)
+
+        if (fdLimited) {
+            val closed = tester.release()
+            appendLog(LogLine(level = LogLevel.WARN, text = "检测到FD上限，为避免闪退已先释放本机连接：$closed 条，然后保存历史"))
+        }
+
+        val first = runCatching {
+            historyStore.append(summary)
+            historyStore.trim(100)
+        }
+
+        if (first.isFailure) {
+            val message = first.exceptionOrNull()?.message ?: first.exceptionOrNull()?.javaClass?.simpleName ?: "未知错误"
+            appendLog(LogLine(level = LogLevel.ERROR, text = "保存历史失败：$message，尝试释放连接后重试"))
+            val closed = tester.release()
+            appendLog(LogLine(level = LogLevel.WARN, text = "为保存历史已释放连接：$closed 条"))
+            runCatching {
+                historyStore.append(summary)
+                historyStore.trim(100)
+            }.onFailure { retryError ->
+                appendLog(LogLine(level = LogLevel.ERROR, text = "历史重试保存失败：${retryError.message ?: retryError.javaClass.simpleName}"))
+            }
+        }
+
+        refreshHistory()
+    }
+
     fun refreshPublicIp() {
         scope.launch {
             publicIpLoading = true
@@ -330,7 +370,12 @@ private fun NetSessionTesterApp() {
 
     fun appendLog(line: LogLine) {
         state = state.copy(logs = (state.logs + line).takeLast(500))
-        scope.launch { logStore.append(line); logSizeKb = logStore.sizeKb() }
+        scope.launch {
+            runCatching {
+                logStore.append(line)
+                logSizeKb = logStore.sizeKb()
+            }
+        }
     }
 
     fun ensureNotificationPermission() {
@@ -446,10 +491,15 @@ private fun NetSessionTesterApp() {
                         TestMode.IPV4_ONLY -> null
                     }
                 )
-                state = state.copy(isAdding = false, status = "测试完成 · 收尾中", summary = summary)
-                historyStore.append(summary!!)
-                historyStore.trim(100)
-                refreshHistory()
+                val hitFdGuard = listOfNotNull(summary?.ipv4Stats, summary?.ipv6Stats).any {
+                    it.phase.contains("FD上限") || it.errorSummary.containsKey("FD上限")
+                }
+                state = state.copy(
+                    isAdding = false,
+                    status = if (hitFdGuard) "FD上限 · 收尾中" else "测试完成 · 收尾中",
+                    summary = summary
+                )
+                persistHistorySafely(summary!!)
                 completedNormally = true
             } catch (error: Exception) {
                 if (!manualStopRequested) {
@@ -478,9 +528,7 @@ private fun NetSessionTesterApp() {
                         ipv6Stats = abortIpv6
                     )
                     summary = abortSummary
-                    historyStore.append(abortSummary)
-                    historyStore.trim(100)
-                    refreshHistory()
+                    persistHistorySafely(abortSummary)
                 }
             } finally {
                 if (!manualStopRequested) {
@@ -496,9 +544,17 @@ private fun NetSessionTesterApp() {
                     val finalIpv4 = finalSummary?.ipv4Stats ?: state.ipv4Stats
                     val finalIpv6 = finalSummary?.ipv6Stats ?: state.ipv6Stats
 
+                    val hitFdGuard = listOfNotNull(finalIpv4, finalIpv6).any {
+                        it.phase.contains("FD上限") || it.errorSummary.containsKey("FD上限")
+                    }
+
                     state = state.copy(
                         isAdding = false,
-                        status = if (completedNormally) "测试完成 · 已释放" else "测试中断 · 已释放",
+                        status = when {
+                            hitFdGuard -> "FD上限 · 已释放"
+                            completedNormally -> "测试完成 · 已释放"
+                            else -> "测试中断 · 已释放"
+                        },
                         summary = finalSummary ?: state.summary,
                         error = failureMsg,
                         ipv4Stats = if (config.mode != TestMode.IPV6_ONLY) {
@@ -543,9 +599,7 @@ private fun NetSessionTesterApp() {
             ipv6Stats = ipv6
         )
         scope.launch {
-            historyStore.append(summary)
-            historyStore.trim(100)
-            refreshHistory()
+            persistHistorySafely(summary)
             state = state.copy(
                 summary = summary,
                 ipv4Stats = ipv4 ?: state.ipv4Stats,
@@ -1260,6 +1314,7 @@ private fun PageTitle(title: String, subtitle: String?) {
             },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    VersionLine("v0.9.7", "当前版本：修复 FD 上限附近闪退；真实 FD上限时先释放文件句柄再保存历史，避免有日志无历史。")
                     VersionLine("v0.9.5", "修复停止按钮、通知跳转、新增批次被 200 锁死的问题。")
                     VersionLine("v0.9.4", "分批并发普通释放；增加本机已释放、路由器会话表可能延迟下降提示。")
                     VersionLine("v0.9.3", "修复 GitHub Actions 编译错误。")
