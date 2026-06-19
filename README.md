@@ -1,4 +1,4 @@
-# NetSessionTester v0.9.5 Control Version Fix
+# NetSessionTester v0.9.6 BuildConfig Fix
 
 宽带会话测试器，Kotlin + Jetpack Compose 原生版。
 
@@ -28,7 +28,7 @@
 ## 构建
 
 上传完整项目后进入 GitHub Actions，运行 Build Android APK。
-Artifact：NetSessionTester-v0.9.5-control-version-fix-debug-apk
+Artifact：NetSessionTester-v0.9.6-buildconfig-fix-debug-apk
 
 ## v0.6.1 修复
 
@@ -250,3 +250,10 @@ Artifact：NetSessionTester-v0.9.5-control-version-fix-debug-apk
 - 点击顶部小版本号可查看当前版本更新内容。
 - 版本弹窗增加跳转 GitHub 项目按钮。
 - 集成 v0.9.4 更新内容说明。
+
+
+## v0.9.6
+
+- 修复 GitHub Actions 编译失败：不再直接引用 `BuildConfig.VERSION_NAME`。
+- 顶部小版本号改为从 APK 安装包信息读取 `versionName`，仍会跟随最新版。
+- 保留 v0.9.5 的停止按钮、通知跳转、新增批次修复和版本弹窗。

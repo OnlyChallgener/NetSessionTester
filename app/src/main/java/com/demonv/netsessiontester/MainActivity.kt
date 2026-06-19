@@ -132,8 +132,19 @@ import kotlinx.coroutines.launch
 import java.io.OutputStreamWriter
 import kotlin.math.roundToInt
 
-private val APP_VERSION_LABEL: String = "v${BuildConfig.VERSION_NAME.substringBefore("-")}"
 private const val APP_GITHUB_URL = "https://github.com/OnlyChallgener/NetSessionTester"
+
+private fun appVersionLabel(context: Context): String {
+    return runCatching {
+        val info = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            context.packageManager.getPackageInfo(context.packageName, android.content.pm.PackageManager.PackageInfoFlags.of(0))
+        } else {
+            @Suppress("DEPRECATION")
+            context.packageManager.getPackageInfo(context.packageName, 0)
+        }
+        "v${info.versionName.orEmpty().substringBefore("-").ifBlank { "0.9.6" }}"
+    }.getOrDefault("v0.9.6")
+}
 
 private enum class MainTab(val label: String, val mark: String) {
     SETTINGS("设置", "settings"),
@@ -1201,6 +1212,8 @@ private fun PeriodCountChip(title: String, subtitle: String, bg: Color, fg: Colo
 private fun PageTitle(title: String, subtitle: String?) {
     var showVersionDialog by remember { mutableStateOf(false) }
     val uriHandler = LocalUriHandler.current
+    val context = LocalContext.current
+    val versionLabel = remember { appVersionLabel(context) }
 
     Column(modifier = Modifier.padding(top = 4.dp, bottom = 2.dp)) {
         Row(verticalAlignment = Alignment.Bottom) {
@@ -1208,7 +1221,7 @@ private fun PageTitle(title: String, subtitle: String?) {
             if (title == "宽带会话测试器") {
                 Spacer(Modifier.width(8.dp))
                 Text(
-                    APP_VERSION_LABEL,
+                    versionLabel,
                     fontSize = 10.sp,
                     color = Muted,
                     fontWeight = FontWeight.SemiBold,
@@ -1241,7 +1254,7 @@ private fun PageTitle(title: String, subtitle: String?) {
             },
             title = {
                 Column {
-                    Text("当前版本 $APP_VERSION_LABEL", fontWeight = FontWeight.ExtraBold, color = TextDark, fontSize = 18.sp)
+                    Text("当前版本 $versionLabel", fontWeight = FontWeight.ExtraBold, color = TextDark, fontSize = 18.sp)
                     Text("网络总会话数测试", color = Muted, fontSize = 12.sp)
                 }
             },
