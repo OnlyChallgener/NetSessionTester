@@ -1,4 +1,4 @@
-# NetSessionTester v0.9.7 Compile Fix
+# NetSessionTester v0.9.8 History Detail
 
 宽带会话测试器，Kotlin + Jetpack Compose 原生版。
 
@@ -28,7 +28,7 @@
 ## 构建
 
 上传完整项目后进入 GitHub Actions，运行 Build Android APK。
-Artifact：NetSessionTester-v0.9.7-compile-fix-debug-apk
+Artifact：NetSessionTester-v0.9.8-history-detail-debug-apk
 
 ## v0.6.1 修复
 
@@ -296,3 +296,22 @@ Artifact：NetSessionTester-v0.9.7-compile-fix-debug-apk
 - 修复 MainActivity.kt 本地函数声明顺序导致的 Kotlin 编译失败。
 - 版本仍显示 v0.9.7。
 - 保留 FD 闪退修复和版本弹窗当前版本显示。
+
+
+## v0.9.8 Chart Modes
+
+- 新增“本次测试图表”卡片，只显示当前这一次测试数据，下次开始测试自动清空重绘。
+- 新增两种图表模式：
+  - 分享优先：总览对比 + 当前协议曲线 + 本批诊断，便于截图分享。
+  - 分析增强：IPv4 / IPv6 独立曲线，避免 IPv4 非公网低会话被 IPv6 公网高会话压扁。
+- 图表按 1s 采样，不改变连接新增间隔，不影响原有会话测试逻辑。
+- 保留 v0.9.7 的 FD 闪退修复与历史保存保护。
+
+
+## v0.9.8 History Detail
+
+- 检测详情从纯文字列表升级为 OneUI 9 / Material 3 风格卡片。
+- 新增结果摘要、网络环境快照说明、IPv4/IPv6结果卡、历史摘要图表、诊断建议卡、失败原因卡。
+- 非正常中断会显示“异常中断 / 可信度低”，并提示网络切换、地址丢失、VPN变化、后台限制等复测建议。
+- 历史图表暂使用活动/失败/总计摘要条形图，不保存大量曲线点，避免影响稳定性。
+- 继续保持 v0.9.8 版本线，不改 TCP 会话测试核心逻辑。

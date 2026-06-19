@@ -12,8 +12,8 @@ android {
         applicationId = "com.demonv.netsessiontester"
         minSdk = 26
         targetSdk = 35
-        versionCode = 51
-        versionName = "0.9.7-compile-fix"
+        versionCode = 54
+        versionName = "0.9.8-history-detail"
         vectorDrawables { useSupportLibrary = true }
     }
 
