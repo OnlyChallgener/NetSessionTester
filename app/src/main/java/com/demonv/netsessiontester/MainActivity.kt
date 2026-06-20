@@ -28,6 +28,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -41,7 +42,9 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
@@ -104,7 +107,9 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
@@ -112,6 +117,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
@@ -528,6 +534,31 @@ private fun NetSessionTesterApp() {
         }
     }
 
+    fun hasFdLimit(stats: ProtocolStats?): Boolean {
+        if (stats == null) return false
+        return stats.phase.contains("FD", ignoreCase = true) ||
+            stats.errorSummary.keys.any { it.contains("FD", ignoreCase = true) }
+    }
+
+    fun hasFdLimit(summary: SessionSummary?): Boolean {
+        if (summary == null) return false
+        return hasFdLimit(summary.ipv4Stats) || hasFdLimit(summary.ipv6Stats)
+    }
+
+    suspend fun appendHistorySafely(summary: SessionSummary) {
+        // 触发 Android FD/Socket 上限时，先释放本机连接，再写历史，避免写文件时再次撞上 FD 上限。
+        if (hasFdLimit(summary)) {
+            val closed = tester.release()
+            appendLog(LogLine(level = LogLevel.WARN, text = "检测到FD上限，已先释放本机连接再保存历史：$closed 条"))
+        }
+        runCatching {
+            historyStore.append(summary)
+            historyStore.trim(100)
+        }.onFailure { error ->
+            appendLog(LogLine(level = LogLevel.ERROR, text = "保存历史失败：${error.message ?: error.javaClass.simpleName}"))
+        }
+    }
+
     fun startTest() {
         val config = buildConfig() ?: return
         ensureNotificationPermission()
@@ -588,8 +619,7 @@ private fun NetSessionTesterApp() {
                         TestMode.IPV4_ONLY -> null
                     }
                 )
-                historyStore.append(summary!!)
-                historyStore.trim(100)
+                appendHistorySafely(summary!!)
                 refreshHistory()
                 completedNormally = true
             } catch (error: Exception) {
@@ -660,8 +690,7 @@ private fun NetSessionTesterApp() {
             ipv6Stats = ipv6
         )
         scope.launch {
-            historyStore.append(summary)
-            historyStore.trim(100)
+            appendHistorySafely(summary)
             refreshHistory()
             state = state.copy(
                 summary = summary,
@@ -739,6 +768,19 @@ private fun NetSessionTesterApp() {
             historyCounts = HistoryCounts()
             state = state.copy(history = emptyList())
             snackbarHostState.showSnackbar("检测历史已清理")
+        }
+    }
+
+    fun deleteHistoryItem(summary: SessionSummary) {
+        scope.launch {
+            historyStore.delete(summary.id)
+            val safeLimit = historyLimit.toIntOrNull()?.coerceIn(10, 100) ?: 30
+            historyCounts = historyStore.counts()
+            historySavedCount = historyStore.count()
+            historySizeKb = historyStore.sizeKb()
+            state = state.copy(history = historyStore.load(historyPeriod, safeLimit))
+            if (detailSummary?.id == summary.id) detailSummary = null
+            snackbarHostState.showSnackbar("已删除 1 条检测历史")
         }
     }
 
@@ -934,6 +976,7 @@ private fun NetSessionTesterApp() {
                         editingRemarkSummary = summary
                         editingRemarkText = summary.remark
                     },
+                    onDeleteHistory = { summary -> deleteHistoryItem(summary) },
                     onHistoryDetail = { summary ->
                         detailSummary = summary
                     }
@@ -1480,6 +1523,7 @@ private fun LogsPage(
     onHistoryLimitChange: (String) -> Unit,
     onHistoryPeriodChange: (String) -> Unit,
     onEditRemark: (SessionSummary) -> Unit,
+    onDeleteHistory: (SessionSummary) -> Unit,
     onHistoryDetail: (SessionSummary) -> Unit
 ) {
     LazyColumn(
@@ -1526,12 +1570,13 @@ private fun LogsPage(
         if (history.isEmpty()) {
             item { SoftCard { Text("暂无历史记录", color = TextDark, fontSize = 13.sp) } }
         } else {
-            items(history.take(historyLimit.toIntOrNull()?.coerceIn(10, 100) ?: 30)) { item ->
-                HistoryCard(
+            items(history.take(historyLimit.toIntOrNull()?.coerceIn(10, 100) ?: 30), key = { it.id }) { item ->
+                SwipeDeleteHistoryCard(
                     item = item,
                     maskPrivacy = maskPrivacy,
                     onClick = { onHistoryDetail(item) },
-                    onEditRemark = { onEditRemark(item) }
+                    onEditRemark = { onEditRemark(item) },
+                    onDelete = { onDeleteHistory(item) }
                 )
             }
         }
@@ -1557,17 +1602,71 @@ private fun PeriodCountChip(title: String, subtitle: String, bg: Color, fg: Colo
 
 @Composable
 private fun PageTitle(title: String, subtitle: String?) {
+    val context = LocalContext.current
+    var showVersionDialog by remember { mutableStateOf(false) }
+
+    if (showVersionDialog) {
+        VersionInfoDialog(
+            onDismiss = { showVersionDialog = false },
+            onOpenGithub = {
+                runCatching {
+                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/OnlyChallgener/NetSessionTester")))
+                }
+            }
+        )
+    }
+
     Column(modifier = Modifier.padding(top = 4.dp, bottom = 2.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(title, fontSize = 22.sp, lineHeight = 25.sp, fontWeight = FontWeight.ExtraBold, color = TextDark)
             if (title == "宽带会话测试器") {
                 Spacer(Modifier.width(8.dp))
-                Text("v0.9.8", color = Muted, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                Box(
+                    modifier = Modifier
+                        .background(BlueSoft, RoundedCornerShape(10.dp))
+                        .clickable { showVersionDialog = true }
+                        .padding(horizontal = 7.dp, vertical = 3.dp)
+                ) {
+                    Text("v0.9.8", color = Blue, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                }
             }
         }
         subtitle?.let {
             Text(it, fontSize = 12.sp, color = Muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
+    }
+}
+
+@Composable
+private fun VersionInfoDialog(onDismiss: () -> Unit, onOpenGithub: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("关闭", fontSize = 13.sp) }
+        },
+        dismissButton = {
+            TextButton(onClick = onOpenGithub) { Text("打开 GitHub", fontSize = 13.sp, fontWeight = FontWeight.Bold) }
+        },
+        title = { Text("当前版本 v0.9.8", fontWeight = FontWeight.ExtraBold, color = TextDark) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("项目：NetSessionTester", color = Muted, fontSize = 12.sp)
+                VersionLine("v0.9.8", "当前版本：修复通知点击回到APP、FD上限保护、历史详情卡片、图表动态坐标和诊断同步。")
+                VersionLine("v0.9.7", "修复 FD 上限附近闪退；触发FD上限时优先释放本机连接并保存历史。")
+                VersionLine("v0.9.6", "修复停止按钮、通知跳转、新增批次被200锁死的问题。")
+                VersionLine("v0.9.5", "优化运行日志、历史记录保存、详情展示与备注。")
+                Text("https://github.com/OnlyChallgener/NetSessionTester", color = Blue, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+        },
+        shape = ShapeL
+    )
+}
+
+@Composable
+private fun VersionLine(version: String, text: String) {
+    Row(verticalAlignment = Alignment.Top) {
+        Text(version, color = Blue, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.width(58.dp))
+        Text(text, color = TextDark, fontSize = 12.sp, lineHeight = 16.sp, modifier = Modifier.weight(1f))
     }
 }
 
@@ -1743,7 +1842,9 @@ private fun ChartModeSelector(chartMode: ChartMode, onChartModeChange: (ChartMod
 private fun chartXAxisStep(durationSec: Int): Int = when {
     durationSec <= 20 -> 3
     durationSec <= 60 -> 5
-    else -> 10
+    durationSec <= 120 -> 10
+    durationSec <= 300 -> 30
+    else -> 60
 }
 
 private fun sessionYAxisMax(peak: Int): Int = when {
@@ -2130,6 +2231,76 @@ private fun CompactLogLine(line: LogLine, maskPrivacy: Boolean) {
 
 
 @Composable
+private fun SwipeDeleteHistoryCard(
+    item: SessionSummary,
+    maskPrivacy: Boolean,
+    onClick: () -> Unit,
+    onEditRemark: () -> Unit,
+    onDelete: () -> Unit
+) {
+    val revealWidthPx = with(LocalDensity.current) { 78.dp.toPx() }
+    val thresholdPx = revealWidthPx * 0.35f
+    var dragOffset by remember(item.id) { mutableStateOf(0f) }
+    val isRevealed = kotlin.math.abs(dragOffset) >= revealWidthPx * 0.9f
+    val revealLeft = dragOffset > 0f
+
+    Box(modifier = Modifier.fillMaxWidth()) {
+        if (isRevealed) {
+            Box(
+                modifier = Modifier
+                    .align(if (revealLeft) Alignment.CenterStart else Alignment.CenterEnd)
+                    .width(72.dp)
+                    .heightIn(min = 156.dp)
+                    .background(
+                        ErrorRed,
+                        if (revealLeft) {
+                            RoundedCornerShape(topStart = 28.dp, bottomStart = 28.dp, topEnd = 14.dp, bottomEnd = 14.dp)
+                        } else {
+                            RoundedCornerShape(topEnd = 28.dp, bottomEnd = 28.dp, topStart = 14.dp, bottomStart = 14.dp)
+                        }
+                    )
+                    .clickable(onClick = onDelete),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Icon(Icons.Filled.DeleteOutline, contentDescription = "删除", tint = Color.White, modifier = Modifier.width(22.dp).height(22.dp))
+                    Text("删除", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+
+        Box(
+            modifier = Modifier
+                .offset { IntOffset(dragOffset.roundToInt(), 0) }
+                .pointerInput(item.id) {
+                    detectHorizontalDragGestures(
+                        onDragEnd = {
+                            dragOffset = when {
+                                dragOffset <= -thresholdPx -> -revealWidthPx
+                                dragOffset >= thresholdPx -> revealWidthPx
+                                else -> 0f
+                            }
+                        },
+                        onDragCancel = { dragOffset = 0f },
+                        onHorizontalDrag = { _, dragAmount ->
+                            dragOffset = (dragOffset + dragAmount).coerceIn(-revealWidthPx, revealWidthPx)
+                        }
+                    )
+                }
+        ) {
+            HistoryCard(
+                item = item,
+                maskPrivacy = maskPrivacy,
+                onClick = {
+                    if (isRevealed) dragOffset = 0f else onClick()
+                },
+                onEditRemark = onEditRemark
+            )
+        }
+    }
+}
+
+@Composable
 private fun HistoryCard(
     item: SessionSummary,
     maskPrivacy: Boolean,
@@ -2146,10 +2317,12 @@ private fun HistoryCard(
     val address = mainStats?.resolvedAddresses?.firstOrNull().orEmpty()
     SoftCard {
         Column(
-            Modifier.fillMaxWidth(),
+            Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onClick),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.clickable(onClick = onClick)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
                 Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
                     Icon(Icons.Filled.History, contentDescription = null, tint = Muted, modifier = Modifier.width(15.dp).height(15.dp))
                     Spacer(Modifier.width(6.dp))
@@ -2184,6 +2357,14 @@ private fun HistoryCard(
                     }
                 }
             }
+            Text(
+                "诊断：${historyConclusion(item)}",
+                color = Muted,
+                fontSize = 11.sp,
+                lineHeight = 14.sp,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
             Row(
                 modifier = Modifier
                     .fillMaxWidth()

@@ -138,6 +138,20 @@ class TcpTester {
             val failureDeltaText = if (failAdd > 0) "(+$failAdd)" else ""
             onLog(LogLine(level = LogLevel.STAT, text = "${protocol.label} 统计 - 成功：$totalSuccess$successDeltaText | 失败：$totalFailure$failureDeltaText | 活动：$active | 总计：$totalAttempts | 新增：$added | CPS：${cps}/秒"))
 
+            if (errors.keys.any { it.contains("FD", ignoreCase = true) }) {
+                val protectedActive = active
+                val protectedStats = stats.copy(
+                    phase = "FD上限保护",
+                    activeSessions = protectedActive,
+                    maxStableSessions = maxOf(maxStable, protectedActive),
+                    errorSummary = errors.toMap()
+                )
+                onStats(protectedStats)
+                onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 触发FD上限，已启动保护释放，结果仅供参考"))
+                release(protocol)
+                return protectedStats
+            }
+
             if (totalFailure >= config.failureLimit) {
                 onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 达到失败上限：${config.failureLimit}"))
                 break
@@ -194,6 +208,17 @@ class TcpTester {
             throw e
         } catch (e: Exception) {
             OpenResult(error = classifyError(e))
+        } catch (t: Throwable) {
+            OpenResult(error = classifyThrowable(t))
+        }
+    }
+
+    private fun classifyThrowable(t: Throwable): String {
+        val message = t.message.orEmpty().lowercase()
+        return when {
+            "too many open files" in message || "emfile" in message -> "FD上限"
+            t is OutOfMemoryError -> "内存不足"
+            else -> t.javaClass.simpleName
         }
     }
 

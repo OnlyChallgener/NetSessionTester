@@ -228,3 +228,21 @@ Artifact：NetSessionTester-v0.9.8-final-axis-detail-fix-debug-apk
 - 会话图表 Y 轴规则：1000/2500/5000/10000/35000/65535。
 - 历史检测详情继续使用 OneUI / Material 3 卡片式详情，不再走纯文字检测详情列表。
 - 版本号保持 0.9.8。
+
+
+## v0.9.8 Final Stability Patch
+
+- X轴动态标注更新：20s内3s、60s内5s、120s内10s、300s内30s、300s以上60s。
+- 修复前台通知点击不能回到APP：通知增加 PendingIntent，MainActivity 设置 singleTop。
+- 小版本号恢复点击弹窗，显示当前版本、历史更新内容和 GitHub 链接。
+- FD上限保护增强：触发FD上限时先释放本机连接再保存历史，避免保存历史时因文件句柄不足闪退。
+- 历史记录卡片同步显示诊断结论，点击整张历史卡进入 OneUI / Material 3 检测详情。
+- 版本号保持 v0.9.8。
+
+
+## v0.9.8 Swipe Delete Regression Fix
+
+- 恢复检测历史单条滑动删除。
+- 支持横向滑动露出苹果风格红色竖条删除按钮。
+- 删除单条历史后同步刷新今天/昨天/本周数量、总数和占用 KB。
+- 保持版本号不变。
