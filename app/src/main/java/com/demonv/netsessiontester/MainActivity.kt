@@ -240,12 +240,22 @@ private fun inferCarrierFromIpv6Prefix(ipv6: String): String {
     }
 }
 
+private fun ipv6PrefixLabel(ipv6: String): String {
+    val value = ipv6.trim().lowercase()
+    return when {
+        value.startsWith("2408:") -> "2408 · 联通"
+        value.startsWith("2409:") -> "2409 · 移动"
+        value.startsWith("240e:") -> "240e · 电信"
+        value.isBlank() || value == "检测中" || value == "不可用" || value == "无" -> "无 IPv6"
+        else -> value.substringBefore(":").takeIf { it.isNotBlank() }?.let { "$it · 未知" } ?: "未知"
+    }
+}
 
 private fun displayCarrierFromEnv(env: NetworkEnvironment, ipv6: String): String {
     val prefixCarrier = inferCarrierFromIpv6Prefix(ipv6)
     return when {
         env.hasCellular && env.carrierName.isNotBlank() && env.carrierName != "未知" -> env.carrierName
-        prefixCarrier != "未知" -> prefixCarrier
+        prefixCarrier != "未知" -> "$prefixCarrier"
         env.hasWifi -> "WiFi"
         else -> "未知"
     }
@@ -2014,6 +2024,7 @@ private fun NetworkEnvironmentCard(
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             EnvInfoTile("网络", env.typeLabel, Blue, Modifier.weight(1f))
             EnvInfoTile("运营商", displayCarrierFromEnv(env, publicIpResult.ipv6), Purple, Modifier.weight(1f))
+            EnvInfoTile("IPv6前缀", ipv6PrefixLabel(publicIpResult.ipv6), Green, Modifier.weight(1f))
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             EnvInfoTile("IPv4出口", if (maskPrivacy) maskIpText(publicIpResult.ipv4) else publicIpResult.ipv4, Navy, Modifier.weight(1f))
