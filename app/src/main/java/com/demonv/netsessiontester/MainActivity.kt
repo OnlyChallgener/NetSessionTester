@@ -3,23 +3,14 @@
 package com.demonv.netsessiontester
 
 import android.Manifest
-import android.content.ContentValues
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.graphics.Bitmap
-import android.graphics.Canvas as AndroidCanvas
-import android.graphics.Color as AndroidColor
-import android.graphics.Paint
-import android.graphics.RectF
-import android.graphics.Typeface
 import android.net.Uri
-import android.net.ConnectivityManager
-import android.net.NetworkCapabilities
-import android.provider.MediaStore
 import android.os.Build
 import android.os.Bundle
-import android.widget.Toast
 import android.telephony.TelephonyManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -29,7 +20,6 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -41,10 +31,8 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
@@ -91,7 +79,6 @@ import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.WarningAmber
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -108,17 +95,13 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
@@ -151,29 +134,15 @@ import java.net.InetSocketAddress
 import java.net.Socket
 import kotlin.math.roundToInt
 
-private const val APP_GITHUB_URL = "https://github.com/OnlyChallgener/NetSessionTester"
-
-private fun appVersionLabel(context: Context): String {
-    return runCatching {
-        val info = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            context.packageManager.getPackageInfo(context.packageName, android.content.pm.PackageManager.PackageInfoFlags.of(0))
-        } else {
-            @Suppress("DEPRECATION")
-            context.packageManager.getPackageInfo(context.packageName, 0)
-        }
-        "v${info.versionName.orEmpty().substringBefore("-").ifBlank { "0.9.8" }}"
-    }.getOrDefault("v0.9.8")
-}
-
 private enum class MainTab(val label: String, val mark: String) {
     SETTINGS("设置", "settings"),
     TEST("测试", "play"),
     LOGS("历史", "logs")
 }
 
-private enum class ChartUiMode(val label: String) {
-    SHARE("分享优先"),
-    ADVANCED("分析增强")
+private enum class ChartMode(val label: String) {
+    GROWTH("增长曲线"),
+    PEAK("峰值/最高值")
 }
 
 private data class ChartPoint(
@@ -181,6 +150,7 @@ private data class ChartPoint(
     val elapsedSec: Int,
     val active: Int,
     val failure: Int,
+    val total: Int,
     val cps: Int,
     val phase: String,
     val timeEpochMs: Long = System.currentTimeMillis()
@@ -218,16 +188,8 @@ private fun detectNetworkEnvironment(context: Context): NetworkEnvironment {
         hasVpn -> "VPN"
         else -> "未知网络"
     }
-    return NetworkEnvironment(
-        typeLabel = typeLabel,
-        carrierName = carrier,
-        hasWifi = hasWifi,
-        hasCellular = hasCellular,
-        hasVpn = hasVpn,
-        hasInternet = hasInternet
-    )
+    return NetworkEnvironment(typeLabel, carrier, hasWifi, hasCellular, hasVpn, hasInternet)
 }
-
 
 private fun inferCarrierFromIpv6Prefix(ipv6: String): String {
     val value = ipv6.trim().lowercase()
@@ -235,19 +197,7 @@ private fun inferCarrierFromIpv6Prefix(ipv6: String): String {
         value.startsWith("2408:") -> "中国联通"
         value.startsWith("2409:") -> "中国移动"
         value.startsWith("240e:") -> "中国电信"
-        value.isBlank() || value == "检测中" || value == "不可用" || value == "无" -> "未知"
         else -> "未知"
-    }
-}
-
-private fun ipv6PrefixLabel(ipv6: String): String {
-    val value = ipv6.trim().lowercase()
-    return when {
-        value.startsWith("2408:") -> "2408 · 联通"
-        value.startsWith("2409:") -> "2409 · 移动"
-        value.startsWith("240e:") -> "240e · 电信"
-        value.isBlank() || value == "检测中" || value == "不可用" || value == "无" -> "无 IPv6"
-        else -> value.substringBefore(":").takeIf { it.isNotBlank() }?.let { "$it · 未知" } ?: "未知"
     }
 }
 
@@ -255,19 +205,16 @@ private fun displayCarrierFromEnv(env: NetworkEnvironment, ipv6: String): String
     val prefixCarrier = inferCarrierFromIpv6Prefix(ipv6)
     return when {
         env.hasCellular && env.carrierName.isNotBlank() && env.carrierName != "未知" -> env.carrierName
-        prefixCarrier != "未知" -> "$prefixCarrier"
+        prefixCarrier != "未知" -> prefixCarrier
         env.hasWifi -> "WiFi"
         else -> "未知"
     }
 }
 
-
 private suspend fun tcpPingMs(host: String, port: Int): Int? = withContext(Dispatchers.IO) {
     runCatching {
         val start = System.nanoTime()
-        Socket().use { socket ->
-            socket.connect(InetSocketAddress(host, port.coerceIn(1, 65535)), 1200)
-        }
+        Socket().use { socket -> socket.connect(InetSocketAddress(host, port.coerceIn(1, 65535)), 1200) }
         ((System.nanoTime() - start) / 1_000_000L).toInt().coerceAtLeast(1)
     }.getOrNull()
 }
@@ -328,8 +275,7 @@ private fun NetSessionTesterApp() {
     var manualStopRequested by remember { mutableStateOf(false) }
     var currentTestConfig by remember { mutableStateOf<SessionConfig?>(null) }
     var currentStartedAt by remember { mutableStateOf(0L) }
-    var testNetworkSignature by remember { mutableStateOf("") }
-    var chartUiMode by remember { mutableStateOf(ChartUiMode.SHARE) }
+    var chartMode by remember { mutableStateOf(ChartMode.GROWTH) }
     var chartPoints by remember { mutableStateOf<List<ChartPoint>>(emptyList()) }
     var lastChartSampleAt by remember { mutableStateOf<Map<IpProtocol, Long>>(emptyMap()) }
     var pingPoints by remember { mutableStateOf<List<PingPoint>>(emptyList()) }
@@ -337,7 +283,6 @@ private fun NetSessionTesterApp() {
 
     var detailTitle by remember { mutableStateOf<String?>(null) }
     var detailLines by remember { mutableStateOf<List<String>>(emptyList()) }
-    var detailSummary by remember { mutableStateOf<SessionSummary?>(null) }
     var editingRemarkSummary by remember { mutableStateOf<SessionSummary?>(null) }
     var editingRemarkText by remember { mutableStateOf("") }
     var showRunLogDetail by remember { mutableStateOf(false) }
@@ -398,109 +343,6 @@ private fun NetSessionTesterApp() {
         }
     }
 
-    fun appendLog(line: LogLine) {
-        state = state.copy(logs = (state.logs + line).takeLast(500))
-        scope.launch {
-            runCatching {
-                logStore.append(line)
-                logSizeKb = logStore.sizeKb()
-            }
-        }
-    }
-
-    fun resetCurrentChart() {
-        chartPoints = emptyList()
-        lastChartSampleAt = emptyMap()
-        pingPoints = emptyList()
-    }
-
-    fun startPingMonitor(config: SessionConfig, startedAt: Long) {
-        pingJob?.cancel()
-        pingPoints = emptyList()
-        pingJob = scope.launch {
-            while (currentStartedAt == startedAt) {
-                val elapsed = ((System.currentTimeMillis() - startedAt) / 1_000L).toInt().coerceAtLeast(0)
-                val ping = tcpPingMs(config.host, config.port)
-                pingPoints = (pingPoints + PingPoint(elapsedSec = elapsed, latencyMs = ping)).takeLast(180)
-                delay(1_000L)
-            }
-        }
-    }
-
-    fun recordChartPoint(stats: ProtocolStats) {
-        if (currentStartedAt <= 0L) return
-        val now = System.currentTimeMillis()
-        val terminal = stats.phase.contains("测试完成") ||
-            stats.phase.contains("已释放") ||
-            stats.phase.contains("地址丢失") ||
-            stats.phase.contains("解析失败") ||
-            stats.phase.contains("中断") ||
-            stats.phase.contains("FD上限") ||
-            stats.phase.contains("失败上限")
-
-        val last = lastChartSampleAt[stats.protocol] ?: 0L
-        if (!terminal && now - last < 1_000L) return
-
-        val elapsedSec = ((now - currentStartedAt) / 1_000L).toInt().coerceAtLeast(0)
-        val point = ChartPoint(
-            protocol = stats.protocol,
-            elapsedSec = elapsedSec,
-            active = stats.activeSessions,
-            failure = stats.totalFailure,
-            cps = stats.cps,
-            phase = stats.phase,
-            timeEpochMs = now
-        )
-
-        // 当前测试曲线只保留本次数据，最多 240 点；同一协议同一秒只保留最新点。
-        chartPoints = (chartPoints
-            .filterNot { it.protocol == point.protocol && it.elapsedSec == point.elapsedSec } + point)
-            .sortedWith(compareBy<ChartPoint> { it.protocol.ordinal }.thenBy { it.elapsedSec })
-            .takeLast(240)
-
-        lastChartSampleAt = lastChartSampleAt + (stats.protocol to now)
-    }
-
-    fun isFdLimitSummary(summary: SessionSummary): Boolean {
-        return listOfNotNull(summary.ipv4Stats, summary.ipv6Stats).any { stats ->
-            stats.phase.contains("FD", ignoreCase = true) ||
-                stats.errorSummary.keys.any { key ->
-                    key.contains("FD", ignoreCase = true) ||
-                        key.contains("too many open files", ignoreCase = true) ||
-                        key.contains("EMFILE", ignoreCase = true)
-                }
-        }
-    }
-
-    suspend fun persistHistorySafely(summary: SessionSummary) {
-        val fdLimited = isFdLimitSummary(summary)
-
-        if (fdLimited) {
-            val closed = tester.release()
-            appendLog(LogLine(level = LogLevel.WARN, text = "检测到FD上限，为避免闪退已先释放本机连接：$closed 条，然后保存历史"))
-        }
-
-        val first = runCatching {
-            historyStore.append(summary)
-            historyStore.trim(100)
-        }
-
-        if (first.isFailure) {
-            val message = first.exceptionOrNull()?.message ?: first.exceptionOrNull()?.javaClass?.simpleName ?: "未知错误"
-            appendLog(LogLine(level = LogLevel.ERROR, text = "保存历史失败：$message，尝试释放连接后重试"))
-            val closed = tester.release()
-            appendLog(LogLine(level = LogLevel.WARN, text = "为保存历史已释放连接：$closed 条"))
-            runCatching {
-                historyStore.append(summary)
-                historyStore.trim(100)
-            }.onFailure { retryError ->
-                appendLog(LogLine(level = LogLevel.ERROR, text = "历史重试保存失败：${retryError.message ?: retryError.javaClass.simpleName}"))
-            }
-        }
-
-        refreshHistory()
-    }
-
     fun refreshPublicIp() {
         scope.launch {
             publicIpLoading = true
@@ -557,6 +399,52 @@ private fun NetSessionTesterApp() {
         }
     }
 
+    fun appendLog(line: LogLine) {
+        state = state.copy(logs = (state.logs + line).takeLast(500))
+        scope.launch { logStore.append(line); logSizeKb = logStore.sizeKb() }
+    }
+
+    fun resetCurrentCharts() {
+        chartPoints = emptyList()
+        lastChartSampleAt = emptyMap()
+        pingPoints = emptyList()
+    }
+
+    fun recordChartPoint(stats: ProtocolStats) {
+        if (currentStartedAt <= 0L) return
+        val now = System.currentTimeMillis()
+        val last = lastChartSampleAt[stats.protocol] ?: 0L
+        val terminal = stats.phase.contains("完成") || stats.phase.contains("释放") || stats.phase.contains("中断") || stats.phase.contains("上限")
+        if (!terminal && now - last < 1_000L) return
+        val elapsed = ((now - currentStartedAt) / 1_000L).toInt().coerceAtLeast(0)
+        val point = ChartPoint(
+            protocol = stats.protocol,
+            elapsedSec = elapsed,
+            active = stats.activeSessions,
+            failure = stats.totalFailure,
+            total = stats.totalAttempts,
+            cps = stats.cps,
+            phase = stats.phase
+        )
+        chartPoints = (chartPoints.filterNot { it.protocol == point.protocol && it.elapsedSec == point.elapsedSec } + point)
+            .sortedWith(compareBy<ChartPoint> { it.protocol.ordinal }.thenBy { it.elapsedSec })
+            .takeLast(240)
+        lastChartSampleAt = lastChartSampleAt + (stats.protocol to now)
+    }
+
+    fun startPingMonitor(config: SessionConfig, startedAt: Long) {
+        pingJob?.cancel()
+        pingPoints = emptyList()
+        pingJob = scope.launch {
+            while (currentStartedAt == startedAt) {
+                val elapsed = ((System.currentTimeMillis() - startedAt) / 1_000L).toInt().coerceAtLeast(0)
+                val latency = tcpPingMs(config.host, config.port)
+                pingPoints = (pingPoints + PingPoint(elapsedSec = elapsed, latencyMs = latency)).takeLast(180)
+                delay(1_000L)
+            }
+        }
+    }
+
     fun ensureNotificationPermission() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
@@ -609,10 +497,9 @@ private fun NetSessionTesterApp() {
         val startedAt = System.currentTimeMillis()
         currentStartedAt = startedAt
         currentTestConfig = config
-        testNetworkSignature = currentNetworkSignature(context)
+        resetCurrentCharts()
         refreshPublicIp()
         manualStopRequested = false
-        resetCurrentChart()
         state = state.copy(
             isAdding = true,
             status = "建连中",
@@ -637,22 +524,9 @@ private fun NetSessionTesterApp() {
                     rawConfig = config,
                     onStats = { stats ->
                         recordChartPoint(stats)
-                        val terminal = stats.phase.contains("测试完成") ||
-                            stats.phase.contains("已释放") ||
-                            stats.phase.contains("地址丢失") ||
-                            stats.phase.contains("解析失败") ||
-                            stats.phase.contains("中断")
                         state = when (stats.protocol) {
-                            IpProtocol.IPV4 -> state.copy(
-                                ipv4Stats = stats,
-                                status = "${stats.protocol.label} ${stats.phase}",
-                                isAdding = !terminal
-                            )
-                            IpProtocol.IPV6 -> state.copy(
-                                ipv6Stats = stats,
-                                status = "${stats.protocol.label} ${stats.phase}",
-                                isAdding = !terminal
-                            )
+                            IpProtocol.IPV4 -> state.copy(ipv4Stats = stats, status = "${stats.protocol.label} ${stats.phase}")
+                            IpProtocol.IPV6 -> state.copy(ipv6Stats = stats, status = "${stats.protocol.label} ${stats.phase}")
                         }
                         updateForegroundNotice(context, "${stats.protocol.label} ${stats.phase}｜活动 ${stats.activeSessions}｜失败 ${stats.totalFailure}")
                     },
@@ -674,44 +548,14 @@ private fun NetSessionTesterApp() {
                         TestMode.IPV4_ONLY -> null
                     }
                 )
-                val hitFdGuard = listOfNotNull(summary?.ipv4Stats, summary?.ipv6Stats).any {
-                    it.phase.contains("FD上限") || it.errorSummary.containsKey("FD上限")
-                }
-                state = state.copy(
-                    isAdding = false,
-                    status = if (hitFdGuard) "FD上限 · 收尾中" else "测试完成 · 收尾中",
-                    summary = summary
-                )
-                persistHistorySafely(summary!!)
+                historyStore.append(summary!!)
+                historyStore.trim(100)
+                refreshHistory()
                 completedNormally = true
             } catch (error: Exception) {
                 if (!manualStopRequested) {
                     failureMsg = error.message ?: error.javaClass.simpleName
-                    state = state.copy(isAdding = false, status = "测试中断 · 收尾中", error = failureMsg)
                     appendLog(LogLine(level = LogLevel.ERROR, text = "测试中断：$failureMsg"))
-                    val abortReason = failureMsg ?: "测试中断"
-                    val abortIpv4 = if (config.mode != TestMode.IPV6_ONLY) {
-                        state.ipv4Stats.copy(
-                            phase = abortReason,
-                            errorSummary = state.ipv4Stats.errorSummary + (abortReason to 1)
-                        )
-                    } else null
-                    val abortIpv6 = if (config.mode != TestMode.IPV4_ONLY && state.ipv6Stats.totalAttempts > 0) {
-                        state.ipv6Stats.copy(
-                            phase = abortReason,
-                            errorSummary = state.ipv6Stats.errorSummary + (abortReason to 1)
-                        )
-                    } else null
-                    val abortSummary = SessionSummary(
-                        startedAtEpochMs = startedAt,
-                        host = config.host,
-                        port = config.port,
-                        mode = config.mode,
-                        ipv4Stats = abortIpv4,
-                        ipv6Stats = abortIpv6
-                    )
-                    summary = abortSummary
-                    persistHistorySafely(abortSummary)
                 }
             } finally {
                 pingJob?.cancel()
@@ -719,27 +563,18 @@ private fun NetSessionTesterApp() {
                 if (!manualStopRequested) {
                     val closed = tester.release()
                     if (completedNormally) {
-                        appendLog(LogLine(level = LogLevel.WARN, text = "测试完成，本机已释放：$closed 条；路由器会话表可能延迟数秒下降"))
+                        appendLog(LogLine(level = LogLevel.WARN, text = "测试完成，已立即释放连接：$closed 条"))
                     } else {
-                        appendLog(LogLine(level = LogLevel.WARN, text = "测试结束收尾，本机已释放：$closed 条；路由器会话表可能延迟数秒下降"))
+                        appendLog(LogLine(level = LogLevel.WARN, text = "测试结束收尾，已释放连接：$closed 条"))
                     }
-                    snackbarHostState.showSnackbar("本机已释放，路由器会话表可能延迟数秒下降")
 
                     val finalSummary = summary
                     val finalIpv4 = finalSummary?.ipv4Stats ?: state.ipv4Stats
                     val finalIpv6 = finalSummary?.ipv6Stats ?: state.ipv6Stats
 
-                    val hitFdGuard = listOfNotNull(finalIpv4, finalIpv6).any {
-                        it.phase.contains("FD上限") || it.errorSummary.containsKey("FD上限")
-                    }
-
                     state = state.copy(
                         isAdding = false,
-                        status = when {
-                            hitFdGuard -> "FD上限 · 已释放"
-                            completedNormally -> "测试完成 · 已释放"
-                            else -> "测试中断 · 已释放"
-                        },
+                        status = if (completedNormally) "测试完成 · 已释放" else "测试中断 · 已释放",
                         summary = finalSummary ?: state.summary,
                         error = failureMsg,
                         ipv4Stats = if (config.mode != TestMode.IPV6_ONLY) {
@@ -784,7 +619,9 @@ private fun NetSessionTesterApp() {
             ipv6Stats = ipv6
         )
         scope.launch {
-            persistHistorySafely(summary)
+            historyStore.append(summary)
+            historyStore.trim(100)
+            refreshHistory()
             state = state.copy(
                 summary = summary,
                 ipv4Stats = ipv4 ?: state.ipv4Stats,
@@ -795,15 +632,15 @@ private fun NetSessionTesterApp() {
 
     fun stopAdding() {
         manualStopRequested = true
-        state = state.copy(isAdding = false, status = "手动停止 · 收尾中")
         runningJob?.cancel()
         runningJob = null
+        pingJob?.cancel()
+        pingJob = null
         appendLog(LogLine(level = LogLevel.WARN, text = "手动停止；已停止新增并保存历史。"))
         saveManualStopSummary("手动停止")
         scope.launch {
             val closed = tester.release()
-            appendLog(LogLine(level = LogLevel.WARN, text = "手动停止，本机已释放：$closed 条；路由器会话表可能延迟数秒下降"))
-            snackbarHostState.showSnackbar("本机已释放，路由器会话表可能延迟数秒下降")
+            appendLog(LogLine(level = LogLevel.WARN, text = "手动停止，已立即释放连接：$closed 条"))
             state = state.copy(
                 isAdding = false,
                 status = "手动停止 · 已释放",
@@ -818,7 +655,6 @@ private fun NetSessionTesterApp() {
         val wasRunning = state.isAdding
         if (wasRunning) {
             manualStopRequested = true
-            state = state.copy(isAdding = false, status = "强制释放 · 收尾中")
             runningJob?.cancel()
             runningJob = null
             pingJob?.cancel()
@@ -833,51 +669,14 @@ private fun NetSessionTesterApp() {
         }
         scope.launch {
             val closed = tester.release()
-            appendLog(LogLine(level = LogLevel.WARN, text = "本机已释放：$closed 条；路由器会话表可能延迟数秒下降"))
-            snackbarHostState.showSnackbar("本机已释放，路由器会话表可能延迟数秒下降")
+            appendLog(LogLine(level = LogLevel.WARN, text = "已强制释放连接：$closed 条"))
             state = state.copy(
                 isAdding = false,
-                status = "本机已释放",
+                status = "已强制释放",
                 ipv4Stats = state.ipv4Stats.copy(activeSessions = 0, phase = if (state.ipv4Stats.totalAttempts > 0) "已释放" else state.ipv4Stats.phase),
                 ipv6Stats = state.ipv6Stats.copy(activeSessions = 0, phase = if (state.ipv6Stats.totalAttempts > 0) "已释放" else state.ipv6Stats.phase)
             )
             stopForegroundNotice(context)
-        }
-    }
-
-    fun abortRunningTest(reason: String) {
-        if (!state.isAdding) return
-        manualStopRequested = true
-        state = state.copy(isAdding = false, status = "$reason · 已中止")
-        runningJob?.cancel()
-        runningJob = null
-        appendLog(LogLine(level = LogLevel.ERROR, text = "$reason，测试已中止"))
-        saveManualStopSummary(reason)
-        scope.launch {
-            val closed = tester.release()
-            appendLog(LogLine(level = LogLevel.WARN, text = "$reason，本机已释放：$closed 条；路由器会话表可能延迟数秒下降"))
-            snackbarHostState.showSnackbar("本机已释放，路由器会话表可能延迟数秒下降")
-            state = state.copy(
-                isAdding = false,
-                status = "$reason · 已中止",
-                ipv4Stats = state.ipv4Stats.copy(activeSessions = 0, phase = if (state.ipv4Stats.totalAttempts > 0) "已中止" else state.ipv4Stats.phase),
-                ipv6Stats = state.ipv6Stats.copy(activeSessions = 0, phase = if (state.ipv6Stats.totalAttempts > 0) "已中止" else state.ipv6Stats.phase)
-            )
-            updateForegroundNotice(context, "$reason，测试已中止")
-            stopForegroundNotice(context)
-        }
-    }
-
-    LaunchedEffect(state.isAdding, testNetworkSignature) {
-        if (state.isAdding && testNetworkSignature.isNotBlank()) {
-            while (state.isAdding) {
-                delay(1000)
-                val nowSignature = currentNetworkSignature(context)
-                if (nowSignature == "NONE" || nowSignature != testNetworkSignature) {
-                    abortRunningTest("网络切换或地址丢失")
-                    break
-                }
-            }
         }
     }
 
@@ -935,14 +734,6 @@ private fun NetSessionTesterApp() {
                     modifier = Modifier.fillMaxWidth()
                 )
             }
-        )
-    }
-
-    if (detailSummary != null) {
-        HistoryDetailDialog(
-            summary = detailSummary!!,
-            maskPrivacy = maskPrivacy,
-            onDismiss = { detailSummary = null }
         )
     }
 
@@ -1008,6 +799,7 @@ private fun NetSessionTesterApp() {
                     onPortChange = { port = it },
                     result = state.resolveResult,
                     publicIpResult = publicIpResult,
+                    networkEnvironment = detectNetworkEnvironment(context),
                     publicIpLoading = publicIpLoading,
                     onRefreshPublicIp = { refreshPublicIp() },
                     onCopyPublicIpv4 = { copyText(publicIpResult.ipv4, "IPv4出口地址") },
@@ -1040,29 +832,18 @@ private fun NetSessionTesterApp() {
                     status = state.status,
                     target = successLimit,
                     testHost = currentTestConfig?.host ?: host,
-                    isAdding = state.isAdding ||
-                        (runningJob?.isActive == true) ||
-                        state.status.contains("建连中") ||
-                        state.status.contains("运行") ||
-                        state.ipv4Stats.phase.contains("建连中") ||
-                        state.ipv6Stats.phase.contains("建连中"),
+                    testPort = (currentTestConfig?.port ?: port.toIntOrNull() ?: 80),
+                    chartMode = chartMode,
+                    onChartModeChange = { chartMode = it },
+                    chartPoints = chartPoints,
+                    pingPoints = pingPoints,
+                    isAdding = state.isAdding,
                     onStart = { startTest() },
                     onStopAdding = { stopAdding() },
                     onRelease = { releaseAll() },
                     onExport = { exportLogs() },
                     ipv4Stats = state.ipv4Stats,
                     ipv6Stats = state.ipv6Stats,
-                    lastIpv4Active = latestActiveFromHistory(state.history, IpProtocol.IPV4),
-                    lastIpv6Active = latestActiveFromHistory(state.history, IpProtocol.IPV6),
-                    chartUiMode = chartUiMode,
-                    chartPoints = chartPoints,
-                    batchSizeSetting = batchSize,
-                    failureLimitSetting = failureLimit,
-                    onChartModeChange = { chartUiMode = it },
-                    networkEnvironment = detectNetworkEnvironment(context),
-                    publicIpResult = publicIpResult,
-                    resolveResult = state.resolveResult,
-                    pingPoints = pingPoints,
                     showIpv4 = mode != TestMode.IPV6_ONLY,
                     showIpv6 = mode != TestMode.IPV4_ONLY,
                     maskPrivacy = maskPrivacy,
@@ -1105,330 +886,14 @@ private fun NetSessionTesterApp() {
                         editingRemarkSummary = summary
                         editingRemarkText = summary.remark
                     },
-                    onDeleteHistory = { summary ->
-                        scope.launch {
-                            historyStore.delete(summary.id)
-                            refreshHistory()
-                            snackbarHostState.showSnackbar("已删除该条检测历史")
-                        }
-                    },
                     onHistoryDetail = { summary ->
-                        detailSummary = summary
+                        showDetail("检测详情", historyDetailLines(summary, maskPrivacy))
                     }
                 )
             }
         }
     }
 }
-
-@Composable
-private fun HistoryDetailDialog(summary: SessionSummary, maskPrivacy: Boolean, onDismiss: () -> Unit) {
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        confirmButton = {
-            TextButton(onClick = onDismiss) { Text("关闭", fontSize = 13.sp) }
-        },
-        title = {
-            Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("检测详情", fontWeight = FontWeight.ExtraBold, color = TextDark, fontSize = 22.sp, modifier = Modifier.weight(1f))
-                    IconButton(onClick = {
-                        scope.launch {
-                            val ok = saveHistorySnapshotImage(context, summary, maskPrivacy)
-                            Toast.makeText(context, if (ok) "已保存到相册" else "保存失败", Toast.LENGTH_SHORT).show()
-                        }
-                    }) {
-                        Icon(Icons.Filled.Download, contentDescription = "保存图片", tint = Blue)
-                    }
-                }
-                Text(summary.startedAtText, color = Muted, fontSize = 12.sp)
-            }
-        },
-        text = {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(560.dp)
-                    .verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                HistoryTopResultCard(summary, maskPrivacy)
-                HistoryQuickConclusionCard(summary)
-                summary.ipv4Stats?.let { HistoryProtocolResultCard("IPv4 结果", it, maskPrivacy) }
-                summary.ipv6Stats?.let { HistoryProtocolResultCard("IPv6 结果", it, maskPrivacy) }
-                HistoryResultChartCard(summary)
-                HistoryDiagnosisDetailCard(summary)
-                HistoryFailureSummaryCard(summary)
-                if (summary.remark.isNotBlank()) {
-                    SoftCard {
-                        SectionTitle("□", "备注", Blue)
-                        Text(summary.remark, color = TextDark, fontSize = 12.sp, lineHeight = 16.sp)
-                    }
-                }
-            }
-        },
-        shape = ShapeL
-    )
-}
-
-@Composable
-private fun HistoryTopResultCard(summary: SessionSummary, maskPrivacy: Boolean) {
-    val abnormal = isAbnormalSummary(summary)
-    val credibility = if (abnormal) "可信度低" else "可作为参考"
-    val host = if (maskPrivacy) maskIpText(summary.host) else summary.host
-    SoftCard {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            SectionTitle("◎", "结果摘要", if (abnormal) ErrorRed else Blue)
-            Spacer(Modifier.weight(1f))
-            StatusChip(if (abnormal) "异常中断" else "检测记录", if (abnormal) RedSoft else GreenSoft, if (abnormal) ErrorRed else Green, compact = true)
-        }
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(7.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            StatusChip(summary.mode.label, BlueSoft, Blue, compact = true)
-            StatusChip(credibility, if (abnormal) RedSoft else GreenSoft, if (abnormal) ErrorRed else Green, compact = true)
-        }
-        InfoLine("目标", "$host:${summary.port}")
-        InfoLine("时间", summary.startedAtText)
-        if (abnormal) {
-            Text("本次测试过程被打断，不能直接当作宽带/路由器会话上限。建议保持网络不切换后重新测试。", color = Orange, fontSize = 11.sp, lineHeight = 15.sp, fontWeight = FontWeight.Bold)
-        }
-    }
-}
-
-@Composable
-private fun HistoryQuickConclusionCard(summary: SessionSummary) {
-    val abnormal = isAbnormalSummary(summary)
-    val ipv4 = summary.ipv4Stats
-    val ipv6 = summary.ipv6Stats
-    val v4Peak = ipv4?.let { protocolPeak(it) } ?: 0
-    val v6Peak = ipv6?.let { protocolPeak(it) } ?: 0
-    val totalFailure = listOfNotNull(ipv4, ipv6).sumOf { it.totalFailure }
-    val fdLimit = listOfNotNull(ipv4, ipv6).any { s ->
-        s.phase.contains("FD", true) || s.errorSummary.keys.any { it.contains("FD", true) }
-    }
-
-    val title = when {
-        abnormal -> "本次结果仅供参考"
-        fdLimit -> "更像手机端资源上限"
-        ipv4 != null && ipv6 != null && v4Peak in 1..999 && v6Peak >= 5000 -> "IPv4 可能是主要瓶颈"
-        ipv4 != null && ipv6 == null && v4Peak in 1..999 -> "仅 IPv4 偏低，建议补测 IPv6"
-        ipv6 != null && ipv4 == null -> "仅 IPv6 结果，建议补测 IPv4"
-        totalFailure > 0 -> "存在失败连接，结合失败原因判断"
-        else -> "结果可作为本次网络会话能力参考"
-    }
-
-    val sub = when {
-        abnormal -> "检测过程被打断，不能直接当作宽带/路由器上限。"
-        fdLimit -> "触发 FD/Socket 相关限制时，宽带侧可能还没到顶。"
-        ipv4 != null && ipv6 != null && v4Peak in 1..999 && v6Peak >= 5000 -> "IPv6 明显高于 IPv4，优先怀疑 IPv4 NAT/CGNAT/出口策略。"
-        ipv4 != null && ipv6 == null && v4Peak in 1..999 -> "缺少 IPv6 对比，建议用分别测试模式复测。"
-        ipv6 != null && ipv4 == null -> "IPv6 可作为公网链路参考，但无法判断 IPv4 是否为瓶颈。"
-        totalFailure > 0 -> "失败原因卡展示主要失败类型，图表卡展示活动/失败/总计比例。"
-        else -> "建议保存图片，和不同运营商、WiFi/蜂窝结果对比。"
-    }
-
-    SoftCard {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            SectionTitle("◎", "分享结论", if (abnormal) ErrorRed else Blue)
-            Spacer(Modifier.weight(1f))
-            StatusChip(if (abnormal) "可信度低" else "可分享", if (abnormal) RedSoft else GreenSoft, if (abnormal) ErrorRed else Green, compact = true)
-        }
-        Text(title, color = TextDark, fontSize = 15.sp, fontWeight = FontWeight.ExtraBold, lineHeight = 19.sp)
-        Text(sub, color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(7.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            StatusChip("IPv4峰值 $v4Peak", BlueSoft, Blue, compact = true)
-            StatusChip("IPv6峰值 $v6Peak", GreenSoft, Green, compact = true)
-            if (totalFailure > 0) StatusChip("失败 $totalFailure", RedSoft, ErrorRed, compact = true)
-            StatusChip(summary.mode.label, Color(0xFFF3E8FF), Purple, compact = true)
-        }
-    }
-}
-
-
-@Composable
-private fun HistoryProtocolResultCard(title: String, stats: ProtocolStats, maskPrivacy: Boolean) {
-    SoftCard {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            SectionTitle("▮", title, Blue)
-            Spacer(Modifier.weight(1f))
-            Text(stats.phase, color = if (isAbnormalPhase(stats.phase)) ErrorRed else Blue, fontWeight = FontWeight.Bold, fontSize = 12.sp, maxLines = 1)
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            MetricTile("活动", stats.activeSessions.toString(), Blue, Modifier.weight(1f))
-            MetricTile("失败", stats.totalFailure.toString(), ErrorRed, Modifier.weight(1f))
-            MetricTile("总计", stats.totalAttempts.toString(), Navy, Modifier.weight(1f))
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            MetricTile("新增", stats.lastAdded.toString(), Blue, Modifier.weight(1f))
-            MetricTile("CPS", "${stats.cps}/s", Blue, Modifier.weight(1f))
-            MetricTile("峰值", protocolPeak(stats).toString(), Green, Modifier.weight(1f))
-        }
-        if (stats.resolvedAddresses.isNotEmpty()) {
-            Text("地址：${displayIpList(stats.resolvedAddresses, maskPrivacy)}", color = Muted, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        }
-    }
-}
-
-@Composable
-private fun HistoryResultChartCard(summary: SessionSummary) {
-    val stats = listOfNotNull(summary.ipv4Stats, summary.ipv6Stats)
-    if (stats.isEmpty()) return
-    val maxValue = stats.maxOf { maxOf(1, protocolPeak(it), it.totalFailure, it.totalAttempts) }
-    SoftCard {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            SectionTitle("▮", "结果图表", Green)
-            Spacer(Modifier.weight(1f))
-            Text("摘要条形图", color = Muted, fontSize = 11.sp)
-        }
-        Text("摘要条形图用于截图分享；完整过程以当前测试页曲线为准。", color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
-        stats.forEach { s ->
-            HistoryBarRow("${s.protocol.label} 活动", protocolPeak(s), maxValue, Blue)
-            HistoryBarRow("${s.protocol.label} 失败", s.totalFailure, maxValue, ErrorRed)
-            HistoryBarRow("${s.protocol.label} 总计", s.totalAttempts, maxValue, Navy)
-        }
-    }
-}
-
-@Composable
-private fun HistoryBarRow(label: String, value: Int, maxValue: Int, color: Color) {
-    val fraction = (value.toFloat() / maxValue.toFloat()).coerceIn(0.02f, 1f)
-    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().height(24.dp)) {
-        Text(label, color = Muted, fontSize = 11.sp, modifier = Modifier.width(72.dp), maxLines = 1)
-        Box(
-            modifier = Modifier
-                .weight(1f)
-                .height(8.dp)
-                .background(color.copy(alpha = 0.13f), RoundedCornerShape(8.dp))
-        ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth(fraction)
-                    .height(8.dp)
-                    .background(color, RoundedCornerShape(8.dp))
-            )
-        }
-        Spacer(Modifier.width(8.dp))
-        Text(value.toString(), color = color, fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(54.dp), maxLines = 1)
-    }
-}
-
-@Composable
-private fun HistoryDiagnosisDetailCard(summary: SessionSummary) {
-    val abnormal = isAbnormalSummary(summary)
-    val ipv4 = summary.ipv4Stats
-    val ipv6 = summary.ipv6Stats
-    val v4Peak = ipv4?.let { protocolPeak(it) } ?: 0
-    val v6Peak = ipv6?.let { protocolPeak(it) } ?: 0
-    val onlyV4 = ipv4 != null && ipv6 == null
-    val onlyV6 = ipv6 != null && ipv4 == null
-    val fdLimit = listOfNotNull(ipv4, ipv6).any { s -> s.phase.contains("FD", true) || s.errorSummary.keys.any { it.contains("FD", true) } }
-
-    val title: String
-    val lines: List<String>
-    when {
-        abnormal -> {
-            title = "测试非正常中断，结果可信度低"
-            lines = listOf(
-                "保持 WiFi/蜂窝/VPN 不切换后重新测试。",
-                "如果出现地址丢失，先重新解析 DNS，再分 IPv4 / IPv6 单独测试。",
-                "蜂窝网络频繁中断时，建议切换 4G/5G 或更换 APN 复测。",
-                "如 APP 被后台限制，请关闭省电限制并保持前台。"
-            )
-        }
-        fdLimit -> {
-            title = "可能达到手机端 FD / Socket 上限"
-            lines = listOf(
-                "这不一定代表宽带或路由器会话数到顶。",
-                "建议降低新增批次，或分 IPv4 / IPv6 单独测试。",
-                "如果路由器会话表仍在增长，以路由器侧数据为重要参考。"
-            )
-        }
-        onlyV4 && v4Peak in 1..999 -> {
-            title = "仅 IPv4 低会话，建议补测 IPv6"
-            lines = listOf(
-                "本次只有 IPv4，无法直接判断是否为运营商 IPv4 CGNAT。",
-                "建议再做 IPv6 单独测试或分别测试。",
-                "如果 IPv6 明显高于 IPv4，优先怀疑 IPv4 NAT / CGNAT 出口限制。"
-            )
-        }
-        onlyV6 -> {
-            title = "仅 IPv6 结果，可作为公网链路参考"
-            lines = listOf(
-                "建议补测 IPv4，用于对比是否存在 IPv4 CGNAT/NAT限制。",
-                "如果 IPv6 高、IPv4 低，优先看 IPv4 出口策略。"
-            )
-        }
-        ipv4 != null && ipv6 != null && v4Peak in 1..999 && v6Peak >= 5000 -> {
-            title = "IPv4低、IPv6高，优先怀疑 IPv4 NAT / CGNAT 限制"
-            lines = listOf(
-                "手机本身限制概率较低，因为 IPv6 能维持较高会话。",
-                "蜂窝网络下优先看运营商 IPv4 出口策略。",
-                "WiFi 下优先看路由器 IPv4 NAT 或宽带 IPv4 会话策略。"
-            )
-        }
-        ipv4 != null && ipv6 != null && v4Peak < 1000 && v6Peak < 1000 -> {
-            title = "IPv4 / IPv6 都偏低，建议排查环境和目标站"
-            lines = listOf(
-                "可能是目标站限制、网络质量差、基站拥塞或本机资源异常。",
-                "建议更换目标站、换时间段、切换 WiFi/蜂窝复测。"
-            )
-        }
-        else -> {
-            title = "结果可作为本次网络会话能力参考"
-            lines = listOf(
-                "建议保存截图，对比不同运营商、WiFi/蜂窝、IPv4/IPv6。",
-                "如果需要判断 IPv4 是否为瓶颈，优先使用分别测试模式。"
-            )
-        }
-    }
-
-    SoftCard {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            SectionTitle("!", "诊断建议", Orange)
-            Spacer(Modifier.weight(1f))
-            StatusChip(if (abnormal) "异常中断" else "自动分析", if (abnormal) RedSoft else BlueSoft, if (abnormal) ErrorRed else Blue, compact = true)
-        }
-        Text(title, color = TextDark, fontSize = 14.sp, lineHeight = 18.sp, fontWeight = FontWeight.Bold)
-        Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
-            lines.take(3).forEachIndexed { index, item ->
-                Row(verticalAlignment = Alignment.Top) {
-                    Text("${index + 1}.", color = Blue, fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(18.dp))
-                    Text(item, color = Muted, fontSize = 11.sp, lineHeight = 15.sp, modifier = Modifier.weight(1f))
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun HistoryFailureSummaryCard(summary: SessionSummary) {
-    val errors = mergedErrors(listOfNotNull(summary.ipv4Stats, summary.ipv6Stats))
-    if (errors.isEmpty()) return
-    SoftCard {
-        SectionTitle("!", "失败原因", ErrorRed)
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
-            errors.entries.sortedByDescending { it.value }.take(8).forEach { (name, count) ->
-                ReasonChip("$name $count")
-            }
-        }
-    }
-}
-
-private fun protocolPeak(stats: ProtocolStats): Int = maxOf(stats.activeSessions, stats.maxStableSessions, stats.totalSuccess)
-
-private fun isAbnormalSummary(summary: SessionSummary): Boolean {
-    return listOfNotNull(summary.ipv4Stats, summary.ipv6Stats).any { stats ->
-        isAbnormalPhase(stats.phase) || stats.errorSummary.keys.any { key ->
-            key.contains("地址丢失") || key.contains("中断") || key.contains("解析失败") || key.contains("异常中断")
-        }
-    }
-}
-
-private fun isAbnormalPhase(phase: String): Boolean {
-    return phase.contains("中断") || phase.contains("地址丢失") || phase.contains("解析失败") || phase.contains("异常")
-}
-
 
 @Composable
 private fun SettingsPage(
@@ -1438,6 +903,7 @@ private fun SettingsPage(
     onPortChange: (String) -> Unit,
     result: com.demonv.netsessiontester.model.ResolveResult,
     publicIpResult: PublicIpResult,
+    networkEnvironment: NetworkEnvironment,
     publicIpLoading: Boolean,
     onRefreshPublicIp: () -> Unit,
     onCopyPublicIpv4: () -> Unit,
@@ -1466,7 +932,7 @@ private fun SettingsPage(
             .padding(horizontal = 14.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
-        item { PageTitle("宽带会话测试器", "网络总会话数测试 - IPV4/IPV6分别测试。") }
+        item { PageTitle("宽带会话测试器", "TCP 会话保持 · IPv4 / IPv6 分别测试") }
         item {
             SoftCard {
                 SectionTitle("◎", "目标设置", Blue)
@@ -1497,28 +963,15 @@ private fun SettingsPage(
             }
         }
         item {
-            SoftCard {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    SectionTitle("◎", "公网出口", Blue)
-                    Spacer(Modifier.weight(1f))
-                    TextButton(onClick = onRefreshPublicIp) {
-                        Text(if (publicIpLoading) "检测中" else "刷新", fontSize = 12.sp)
-                    }
-                }
-                PublicExitLine(
-                    label = "IPv4 出口地址",
-                    value = if (maskPrivacy) maskIpText(publicIpResult.ipv4) else publicIpResult.ipv4,
-                    copyValue = publicIpResult.ipv4,
-                    onCopy = onCopyPublicIpv4
-                )
-                PublicExitLine(
-                    label = "IPv6 出口地址",
-                    value = if (maskPrivacy) maskIpText(publicIpResult.ipv6) else publicIpResult.ipv6,
-                    copyValue = publicIpResult.ipv6,
-                    onCopy = onCopyPublicIpv6
-                )
-                Text("点击地址可复制。显示当前网络访问互联网时对外可见的出口地址", color = Muted, fontSize = 10.sp, maxLines = 1)
-            }
+            NetworkEnvironmentSettingsCard(
+                env = networkEnvironment,
+                publicIpResult = publicIpResult,
+                publicIpLoading = publicIpLoading,
+                maskPrivacy = maskPrivacy,
+                onRefresh = onRefreshPublicIp,
+                onCopyPublicIpv4 = onCopyPublicIpv4,
+                onCopyPublicIpv6 = onCopyPublicIpv6
+            )
         }
         item {
             SoftCard {
@@ -1562,6 +1015,11 @@ private fun TestPage(
     status: String,
     target: String,
     testHost: String,
+    testPort: Int,
+    chartMode: ChartMode,
+    onChartModeChange: (ChartMode) -> Unit,
+    chartPoints: List<ChartPoint>,
+    pingPoints: List<PingPoint>,
     isAdding: Boolean,
     onStart: () -> Unit,
     onStopAdding: () -> Unit,
@@ -1569,17 +1027,6 @@ private fun TestPage(
     onExport: () -> Unit,
     ipv4Stats: ProtocolStats,
     ipv6Stats: ProtocolStats,
-    lastIpv4Active: Int,
-    lastIpv6Active: Int,
-    chartUiMode: ChartUiMode,
-    chartPoints: List<ChartPoint>,
-    batchSizeSetting: String,
-    failureLimitSetting: String,
-    onChartModeChange: (ChartUiMode) -> Unit,
-    networkEnvironment: NetworkEnvironment,
-    publicIpResult: PublicIpResult,
-    resolveResult: com.demonv.netsessiontester.model.ResolveResult,
-    pingPoints: List<PingPoint>,
     showIpv4: Boolean,
     showIpv6: Boolean,
     maskPrivacy: Boolean,
@@ -1594,7 +1041,7 @@ private fun TestPage(
         verticalArrangement = Arrangement.spacedBy(7.dp)
     ) {
         item {
-            PageTitle("宽带会话测试器", "网络总会话数测试 - IPV4/IPV6分别测试。")
+            PageTitle("宽带会话测试器", null)
             FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
                 StatusChip(mode.label, BlueSoft, Blue)
                 StatusChip(if (isAdding) "● 运行中" else status, GreenSoft, Green)
@@ -1604,7 +1051,7 @@ private fun TestPage(
         item {
             SoftCard {
                 SectionTitle("∿", "测试控制", Blue)
-                Text(if (isAdding) "● 正在运行 · 已连接目标" else "状态：$status", color = if (isAdding) Green else Muted, fontWeight = FontWeight.Medium, fontSize = 12.sp)
+                Text(if (isAdding) "● 正在运行 · 已连接目标" else "状态：$status", color = if (isAdding) Green else Muted, fontWeight = FontWeight.Medium)
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     Button(onClick = onStart, enabled = !isAdding, modifier = Modifier.weight(1f).height(38.dp), shape = ShapeM) {
                         Icon(Icons.Filled.PlayArrow, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("开始", fontSize = 13.sp)
@@ -1617,50 +1064,16 @@ private fun TestPage(
                         shape = ShapeM
                     ) { Icon(Icons.Filled.Stop, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("停止", fontSize = 13.sp) }
                 }
-                Spacer(Modifier.height(4.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     OutlinedButton(onClick = onRelease, modifier = Modifier.weight(1f).height(38.dp), shape = ShapeM) { Icon(Icons.Filled.DeleteOutline, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("强制释放", fontSize = 13.sp) }
                     OutlinedButton(onClick = onExport, modifier = Modifier.weight(1f).height(38.dp), shape = ShapeM) { Icon(Icons.Filled.Download, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("导出", fontSize = 13.sp) }
                 }
             }
         }
-        item {
-            NetworkEnvironmentCard(
-                env = networkEnvironment,
-                publicIpResult = publicIpResult,
-                resolveResult = resolveResult,
-                maskPrivacy = maskPrivacy
-            )
-        }
-        item {
-            DiagnosisAdviceCard(
-                env = networkEnvironment,
-                mode = mode,
-                ipv4Stats = ipv4Stats,
-                ipv6Stats = ipv6Stats,
-                publicIpResult = publicIpResult
-            )
-        }
-        item {
-            PingTestChartCard(
-                target = testHost.ifBlank { "目标站" },
-                pingPoints = pingPoints
-            )
-        }
-        if (showIpv4) item { SessionStatsCard("IPv4 会话", ipv4Stats, maskPrivacy, lastIpv4Active) }
-        if (showIpv6) item { SessionStatsCard("IPv6 会话", ipv6Stats, maskPrivacy, lastIpv6Active) }
-        item {
-            CurrentTestChartCard(
-                mode = mode,
-                chartUiMode = chartUiMode,
-                chartPoints = chartPoints,
-                ipv4Stats = ipv4Stats,
-                ipv6Stats = ipv6Stats,
-                batchSizeSetting = batchSizeSetting,
-                failureLimitSetting = failureLimitSetting,
-                onModeChange = onChartModeChange
-            )
-        }
+        item { PingCompactChartCard(pingPoints = pingPoints) }
+        if (showIpv4) item { SessionStatsCard("IPv4 会话", ipv4Stats, maskPrivacy, chartPoints.filter { it.protocol == IpProtocol.IPV4 }, chartMode, onChartModeChange) }
+        if (showIpv6) item { SessionStatsCard("IPv6 会话", ipv6Stats, maskPrivacy, chartPoints.filter { it.protocol == IpProtocol.IPV6 }, chartMode, onChartModeChange) }
+        item { DiagnosisAdviceInlineCard(mode, ipv4Stats, ipv6Stats) }
         item { RecentLogCard(logs, maskPrivacy, onMoreLogs) }
         item { Spacer(Modifier.height(70.dp)) }
     }
@@ -1746,7 +1159,6 @@ private fun LogsPage(
     onHistoryLimitChange: (String) -> Unit,
     onHistoryPeriodChange: (String) -> Unit,
     onEditRemark: (SessionSummary) -> Unit,
-    onDeleteHistory: (SessionSummary) -> Unit,
     onHistoryDetail: (SessionSummary) -> Unit
 ) {
     LazyColumn(
@@ -1794,12 +1206,11 @@ private fun LogsPage(
             item { SoftCard { Text("暂无历史记录", color = TextDark, fontSize = 13.sp) } }
         } else {
             items(history.take(historyLimit.toIntOrNull()?.coerceIn(10, 100) ?: 30)) { item ->
-                SwipeDeleteHistoryCard(
+                HistoryCard(
                     item = item,
                     maskPrivacy = maskPrivacy,
                     onClick = { onHistoryDetail(item) },
-                    onEditRemark = { onEditRemark(item) },
-                    onDelete = { onDeleteHistory(item) }
+                    onEditRemark = { onEditRemark(item) }
                 )
             }
         }
@@ -1825,81 +1236,17 @@ private fun PeriodCountChip(title: String, subtitle: String, bg: Color, fg: Colo
 
 @Composable
 private fun PageTitle(title: String, subtitle: String?) {
-    var showVersionDialog by remember { mutableStateOf(false) }
-    val uriHandler = LocalUriHandler.current
-    val context = LocalContext.current
-    val versionLabel = remember { appVersionLabel(context) }
-
     Column(modifier = Modifier.padding(top = 4.dp, bottom = 2.dp)) {
-        Row(verticalAlignment = Alignment.Bottom) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
             Text(title, fontSize = 22.sp, lineHeight = 25.sp, fontWeight = FontWeight.ExtraBold, color = TextDark)
             if (title == "宽带会话测试器") {
                 Spacer(Modifier.width(8.dp))
-                Text(
-                    versionLabel,
-                    fontSize = 10.sp,
-                    color = Muted,
-                    fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier
-                        .padding(bottom = 2.dp)
-                        .clickable { showVersionDialog = true }
-                )
+                Text("v0.9.8", color = Muted, fontSize = 11.sp, fontWeight = FontWeight.Bold)
             }
         }
         subtitle?.let {
             Text(it, fontSize = 12.sp, color = Muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
-    }
-
-    if (showVersionDialog) {
-        AlertDialog(
-            onDismissRequest = { showVersionDialog = false },
-            confirmButton = {
-                TextButton(onClick = {
-                    showVersionDialog = false
-                    uriHandler.openUri(APP_GITHUB_URL)
-                }) {
-                    Text("打开 GitHub", fontSize = 13.sp, fontWeight = FontWeight.Bold)
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showVersionDialog = false }) {
-                    Text("关闭", fontSize = 13.sp)
-                }
-            },
-            title = {
-                Column {
-                    Text("当前版本 $versionLabel", fontWeight = FontWeight.ExtraBold, color = TextDark, fontSize = 18.sp)
-                    Text("网络总会话数测试", color = Muted, fontSize = 12.sp)
-                }
-            },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    VersionLine("v0.9.8", "当前版本：新增检测详情保存图片、真实Ping图表、网络环境实测卡和1s采样点数值显示。")
-                    VersionLine("v0.9.7", "修复 FD 上限附近闪退；真实 FD上限时先释放文件句柄再保存历史，避免有日志无历史。")
-                    VersionLine("v0.9.5", "修复停止按钮、通知跳转、新增批次被 200 锁死的问题。")
-                    VersionLine("v0.9.4", "分批并发普通释放；增加本机已释放、路由器会话表可能延迟下降提示。")
-                    VersionLine("v0.9.3", "修复 GitHub Actions 编译错误。")
-                    VersionLine("v0.9.2", "首页副标题改为网络总会话数测试 - IPV4/IPV6分别测试。")
-                }
-            },
-            shape = ShapeL,
-            containerColor = Color.White
-        )
-    }
-}
-
-@Composable
-private fun VersionLine(version: String, text: String) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(Color(0xFFF8FAFC), RoundedCornerShape(12.dp))
-            .padding(horizontal = 10.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.Top
-    ) {
-        Text(version, color = Blue, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(54.dp))
-        Text(text, color = TextDark, fontSize = 12.sp, lineHeight = 16.sp, modifier = Modifier.weight(1f))
     }
 }
 
@@ -1924,7 +1271,7 @@ private fun SectionTitle(mark: String, title: String, color: Color) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         MarkBox(mark, color.copy(alpha = 0.12f), color)
         Spacer(Modifier.width(10.dp))
-        Text(title, fontSize = 15.sp, fontWeight = FontWeight.Bold, color = TextDark)
+        Text(title, fontSize = 17.sp, fontWeight = FontWeight.Bold, color = TextDark)
     }
 }
 
@@ -2006,535 +1353,24 @@ private fun ModeSelector(mode: TestMode, onModeChange: (TestMode) -> Unit) {
     }
 }
 
-
-
 @Composable
-private fun NetworkEnvironmentCard(
-    env: NetworkEnvironment,
-    publicIpResult: PublicIpResult,
-    resolveResult: com.demonv.netsessiontester.model.ResolveResult,
-    maskPrivacy: Boolean
+private fun SessionStatsCard(
+    title: String,
+    stats: ProtocolStats,
+    maskPrivacy: Boolean,
+    points: List<ChartPoint>,
+    chartMode: ChartMode,
+    onChartModeChange: (ChartMode) -> Unit
 ) {
-    SoftCard {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            SectionTitle("▮", "网络环境", Purple)
-            Spacer(Modifier.weight(1f))
-            StatusChip("实时快照", Color(0xFFF3E8FF), Purple, compact = true)
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            EnvInfoTile("网络", env.typeLabel, Blue, Modifier.weight(1f))
-            EnvInfoTile("运营商", displayCarrierFromEnv(env, publicIpResult.ipv6), Purple, Modifier.weight(1f))
-            EnvInfoTile("IPv6前缀", ipv6PrefixLabel(publicIpResult.ipv6), Green, Modifier.weight(1f))
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            EnvInfoTile("IPv4出口", if (maskPrivacy) maskIpText(publicIpResult.ipv4) else publicIpResult.ipv4, Navy, Modifier.weight(1f))
-            EnvInfoTile("IPv6出口", if (maskPrivacy) maskIpText(publicIpResult.ipv6) else publicIpResult.ipv6, Navy, Modifier.weight(1f))
-        }
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(7.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            StatusChip(if (env.hasInternet) "可访问互联网" else "无互联网能力", if (env.hasInternet) GreenSoft else RedSoft, if (env.hasInternet) Green else ErrorRed, compact = true)
-            if (env.hasVpn) StatusChip("VPN开启", Color(0xFFF3E8FF), Purple, compact = true)
-            StatusChip("DNS IPv4 ${resolveResult.ipv4.size}", BlueSoft, Blue, compact = true)
-            StatusChip("DNS IPv6 ${resolveResult.ipv6.size}", GreenSoft, Green, compact = true)
-        }
-    }
-}
-
-@Composable
-private fun DiagnosisAdviceCard(
-    env: NetworkEnvironment,
-    mode: TestMode,
-    ipv4Stats: ProtocolStats,
-    ipv6Stats: ProtocolStats,
-    publicIpResult: PublicIpResult
-) {
-    val ipv4Peak = maxOf(ipv4Stats.activeSessions, ipv4Stats.maxStableSessions, ipv4Stats.totalSuccess)
-    val ipv6Peak = maxOf(ipv6Stats.activeSessions, ipv6Stats.maxStableSessions, ipv6Stats.totalSuccess)
-    val hasIpv4 = mode != TestMode.IPV6_ONLY && ipv4Stats.totalAttempts > 0
-    val hasIpv6 = mode != TestMode.IPV4_ONLY && ipv6Stats.totalAttempts > 0
-    val ipv4Low = hasIpv4 && ipv4Peak in 1..999
-    val ipv6High = hasIpv6 && ipv6Peak >= 5000
-    val v4MuchLowerThanV6 = hasIpv4 && hasIpv6 && ipv6Peak > 0 && ipv4Peak * 5 < ipv6Peak
-    val bothLow = hasIpv4 && hasIpv6 && ipv4Peak < 1000 && ipv6Peak < 1000
-    val abnormal = listOf(ipv4Stats.phase, ipv6Stats.phase).any {
-        it.contains("中断") || it.contains("地址丢失") || it.contains("解析失败")
-    }
-
-    val conclusion = when {
-        !hasIpv4 && !hasIpv6 -> "测试完成后生成实际诊断"
-        abnormal -> "测试非正常中断，结果可信度较低"
-        env.hasCellular && (ipv4Low || v4MuchLowerThanV6) && ipv6High -> "优先判断：蜂窝 IPv4 CGNAT / NAT出口策略"
-        env.hasCellular && bothLow -> "可能原因：基站拥塞、信号质量、目标站限制或蜂窝出口策略"
-        env.hasWifi && ipv4Low && ipv6High -> "可能原因：路由器 IPv4 NAT 或宽带侧 IPv4会话限制"
-        ipv4Stats.errorSummary.containsKey("FD上限") || ipv6Stats.errorSummary.containsKey("FD上限") -> "可能原因：手机 Android FD / Socket 上限"
-        else -> "结果可作为本次网络会话能力参考"
-    }
-
-    val advice = when {
-        !hasIpv4 && !hasIpv6 -> listOf("建议使用分别测试模式，便于对比 IPv4 / IPv6。", "测试后会结合网络环境、峰值和失败原因自动分析。")
-        abnormal -> listOf("保持网络不切换后重新测试。", "检查是否开启 VPN、是否从 WiFi 切到蜂窝、是否 4G/5G 切换。", "非正常中断结果不要直接当作会话上限。")
-        env.hasCellular && (ipv4Low || v4MuchLowerThanV6) && ipv6High -> listOf("IPv4 低、IPv6 高时，手机本身限制概率较低。", "优先怀疑运营商 IPv4 CGNAT / APN / NAT 出口策略。", "建议切换 4G/5G、换 APN、关闭 VPN、换目标站复测。")
-        env.hasCellular && bothLow -> listOf("IPv4 和 IPv6 都低，优先排查当前基站负载、信号质量和目标站限制。", "建议同地点切换 4G/5G，或换时间段复测。")
-        env.hasWifi && ipv4Low && ipv6High -> listOf("WiFi 下 IPv4 低而 IPv6 高，优先看路由器 IPv4 NAT 或宽带侧 IPv4策略。", "建议观察路由器连接数表，并换 IPv4 目标站复测。")
-        ipv4Stats.errorSummary.containsKey("FD上限") || ipv6Stats.errorSummary.containsKey("FD上限") -> listOf("这更像手机端资源限制，不一定代表宽带到顶。", "建议降低新增批次或分协议单独测试。")
-        else -> listOf("建议保存截图，对比不同运营商、WiFi/蜂窝、IPv4/IPv6 结果。")
-    }
-
-    SoftCard {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            SectionTitle("!", "诊断建议", Orange)
-            Spacer(Modifier.weight(1f))
-            StatusChip("自动分析", BlueSoft, Blue, compact = true)
-        }
-        Text(conclusion, color = TextDark, fontSize = 14.sp, fontWeight = FontWeight.Bold, lineHeight = 18.sp)
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            EnvInfoTile("IPv4峰值", if (hasIpv4) ipv4Peak.toString() else "—", if (ipv4Low) ErrorRed else Blue, Modifier.weight(1f))
-            EnvInfoTile("IPv6峰值", if (hasIpv6) ipv6Peak.toString() else "—", if (ipv6High) Green else Blue, Modifier.weight(1f))
-            EnvInfoTile("网络", env.typeLabel, Purple, Modifier.weight(1f))
-        }
-        advice.take(3).forEachIndexed { index, item ->
-            Row(verticalAlignment = Alignment.Top) {
-                Text("${index + 1}.", color = Blue, fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(18.dp))
-                Text(item, color = Muted, fontSize = 11.sp, lineHeight = 15.sp, modifier = Modifier.weight(1f))
-            }
-        }
-    }
-}
-
-@Composable
-private fun PingTestChartCard(target: String, pingPoints: List<PingPoint>) {
-    val successes = pingPoints.mapNotNull { it.latencyMs }
-    val current = successes.lastOrNull()
-    val avg = if (successes.isNotEmpty()) successes.average().roundToInt() else null
-    val max = successes.maxOrNull()
-    val min = successes.minOrNull()
-    val loss = if (pingPoints.isNotEmpty()) ((pingPoints.count { it.latencyMs == null } * 100f) / pingPoints.size).roundToInt() else 0
-    val elapsed = pingPoints.maxOfOrNull { it.elapsedSec } ?: 0
-
-    SoftCard {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            SectionTitle("∿", "Ping 测试", Blue)
-            Spacer(Modifier.width(8.dp))
-            StatusChip("1s/次", BlueSoft, Blue, compact = true)
-            Spacer(Modifier.weight(1f))
-            StatusChip(if (loss == 0) "● 正常" else "丢包 $loss%", if (loss == 0) GreenSoft else RedSoft, if (loss == 0) Green else ErrorRed, compact = true)
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            EnvInfoTile("目标网站", target, Navy, Modifier.weight(1f))
-            EnvInfoTile("采样频率", "1s/次", Blue, Modifier.weight(1f))
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            EnvInfoTile("当前", current?.let { "${it}ms" } ?: "—", Blue, Modifier.weight(1f))
-            EnvInfoTile("平均", avg?.let { "${it}ms" } ?: "—", Navy, Modifier.weight(1f))
-            EnvInfoTile("最高", max?.let { "${it}ms" } ?: "—", Orange, Modifier.weight(1f))
-            EnvInfoTile("最低", min?.let { "${it}ms" } ?: "—", Green, Modifier.weight(1f))
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            EnvInfoTile("丢包率", "$loss%", if (loss == 0) Muted else ErrorRed, Modifier.weight(1f))
-            EnvInfoTile("已运行", "%02d:%02d".format(elapsed / 60, elapsed % 60), Navy, Modifier.weight(1f))
-        }
-        SimplePingChart(pingPoints)
-        Text("图表仅显示当前测试过程，下次测试将重新开始记录。", color = Muted, fontSize = 10.sp)
-    }
-}
-
-@Composable
-private fun EnvInfoTile(label: String, value: String, color: Color, modifier: Modifier) {
-    Card(
-        modifier = modifier,
-        shape = ShapeM,
-        colors = CardDefaults.cardColors(containerColor = Color(0xFFF8FAFC)),
-        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
-    ) {
-        Column(Modifier.padding(horizontal = 9.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text(label, color = Muted, fontSize = 10.sp, maxLines = 1)
-            Text(value, color = color, fontSize = 12.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        }
-    }
-}
-
-@Composable
-private fun SimplePingChart(points: List<PingPoint>) {
-    val sorted = points.sortedBy { it.elapsedSec }.takeLast(120)
-    val successValues = sorted.mapNotNull { it.latencyMs }
-    val maxY = maxOf(80, successValues.maxOrNull() ?: 80)
-    val minX = sorted.firstOrNull()?.elapsedSec ?: 0
-    val maxX = maxOf(minX + 1, sorted.lastOrNull()?.elapsedSec ?: 1)
-
-    Canvas(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(150.dp)
-            .background(Color(0xFFF8FAFC), ShapeS)
-            .padding(6.dp)
-    ) {
-        val w = size.width
-        val h = size.height
-        repeat(4) { index ->
-            val y = h * (index + 1) / 5f
-            drawLine(Border.copy(alpha = 0.55f), Offset(0f, y), Offset(w, y), strokeWidth = 1f)
-        }
-        if (sorted.isNotEmpty()) {
-            val path = Path()
-            var hasStarted = false
-            sorted.forEach { p ->
-                val x = w * ((p.elapsedSec - minX).toFloat() / (maxX - minX).toFloat())
-                val latency = p.latencyMs
-                if (latency == null) {
-                    drawCircle(ErrorRed, radius = 5f, center = Offset(x, h - 5f))
-                } else {
-                    val y = h - h * (latency.toFloat() / maxY.toFloat())
-                    if (!hasStarted) {
-                        path.moveTo(x, y)
-                        hasStarted = true
-                    } else path.lineTo(x, y)
-                    drawCircle(Blue, radius = 3.5f, center = Offset(x, y))
-                }
-            }
-            drawPath(path, color = Blue, style = Stroke(width = 3f))
-        }
-    }
-    Row {
-        Text("${minX}s", color = Muted, fontSize = 10.sp)
-        Spacer(Modifier.weight(1f))
-        Text("${maxX}s", color = Muted, fontSize = 10.sp)
-    }
-}
-
-
-@Composable
-private fun CurrentTestChartCard(
-    mode: TestMode,
-    chartUiMode: ChartUiMode,
-    chartPoints: List<ChartPoint>,
-    ipv4Stats: ProtocolStats,
-    ipv6Stats: ProtocolStats,
-    batchSizeSetting: String,
-    failureLimitSetting: String,
-    onModeChange: (ChartUiMode) -> Unit
-) {
-    val hasIpv4 = mode != TestMode.IPV6_ONLY
-    val hasIpv6 = mode != TestMode.IPV4_ONLY
-    val activeProtocol = when {
-        chartPoints.any { it.protocol == IpProtocol.IPV6 } && ipv6Stats.phase !in listOf("待测试") -> IpProtocol.IPV6
-        chartPoints.any { it.protocol == IpProtocol.IPV4 } -> IpProtocol.IPV4
-        hasIpv6 && !hasIpv4 -> IpProtocol.IPV6
-        else -> IpProtocol.IPV4
-    }
-
-    SoftCard {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            SectionTitle("▮", "本次测试图表", Blue)
-            Spacer(Modifier.weight(1f))
-            Text("仅当前一次", color = Muted, fontSize = 11.sp)
-        }
-
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            FilterChip(
-                selected = chartUiMode == ChartUiMode.SHARE,
-                onClick = { onModeChange(ChartUiMode.SHARE) },
-                label = { Text("分享优先", fontSize = 12.sp) }
-            )
-            FilterChip(
-                selected = chartUiMode == ChartUiMode.ADVANCED,
-                onClick = { onModeChange(ChartUiMode.ADVANCED) },
-                label = { Text("分析增强", fontSize = 12.sp) }
-            )
-        }
-
-        if (chartPoints.isEmpty()) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(86.dp)
-                    .background(Color(0xFFF8FAFC), ShapeM)
-                    .padding(12.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Text("开始测试后显示本次曲线；下次测试会自动清空重绘。", color = Muted, fontSize = 12.sp)
-            }
-            return@SoftCard
-        }
-
-        when (chartUiMode) {
-            ChartUiMode.SHARE -> {
-                ProtocolOverviewRow(
-                    ipv4Stats = if (hasIpv4) ipv4Stats else null,
-                    ipv6Stats = if (hasIpv6) ipv6Stats else null
-                )
-                val currentStats = if (activeProtocol == IpProtocol.IPV6) ipv6Stats else ipv4Stats
-                val currentPoints = chartPoints.filter { it.protocol == activeProtocol }
-                ChartSection(
-                    title = "${activeProtocol.label} 会话增长曲线",
-                    subtitle = "图表 1s 采样，不影响实际连接测试",
-                    points = currentPoints
-                )
-                BatchDiagnosisCard(
-                    stats = currentStats,
-                    batchSizeSetting = batchSizeSetting,
-                    failureLimitSetting = failureLimitSetting
-                )
-            }
-
-            ChartUiMode.ADVANCED -> {
-                if (hasIpv4) {
-                    ChartSection(
-                        title = "IPv4 独立曲线",
-                        subtitle = "非公网/NAT限制时，单独Y轴显示更清楚",
-                        points = chartPoints.filter { it.protocol == IpProtocol.IPV4 }
-                    )
-                }
-                if (hasIpv6) {
-                    ChartSection(
-                        title = "IPv6 独立曲线",
-                        subtitle = "公网链路通常耗时更长，独立显示避免压扁IPv4",
-                        points = chartPoints.filter { it.protocol == IpProtocol.IPV6 }
-                    )
-                }
-                PingSummaryPlaceholder()
-            }
-        }
-    }
-}
-
-@Composable
-private fun ProtocolOverviewRow(ipv4Stats: ProtocolStats?, ipv6Stats: ProtocolStats?) {
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        ipv4Stats?.let {
-            ProtocolMiniResult(
-                title = "IPv4",
-                tag = if (it.totalFailure > 0) "失败 ${it.totalFailure}" else "完成",
-                active = maxOf(it.activeSessions, it.maxStableSessions, it.totalSuccess),
-                attempts = it.totalAttempts,
-                modifier = Modifier.weight(1f)
-            )
-        }
-        ipv6Stats?.let {
-            ProtocolMiniResult(
-                title = "IPv6",
-                tag = if (it.totalFailure > 0) "失败 ${it.totalFailure}" else "完成",
-                active = maxOf(it.activeSessions, it.maxStableSessions, it.totalSuccess),
-                attempts = it.totalAttempts,
-                modifier = Modifier.weight(1f)
-            )
-        }
-    }
-}
-
-@Composable
-private fun ProtocolMiniResult(title: String, tag: String, active: Int, attempts: Int, modifier: Modifier) {
-    Card(
-        modifier = modifier,
-        shape = ShapeM,
-        colors = CardDefaults.cardColors(containerColor = Color(0xFFF8FAFC)),
-        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
-    ) {
-        Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(title, color = Blue, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                Spacer(Modifier.weight(1f))
-                Text(tag, color = if (tag.startsWith("失败")) ErrorRed else Green, fontSize = 10.sp, fontWeight = FontWeight.Bold)
-            }
-            Text(active.toString(), color = Navy, fontSize = 20.sp, fontWeight = FontWeight.ExtraBold)
-            Text("活动会话｜总尝试 $attempts", color = Muted, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        }
-    }
-}
-
-@Composable
-private fun ChartSection(title: String, subtitle: String, points: List<ChartPoint>) {
-    Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(title, color = TextDark, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.weight(1f))
-            Text(subtitle, color = Muted, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        }
-        if (points.isEmpty()) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(92.dp)
-                    .background(Color(0xFFF8FAFC), ShapeM),
-                contentAlignment = Alignment.Center
-            ) {
-                Text("暂无该协议曲线", color = Muted, fontSize = 12.sp)
-            }
-        } else {
-            SimpleSessionChart(points)
-        }
-    }
-}
-
-@Composable
-private fun SimpleSessionChart(points: List<ChartPoint>) {
-    val sorted = points.sortedBy { it.elapsedSec }
-    val maxActive = sorted.maxOfOrNull { it.active } ?: 0
-    val maxFailure = sorted.maxOfOrNull { it.failure } ?: 0
-    val maxY = maxOf(1, maxActive, maxFailure)
-    val minX = sorted.firstOrNull()?.elapsedSec ?: 0
-    val maxXRaw = sorted.maxOfOrNull { it.elapsedSec } ?: 1
-    val maxX = maxOf(minX + 1, maxXRaw)
-    val last = sorted.lastOrNull()
-
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(Color(0xFFFFFFFF), ShapeM)
-            .padding(8.dp),
-        verticalArrangement = Arrangement.spacedBy(4.dp)
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            LegendDot("活动", Blue)
-            Spacer(Modifier.width(10.dp))
-            LegendDot("失败", ErrorRed)
-            Spacer(Modifier.weight(1f))
-            Text(
-                if (last != null) "当前点 ${last.elapsedSec}s：活动 ${last.active}｜失败 ${last.failure}" else "暂无采样",
-                color = Muted,
-                fontSize = 10.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-        }
-
-        Canvas(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(150.dp)
-                .background(Color(0xFFF8FAFC), ShapeS)
-                .padding(6.dp)
-        ) {
-            val w = size.width
-            val h = size.height
-            repeat(4) { index ->
-                val y = h * (index + 1) / 5f
-                drawLine(Border.copy(alpha = 0.55f), Offset(0f, y), Offset(w, y), strokeWidth = 1f)
-            }
-            fun xOf(p: ChartPoint): Float = w * ((p.elapsedSec - minX).toFloat() / (maxX - minX).toFloat())
-            fun yOf(value: Int): Float = h - h * (value.toFloat() / maxY.toFloat())
-            fun makePath(valueOf: (ChartPoint) -> Int): Path {
-                val path = Path()
-                sorted.forEachIndexed { index, p ->
-                    val x = xOf(p)
-                    val y = yOf(valueOf(p))
-                    if (index == 0) path.moveTo(x, y) else path.lineTo(x, y)
-                }
-                return path
-            }
-            if (sorted.size == 1) {
-                val p = sorted.first()
-                drawCircle(Blue, radius = 5f, center = Offset(xOf(p), yOf(p.active)))
-                drawCircle(ErrorRed, radius = 5f, center = Offset(xOf(p), yOf(p.failure)))
-            } else if (sorted.size > 1) {
-                drawPath(makePath { it.active }, color = Blue, style = Stroke(width = 4f))
-                drawPath(makePath { it.failure }, color = ErrorRed, style = Stroke(width = 3f))
-                sorted.forEach { p ->
-                    drawCircle(Blue, radius = 3.5f, center = Offset(xOf(p), yOf(p.active)))
-                    if (p.failure > 0) drawCircle(ErrorRed, radius = 3.5f, center = Offset(xOf(p), yOf(p.failure)))
-                }
-                sorted.lastOrNull()?.let { p ->
-                    drawCircle(Blue, radius = 6f, center = Offset(xOf(p), yOf(p.active)))
-                    if (p.failure > 0) drawCircle(ErrorRed, radius = 6f, center = Offset(xOf(p), yOf(p.failure)))
-                }
-            }
-        }
-
-        Row {
-            Text("${minX}s", color = Muted, fontSize = 10.sp)
-            Spacer(Modifier.weight(1f))
-            Text("峰值 $maxActive｜${maxXRaw}s", color = Muted, fontSize = 10.sp)
-        }
-    }
-}
-
-
-@Composable
-private fun LegendDot(label: String, color: Color) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Box(Modifier.width(8.dp).height(8.dp).background(color, RoundedCornerShape(4.dp)))
-        Spacer(Modifier.width(4.dp))
-        Text(label, color = Muted, fontSize = 10.sp)
-    }
-}
-
-@Composable
-private fun BatchDiagnosisCard(stats: ProtocolStats, batchSizeSetting: String, failureLimitSetting: String) {
-    val batch = batchSizeSetting.toIntOrNull()?.coerceAtLeast(1) ?: 0
-    val failureLimit = failureLimitSetting.toIntOrNull()?.coerceAtLeast(1) ?: 0
-    val success = maxOf(stats.totalSuccess, stats.activeSessions)
-    val failure = stats.totalFailure
-    val attempted = stats.totalAttempts
-    val notExecuted = if (batch > 0 && attempted < batch && failureLimit > 0 && failure >= failureLimit) batch - attempted else 0
-    val shouldShow = batch > 0 && attempted > 0 && (attempted < batch || failure > 0)
-    if (!shouldShow) return
-
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(BlueSoft.copy(alpha = 0.55f), ShapeM)
-            .padding(10.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp)
-    ) {
-        Text("本批诊断", color = TextDark, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-        Text(
-            if (notExecuted > 0) {
-                "设定新增 $batch，实际尝试 $attempted；成功 $success，失败 $failure，未执行 $notExecuted。"
-            } else {
-                "设定新增 $batch，实际尝试 $attempted；成功 $success，失败 $failure。"
-            },
-            color = Muted,
-            fontSize = 11.sp,
-            lineHeight = 15.sp
-        )
-        if (notExecuted > 0) {
-            Text("说明：新增是尝试上限；达到失败上限后会提前停止，属于正常保护。", color = Orange, fontSize = 11.sp)
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.fillMaxWidth()) {
-            DiagnosisBar("成功", success, maxOf(batch, attempted), Blue, Modifier.weight(success.coerceAtLeast(1).toFloat()))
-            DiagnosisBar("失败", failure, maxOf(batch, attempted), ErrorRed, Modifier.weight(failure.coerceAtLeast(1).toFloat()))
-            if (notExecuted > 0) DiagnosisBar("未执行", notExecuted, maxOf(batch, attempted), Muted, Modifier.weight(notExecuted.coerceAtLeast(1).toFloat()))
-        }
-    }
-}
-
-@Composable
-private fun DiagnosisBar(label: String, value: Int, total: Int, color: Color, modifier: Modifier) {
-    Column(modifier = modifier) {
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .height(8.dp)
-                .background(color.copy(alpha = 0.22f), RoundedCornerShape(6.dp))
-        )
-        Text("$label $value", color = color, fontSize = 9.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-    }
-}
-
-@Composable
-private fun PingSummaryPlaceholder() {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(Color(0xFFF8FAFC), ShapeM)
-            .padding(10.dp),
-        verticalArrangement = Arrangement.spacedBy(4.dp)
-    ) {
-        Text("Ping摘要预留", color = TextDark, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-        Text("建议：默认 1s Ping；高级模式可 200ms Ping，但图表仍按 1s 汇总平均/最高/超时。", color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
-    }
-}
-
-
-@Composable
-private fun SessionStatsCard(title: String, stats: ProtocolStats, maskPrivacy: Boolean, lastActive: Int) {
     SoftCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
             SectionTitle("▮", title, Blue)
             Spacer(Modifier.weight(1f))
-            Text(stats.phase, color = Blue, fontWeight = FontWeight.Bold, fontSize = 12.sp, maxLines = 1)
+            Text(stats.phase, color = Blue, fontWeight = FontWeight.Bold, maxLines = 1, fontSize = 13.sp)
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             MetricTile("活动", stats.activeSessions.toString(), Blue, Modifier.weight(1f))
-            MetricTile("上次活动", if (lastActive > 0) lastActive.toString() else "—", Navy, Modifier.weight(1f))
+            MetricTile("上次活动", if (stats.maxStableSessions > 0) stats.maxStableSessions.toString() else "—", Navy, Modifier.weight(1f))
             MetricTile("失败", stats.totalFailure.toString(), ErrorRed, Modifier.weight(1f))
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -2548,11 +1384,295 @@ private fun SessionStatsCard(title: String, stats: ProtocolStats, maskPrivacy: B
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 color = Muted,
-                fontSize = 12.sp
+                fontSize = 11.sp
             )
+        }
+        ChartModeSelector(chartMode, onChartModeChange)
+        if (points.isEmpty()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(72.dp)
+                    .background(Color(0xFFF8FAFC), ShapeM),
+                contentAlignment = Alignment.Center
+            ) { Text("开始测试后显示本次曲线", color = Muted, fontSize = 12.sp) }
+        } else {
+            if (chartMode == ChartMode.GROWTH) SessionGrowthChart(points) else SessionPeakChart(stats, points)
         }
     }
 }
+
+@Composable
+private fun ChartModeSelector(chartMode: ChartMode, onChartModeChange: (ChartMode) -> Unit) {
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+        ChartMode.entries.forEach { mode ->
+            val selected = chartMode == mode
+            Box(
+                modifier = Modifier
+                    .background(if (selected) Color(0xFFEBDCFD) else Color.White, ShapeM)
+                    .clickable { onChartModeChange(mode) }
+                    .padding(horizontal = 12.dp, vertical = 7.dp)
+            ) {
+                Text(mode.label, color = if (selected) TextDark else Muted, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+            }
+        }
+    }
+}
+
+private fun chartXAxisStep(durationSec: Int): Int = when {
+    durationSec <= 20 -> 3
+    durationSec <= 60 -> 5
+    else -> 10
+}
+
+private fun sessionYAxisMax(peak: Int): Int = when {
+    peak <= 1000 -> 1000
+    peak <= 2000 -> 2000
+    peak <= 5000 -> 5000
+    peak <= 10000 -> 10000
+    peak <= 35000 -> 35000
+    else -> 65535
+}
+
+private fun pingYAxisMax(peak: Int): Int = when {
+    peak <= 50 -> 50
+    peak <= 100 -> 100
+    peak <= 200 -> 200
+    else -> 500
+}
+
+@Composable
+private fun SessionGrowthChart(points: List<ChartPoint>) {
+    val sorted = points.sortedBy { it.elapsedSec }
+    val minX = sorted.firstOrNull()?.elapsedSec ?: 0
+    val maxXRaw = sorted.lastOrNull()?.elapsedSec ?: (minX + 1)
+    val maxX = maxOf(minX + 1, maxXRaw)
+    val maxY = sessionYAxisMax(sorted.maxOfOrNull { maxOf(it.active, it.failure, it.total) } ?: 0)
+    val step = chartXAxisStep(maxX - minX)
+    val last = sorted.lastOrNull()
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("会话数", color = Muted, fontSize = 10.sp)
+            Spacer(Modifier.weight(1f))
+            Text(last?.let { "${it.elapsedSec}s 活动 ${it.active}｜失败 ${it.failure}" } ?: "", color = Muted, fontSize = 10.sp, maxLines = 1)
+        }
+        Canvas(modifier = Modifier.fillMaxWidth().height(150.dp).background(Color(0xFFF8FAFC), ShapeS).padding(6.dp)) {
+            val w = size.width
+            val h = size.height
+            repeat(4) { idx ->
+                val y = h * (idx + 1) / 5f
+                drawLine(Border.copy(alpha = 0.55f), Offset(0f, y), Offset(w, y), strokeWidth = 1f)
+            }
+            fun xOf(p: ChartPoint) = w * ((p.elapsedSec - minX).toFloat() / (maxX - minX).toFloat())
+            fun yOf(v: Int) = h - h * (v.toFloat() / maxY.toFloat())
+            fun pathOf(value: (ChartPoint) -> Int): Path {
+                val path = Path()
+                sorted.forEachIndexed { index, p ->
+                    val x = xOf(p); val y = yOf(value(p))
+                    if (index == 0) path.moveTo(x, y) else path.lineTo(x, y)
+                }
+                return path
+            }
+            if (sorted.size > 1) {
+                drawPath(pathOf { it.active }, color = Blue, style = Stroke(width = 4f))
+                drawPath(pathOf { it.failure }, color = ErrorRed, style = Stroke(width = 3f))
+            }
+            sorted.forEach { p ->
+                drawCircle(Blue, radius = 3.5f, center = Offset(xOf(p), yOf(p.active)))
+                if (p.failure > 0) drawCircle(ErrorRed, radius = 3.5f, center = Offset(xOf(p), yOf(p.failure)))
+            }
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("${minX}s", color = Muted, fontSize = 10.sp)
+            Spacer(Modifier.weight(1f))
+            Text("每 ${step}s 标注｜Y轴 $maxY", color = Muted, fontSize = 10.sp)
+            Spacer(Modifier.weight(1f))
+            Text("${maxX}s", color = Muted, fontSize = 10.sp)
+        }
+    }
+}
+
+@Composable
+private fun SessionPeakChart(stats: ProtocolStats, points: List<ChartPoint>) {
+    val peak = maxOf(stats.activeSessions, stats.maxStableSessions, stats.totalSuccess, points.maxOfOrNull { it.active } ?: 0)
+    val maxValue = sessionYAxisMax(maxOf(peak, stats.totalFailure, stats.totalAttempts))
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.background(Color(0xFFF8FAFC), ShapeM).padding(10.dp)) {
+        HistoryBarRow("活动峰值", peak, maxValue, Blue)
+        HistoryBarRow("失败累计", stats.totalFailure, maxValue, ErrorRed)
+        HistoryBarRow("总计尝试", stats.totalAttempts, maxValue, Navy)
+        Text("用于截图分享最高值；增长过程请切换到增长曲线。", color = Muted, fontSize = 10.sp)
+    }
+}
+
+
+@Composable
+private fun HistoryBarRow(label: String, value: Int, maxValue: Int, color: Color) {
+    val fraction = (value.toFloat() / maxValue.coerceAtLeast(1).toFloat()).coerceIn(0.02f, 1f)
+    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().height(24.dp)) {
+        Text(label, color = Muted, fontSize = 11.sp, modifier = Modifier.width(72.dp), maxLines = 1)
+        Box(modifier = Modifier.weight(1f).height(8.dp).background(color.copy(alpha = 0.16f), RoundedCornerShape(8.dp))) {
+            Box(modifier = Modifier.fillMaxWidth(fraction).height(8.dp).background(color, RoundedCornerShape(8.dp)))
+        }
+        Spacer(Modifier.width(8.dp))
+        Text(value.toString(), color = color, fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(54.dp), maxLines = 1)
+    }
+}
+
+@Composable
+private fun NetworkEnvironmentSettingsCard(
+    env: NetworkEnvironment,
+    publicIpResult: PublicIpResult,
+    publicIpLoading: Boolean,
+    maskPrivacy: Boolean,
+    onRefresh: () -> Unit,
+    onCopyPublicIpv4: () -> Unit,
+    onCopyPublicIpv6: () -> Unit
+) {
+    SoftCard {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            SectionTitle("∿", "网络环境", Purple)
+            Spacer(Modifier.weight(1f))
+            TextButton(onClick = onRefresh) { Text(if (publicIpLoading) "检测中" else "刷新", fontSize = 12.sp) }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            MetricTile("网络", env.typeLabel, Blue, Modifier.weight(1f))
+            MetricTile("运营商", displayCarrierFromEnv(env, publicIpResult.ipv6), Purple, Modifier.weight(1f))
+        }
+        PublicExitLine(
+            label = "IPv4 出口",
+            value = if (maskPrivacy) maskIpText(publicIpResult.ipv4) else publicIpResult.ipv4,
+            copyValue = publicIpResult.ipv4,
+            onCopy = onCopyPublicIpv4
+        )
+        PublicExitLine(
+            label = "IPv6 出口",
+            value = if (maskPrivacy) maskIpText(publicIpResult.ipv6) else publicIpResult.ipv6,
+            copyValue = publicIpResult.ipv6,
+            onCopy = onCopyPublicIpv6
+        )
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(7.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            StatusChip(if (env.hasInternet) "可访问互联网" else "无互联网能力", if (env.hasInternet) GreenSoft else RedSoft, if (env.hasInternet) Green else ErrorRed, compact = true)
+            if (env.hasVpn) StatusChip("VPN开启", Color(0xFFF3E8FF), Purple, compact = true)
+        }
+    }
+}
+
+@Composable
+private fun PingCompactChartCard(pingPoints: List<PingPoint>) {
+    val successes = pingPoints.mapNotNull { it.latencyMs }
+    val current = successes.lastOrNull()
+    val avg = successes.takeIf { it.isNotEmpty() }?.average()?.roundToInt()
+    val max = successes.maxOrNull()
+    val min = successes.minOrNull()
+    val loss = if (pingPoints.isNotEmpty()) ((pingPoints.count { it.latencyMs == null } * 100f) / pingPoints.size).roundToInt() else 0
+    val elapsed = pingPoints.maxOfOrNull { it.elapsedSec } ?: 0
+    SoftCard {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            SectionTitle("∿", "Ping 测试", Blue)
+            Spacer(Modifier.width(8.dp))
+            StatusChip("1s/次", BlueSoft, Blue, compact = true)
+            Spacer(Modifier.weight(1f))
+            StatusChip(if (loss == 0) "● 正常" else "丢包 $loss%", if (loss == 0) GreenSoft else RedSoft, if (loss == 0) Green else ErrorRed, compact = true)
+        }
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(7.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            MiniMetric("当前", current?.let { "${it}ms" } ?: "—", Blue)
+            MiniMetric("平均", avg?.let { "${it}ms" } ?: "—", Navy)
+            MiniMetric("最高", max?.let { "${it}ms" } ?: "—", Orange)
+            MiniMetric("最低", min?.let { "${it}ms" } ?: "—", Green)
+            MiniMetric("丢包", "$loss%", if (loss == 0) Muted else ErrorRed)
+            MiniMetric("已运行", "%02d:%02d".format(elapsed / 60, elapsed % 60), Navy)
+        }
+        PingLineChart(pingPoints)
+        Text("图表仅显示当前测试过程，下次测试将重新开始记录。", color = Muted, fontSize = 10.sp)
+    }
+}
+
+@Composable
+private fun MiniMetric(label: String, value: String, color: Color) {
+    Box(modifier = Modifier.width(72.dp).background(Color(0xFFF8FAFC), ShapeM).padding(horizontal = 8.dp, vertical = 6.dp)) {
+        Column {
+            Text(label, color = Muted, fontSize = 10.sp, maxLines = 1)
+            Text(value, color = color, fontSize = 13.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+        }
+    }
+}
+
+@Composable
+private fun PingLineChart(points: List<PingPoint>) {
+    val sorted = points.sortedBy { it.elapsedSec }.takeLast(120)
+    val values = sorted.mapNotNull { it.latencyMs }
+    val maxY = pingYAxisMax(values.maxOrNull() ?: 0)
+    val minX = sorted.firstOrNull()?.elapsedSec ?: 0
+    val maxX = maxOf(minX + 1, sorted.lastOrNull()?.elapsedSec ?: 1)
+    val step = chartXAxisStep(maxX - minX)
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row {
+            Text("延迟(ms)", color = Muted, fontSize = 10.sp)
+            Spacer(Modifier.weight(1f))
+            Text("Y轴 $maxY", color = Muted, fontSize = 10.sp)
+        }
+        Canvas(modifier = Modifier.fillMaxWidth().height(145.dp).background(Color(0xFFF8FAFC), ShapeS).padding(6.dp)) {
+            val w = size.width
+            val h = size.height
+            repeat(4) { idx ->
+                val y = h * (idx + 1) / 5f
+                drawLine(Border.copy(alpha = 0.55f), Offset(0f, y), Offset(w, y), strokeWidth = 1f)
+            }
+            if (sorted.isNotEmpty()) {
+                val path = Path()
+                var started = false
+                sorted.forEach { p ->
+                    val x = w * ((p.elapsedSec - minX).toFloat() / (maxX - minX).toFloat())
+                    val latency = p.latencyMs
+                    if (latency == null) {
+                        drawCircle(ErrorRed, radius = 4.5f, center = Offset(x, h - 5f))
+                    } else {
+                        val y = h - h * (latency.toFloat() / maxY.toFloat())
+                        if (!started) { path.moveTo(x, y); started = true } else path.lineTo(x, y)
+                        drawCircle(Blue, radius = 3.5f, center = Offset(x, y))
+                    }
+                }
+                drawPath(path, color = Blue, style = Stroke(width = 3f))
+            }
+        }
+        Row {
+            Text("${minX}s", color = Muted, fontSize = 10.sp)
+            Spacer(Modifier.weight(1f))
+            Text("每 ${step}s 标注", color = Muted, fontSize = 10.sp)
+            Spacer(Modifier.weight(1f))
+            Text("${maxX}s", color = Muted, fontSize = 10.sp)
+        }
+    }
+}
+
+@Composable
+private fun DiagnosisAdviceInlineCard(mode: TestMode, ipv4Stats: ProtocolStats, ipv6Stats: ProtocolStats) {
+    val v4Peak = maxOf(ipv4Stats.activeSessions, ipv4Stats.maxStableSessions, ipv4Stats.totalSuccess)
+    val v6Peak = maxOf(ipv6Stats.activeSessions, ipv6Stats.maxStableSessions, ipv6Stats.totalSuccess)
+    val hasV4 = mode != TestMode.IPV6_ONLY && ipv4Stats.totalAttempts > 0
+    val hasV6 = mode != TestMode.IPV4_ONLY && ipv6Stats.totalAttempts > 0
+    val conclusion = when {
+        !hasV4 && !hasV6 -> "测试完成后生成实际诊断"
+        hasV4 && hasV6 && v4Peak in 1..999 && v6Peak >= 5000 -> "IPv4 低、IPv6 高，优先怀疑 IPv4 NAT / CGNAT 限制"
+        hasV4 && !hasV6 && v4Peak in 1..999 -> "仅 IPv4 偏低，建议补测 IPv6 或使用分别测试"
+        hasV4 && hasV6 && v4Peak < 1000 && v6Peak < 1000 -> "IPv4 / IPv6 都偏低，建议排查目标站、信号或本机资源"
+        else -> "结果可作为本次网络会话能力参考"
+    }
+    SoftCard {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            SectionTitle("!", "诊断建议", Orange)
+            Spacer(Modifier.weight(1f))
+            StatusChip("自动分析", BlueSoft, Blue, compact = true)
+        }
+        Text(conclusion, color = TextDark, fontSize = 14.sp, fontWeight = FontWeight.Bold, lineHeight = 18.sp)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            MetricTile("IPv4峰值", if (hasV4) v4Peak.toString() else "—", if (v4Peak in 1..999) ErrorRed else Blue, Modifier.weight(1f))
+            MetricTile("IPv6峰值", if (hasV6) v6Peak.toString() else "—", if (v6Peak >= 5000) Green else Blue, Modifier.weight(1f))
+        }
+        Text("图表看过程，峰值卡看分享结果；异常中断结果仅供参考。", color = Muted, fontSize = 11.sp)
+    }
+}
+
 
 @Composable
 private fun MetricTile(label: String, value: String, color: Color, modifier: Modifier) {
@@ -2672,68 +1792,6 @@ private fun CompactLogLine(line: LogLine, maskPrivacy: Boolean) {
 }
 
 
-
-@Composable
-private fun SwipeDeleteHistoryCard(
-    item: SessionSummary,
-    maskPrivacy: Boolean,
-    onClick: () -> Unit,
-    onEditRemark: () -> Unit,
-    onDelete: () -> Unit
-) {
-    var offsetX by remember(item.id) { mutableStateOf(0f) }
-    val density = LocalDensity.current
-    val maxOffset = with(density) { -108.dp.toPx() }
-    Box(modifier = Modifier.fillMaxWidth()) {
-        Box(
-            modifier = Modifier
-                .matchParentSize()
-                .padding(vertical = 2.dp),
-            contentAlignment = Alignment.CenterEnd
-        ) {
-            Box(
-                modifier = Modifier
-                    .width(96.dp)
-                    .fillMaxHeight()
-                    .background(
-                        Brush.horizontalGradient(listOf(Color(0xFFFFF1F2), ErrorRed.copy(alpha = 0.92f))),
-                        RoundedCornerShape(topEnd = 22.dp, bottomEnd = 22.dp, topStart = 12.dp, bottomStart = 12.dp)
-                    )
-                    .clickable { onDelete() },
-                contentAlignment = Alignment.Center
-            ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-                    Icon(Icons.Filled.DeleteOutline, contentDescription = null, tint = Color.White, modifier = Modifier.width(23.dp).height(23.dp))
-                    Spacer(Modifier.height(5.dp))
-                    Text("删除", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                }
-            }
-        }
-        Box(
-            modifier = Modifier
-                .offset { IntOffset(offsetX.roundToInt(), 0) }
-                .pointerInput(item.id) {
-                    detectHorizontalDragGestures(
-                        onHorizontalDrag = { _, dragAmount ->
-                            offsetX = (offsetX + dragAmount).coerceIn(maxOffset, 0f)
-                        },
-                        onDragEnd = {
-                            offsetX = if (offsetX < maxOffset / 2f) maxOffset else 0f
-                        },
-                        onDragCancel = { offsetX = 0f }
-                    )
-                }
-        ) {
-            HistoryCard(
-                item = item,
-                maskPrivacy = maskPrivacy,
-                onClick = onClick,
-                onEditRemark = onEditRemark
-            )
-        }
-    }
-}
-
 @Composable
 private fun HistoryCard(
     item: SessionSummary,
@@ -2837,7 +1895,7 @@ private fun StatusChip(text: String, bg: Color, fg: Color, compact: Boolean = fa
             .background(bg, RoundedCornerShape(if (compact) 12.dp else 14.dp))
             .padding(horizontal = if (compact) 9.dp else 11.dp, vertical = if (compact) 5.dp else 7.dp)
     ) {
-        Text(text, color = fg, fontWeight = FontWeight.Bold, fontSize = if (compact) 10.sp else 11.sp, maxLines = 1)
+        Text(text, color = fg, fontWeight = FontWeight.Bold, fontSize = if (compact) 11.sp else 12.sp, maxLines = 1)
     }
 }
 
@@ -2909,7 +1967,7 @@ private fun BottomNav(selectedTab: MainTab, onSelect: (MainTab) -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .height(58.dp)
+            .height(60.dp)
             .background(Color(0xFFEAF2FF))
             .padding(horizontal = 22.dp, vertical = 2.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
@@ -2925,10 +1983,10 @@ private fun BottomNav(selectedTab: MainTab, onSelect: (MainTab) -> Unit) {
             Column(
                 modifier = Modifier
                     .width(86.dp)
-                    .height(54.dp)
+                    .height(56.dp)
                     .background(if (selected) Color(0xFFEBDCFD) else Color.Transparent, RoundedCornerShape(24.dp))
                     .clickable { onSelect(tab) }
-                    .padding(vertical = 4.dp),
+                    .padding(vertical = 5.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Center
             ) {
@@ -2939,40 +1997,10 @@ private fun BottomNav(selectedTab: MainTab, onSelect: (MainTab) -> Unit) {
                     modifier = Modifier.width(22.dp).height(22.dp)
                 )
                 Spacer(Modifier.height(3.dp))
-                Text(tab.label, color = TextDark, fontSize = 11.sp, lineHeight = 12.sp, maxLines = 1)
+                Text(tab.label, color = TextDark, fontSize = 11.sp, lineHeight = 13.sp, maxLines = 1)
             }
         }
     }
-}
-
-
-private fun currentNetworkSignature(context: Context): String {
-    val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-    val network = connectivityManager.activeNetwork ?: return "NONE"
-    val caps = connectivityManager.getNetworkCapabilities(network) ?: return "NONE"
-    if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) return "NONE"
-    val transport = when {
-        caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "WIFI"
-        caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "CELLULAR"
-        caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "ETHERNET"
-        caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) -> "VPN"
-        else -> "OTHER"
-    }
-    return "$transport:${network.hashCode()}"
-}
-
-private fun latestActiveFromHistory(history: List<SessionSummary>, protocol: IpProtocol): Int {
-    return history
-        .asSequence()
-        .sortedByDescending { it.startedAtEpochMs }
-        .mapNotNull { summary ->
-            val stats = when (protocol) {
-                IpProtocol.IPV4 -> summary.ipv4Stats
-                IpProtocol.IPV6 -> summary.ipv6Stats
-            }
-            stats?.let { maxOf(it.maxStableSessions, it.activeSessions, it.totalSuccess) }
-        }
-        .firstOrNull() ?: 0
 }
 
 private fun startForegroundNotice(context: Context, text: String) {
@@ -3062,154 +2090,6 @@ private fun failureDetailLines(stats: List<ProtocolStats>): List<String> {
     return errors.entries.sortedByDescending { it.value }.map { (k, v) -> "$k：$v 次" }
 }
 
-
-
-private fun buildHistoryAdvice(summary: SessionSummary): List<String> {
-    val abnormal = isAbnormalSummary(summary)
-    val v4 = summary.ipv4Stats
-    val v6 = summary.ipv6Stats
-    val v4Peak = v4?.let { maxOf(it.activeSessions, it.maxStableSessions, it.totalSuccess) } ?: 0
-    val v6Peak = v6?.let { maxOf(it.activeSessions, it.maxStableSessions, it.totalSuccess) } ?: 0
-    val v4Low = v4 != null && v4Peak in 1..999
-    val v6High = v6 != null && v6Peak >= 5000
-    val fd = listOfNotNull(v4, v6).any { it.phase.contains("FD上限") || it.errorSummary.containsKey("FD上限") }
-    return when {
-        abnormal -> listOf("本次非正常中断，可信度较低。", "保持网络不切换后重新测试。", "检查 VPN、WiFi/蜂窝、4G/5G 是否变化。", "不要直接当作会话上限。")
-        fd -> listOf("触发手机 FD/Socket 上限。", "该结果不一定代表宽带到顶。", "建议降低新增批次或分协议测试。")
-        v4Low && v6High -> listOf("IPv4 低且 IPv6 高。", "优先怀疑 IPv4 NAT/CGNAT 策略。", "建议换 APN、关 VPN、切 4G/5G 复测。")
-        v4Low && v6 == null -> listOf("仅 IPv4 结果偏低。", "建议补测 IPv6 或分别测试。", "若 IPv6 明显更高，优先怀疑 IPv4 NAT/CGNAT。")
-        v4Peak < 1000 && v6Peak < 1000 && (v4 != null || v6 != null) -> listOf("IPv4/IPv6 结果都偏低。", "排查目标站、信号、基站拥塞或本机资源。", "建议换网络和目标站复测。")
-        else -> listOf("结果可作为本次网络会话能力参考。", "建议保存截图，对比不同运营商和网络。", "分别测试 IPv4/IPv6 更利于判断瓶颈。")
-    }
-}
-
-
-private suspend fun saveHistorySnapshotImage(context: Context, summary: SessionSummary, maskPrivacy: Boolean): Boolean = withContext(Dispatchers.IO) {
-    runCatching {
-        val width = 1440
-        val height = 2200
-        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-        val canvas = AndroidCanvas(bitmap)
-        canvas.drawColor(AndroidColor.rgb(246, 248, 252))
-
-        val titlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = AndroidColor.rgb(17, 24, 39)
-            textSize = 72f
-            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-        }
-        val subPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = AndroidColor.rgb(100, 116, 139)
-            textSize = 38f
-            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-        }
-        val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = AndroidColor.rgb(17, 24, 39)
-            textSize = 42f
-            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-        }
-        val smallPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = AndroidColor.rgb(100, 116, 139)
-            textSize = 34f
-            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-        }
-        val bluePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = AndroidColor.rgb(37, 99, 235) }
-        val greenPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = AndroidColor.rgb(22, 163, 74) }
-        val redPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = AndroidColor.rgb(239, 68, 68) }
-        val cardPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = AndroidColor.WHITE }
-        val softPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = AndroidColor.rgb(248, 250, 252) }
-
-        fun card(left: Float, top: Float, right: Float, bottom: Float) {
-            canvas.drawRoundRect(RectF(left, top, right, bottom), 44f, 44f, cardPaint)
-        }
-
-        fun soft(left: Float, top: Float, right: Float, bottom: Float) {
-            canvas.drawRoundRect(RectF(left, top, right, bottom), 28f, 28f, softPaint)
-        }
-
-        fun drawLine(label: String, value: String, x: Float, y: Float) {
-            canvas.drawText(label, x, y, smallPaint)
-            canvas.drawText(value, x + 210f, y, textPaint)
-        }
-
-        fun bar(label: String, value: Int, max: Int, y: Float, paint: Paint) {
-            canvas.drawText(label, 130f, y + 38f, smallPaint)
-            val startX = 420f
-            val endX = 1080f
-            val bg = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = AndroidColor.rgb(226, 232, 240) }
-            canvas.drawRoundRect(RectF(startX, y + 8f, endX, y + 38f), 18f, 18f, bg)
-            val widthValue = ((endX - startX) * (value.toFloat() / max.coerceAtLeast(1))).coerceIn(12f, endX - startX)
-            canvas.drawRoundRect(RectF(startX, y + 8f, startX + widthValue, y + 38f), 18f, 18f, paint)
-            canvas.drawText(value.toString(), 1120f, y + 40f, textPaint)
-        }
-
-        val host = if (maskPrivacy) maskIpText(summary.host) else summary.host
-        val abnormal = isAbnormalSummary(summary)
-        val credibility = if (abnormal) "异常中断 · 可信度低" else "检测记录 · 可作为参考"
-
-        canvas.drawText("宽带会话测试器", 90f, 130f, titlePaint)
-        canvas.drawText("检测详情快照", 90f, 190f, subPaint)
-
-        card(70f, 250f, 1370f, 570f)
-        canvas.drawText("结果摘要", 120f, 335f, titlePaint.apply { textSize = 58f })
-        canvas.drawText(credibility, 980f, 335f, subPaint)
-        drawLine("时间", summary.startedAtText, 120f, 420f)
-        drawLine("目标", "$host:${summary.port}", 120f, 490f)
-
-        val v4 = summary.ipv4Stats
-        val v6 = summary.ipv6Stats
-        var y = 640f
-        listOf("IPv4" to v4, "IPv6" to v6).forEach { (name, stats) ->
-            stats ?: return@forEach
-            card(70f, y, 1370f, y + 360f)
-            canvas.drawText("$name 结果", 120f, y + 85f, titlePaint.apply { textSize = 54f })
-            val max = maxOf(stats.activeSessions, stats.totalFailure, stats.totalAttempts, 1)
-            bar("$name 活动", stats.activeSessions, max, y + 125f, bluePaint)
-            bar("$name 失败", stats.totalFailure, max, y + 200f, redPaint)
-            bar("$name 总计", stats.totalAttempts, max, y + 275f, Paint(Paint.ANTI_ALIAS_FLAG).apply { color = AndroidColor.rgb(15, 47, 110) })
-            y += 410f
-        }
-
-        card(70f, y, 1370f, y + 350f)
-        canvas.drawText("诊断建议", 120f, y + 85f, titlePaint.apply { textSize = 54f })
-        val advice = buildHistoryAdvice(summary).take(4)
-        var ay = y + 150f
-        advice.forEachIndexed { index, line ->
-            canvas.drawText("${index + 1}.", 120f, ay, bluePaint.apply { textSize = 36f })
-            canvas.drawText(line.take(32), 175f, ay, smallPaint)
-            ay += 58f
-        }
-        y += 400f
-
-        card(70f, y, 1370f, y + 230f)
-        canvas.drawText("失败原因", 120f, y + 85f, titlePaint.apply { textSize = 54f })
-        val reasons = listOfNotNull(v4, v6).flatMap { it.errorSummary.entries.map { e -> "${e.key} ${e.value}" } }
-        canvas.drawText(if (reasons.isEmpty()) "无明显失败原因" else reasons.joinToString("  ").take(42), 120f, y + 160f, textPaint)
-
-        val fileName = "NetSessionTester_${summary.id}.png"
-        val values = ContentValues().apply {
-            put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
-            put(MediaStore.Images.Media.MIME_TYPE, "image/png")
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/NetSessionTester")
-                put(MediaStore.Images.Media.IS_PENDING, 1)
-            }
-        }
-        val resolver = context.contentResolver
-        val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: error("无法创建图片")
-        resolver.openOutputStream(uri)?.use { out ->
-            bitmap.compress(Bitmap.CompressFormat.PNG, 95, out)
-        } ?: error("无法写入图片")
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            values.clear()
-            values.put(MediaStore.Images.Media.IS_PENDING, 0)
-            resolver.update(uri, values, null, null)
-        }
-        bitmap.recycle()
-        true
-    }.getOrElse { false }
-}
-
-
 private fun historyDetailLines(summary: SessionSummary, maskPrivacy: Boolean): List<String> {
     val host = if (maskPrivacy) maskIpText(summary.host) else summary.host
     val lines = mutableListOf<String>()
@@ -3252,4 +2132,3 @@ private val Navy = Color(0xFF0F2F6E)
 private val ShapeL = RoundedCornerShape(20.dp)
 private val ShapeM = RoundedCornerShape(14.dp)
 private val ShapeS = RoundedCornerShape(10.dp)
-

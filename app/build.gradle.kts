@@ -13,7 +13,7 @@ android {
         minSdk = 26
         targetSdk = 35
         versionCode = 55
-        versionName = "0.9.8-detail-export-chart-fix"
+        versionName = "0.9.8"
         vectorDrawables { useSupportLibrary = true }
     }
 
