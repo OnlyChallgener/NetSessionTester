@@ -229,7 +229,7 @@ private fun displayCarrierFromEnv(env: NetworkEnvironment, ipv6: String): String
 private suspend fun tcpPingMs(host: String, port: Int): Int? = withContext(Dispatchers.IO) {
     runCatching {
         val start = System.nanoTime()
-        Socket().use { socket -> socket.connect(InetSocketAddress(host, port.coerceIn(1, 65535)), 180) }
+        Socket().use { socket -> socket.connect(InetSocketAddress(host, port.coerceIn(1, 65535)), 1200) }
         ((System.nanoTime() - start) / 1_000_000L).toInt().coerceAtLeast(1)
     }.getOrNull()
 }
@@ -483,7 +483,7 @@ private fun NetSessionTesterApp() {
                 }
                 bucketSamples.add(tcpPingMs(config.host, config.port))
                 val cost = System.currentTimeMillis() - loopStart
-                delay((200L - cost).coerceAtLeast(0L))
+                delay((500L - cost).coerceAtLeast(0L))
             }
             if (bucketSec >= 0 && bucketSamples.isNotEmpty()) {
                 appendPingSecond(bucketSec, bucketSamples.toList())
@@ -1094,8 +1094,6 @@ private fun HistoryDetailDialog(summary: SessionSummary, maskPrivacy: Boolean, o
             ) {
                 HistorySummaryCard(summary, maskPrivacy)
                 HistoryConclusionCard(summary)
-                summary.ipv4Stats?.let { HistoryProtocolCard("IPv4 结果", it, maskPrivacy) }
-                summary.ipv6Stats?.let { HistoryProtocolCard("IPv6 结果", it, maskPrivacy) }
                 HistoryDetailChartCard(summary)
                 HistoryAdviceCard(summary)
                 HistoryFailureCard(summary)
@@ -1185,7 +1183,6 @@ private fun HistoryDetailChartCard(summary: SessionSummary) {
             HistoryBarRow("${s.protocol.label} 失败", s.totalFailure, maxValue, ErrorRed)
             HistoryBarRow("${s.protocol.label} 总计", s.totalAttempts, maxValue, Navy)
         }
-        Text("摘要条形图用于截图分享，完整过程以当前测试页曲线为准。", color = Muted, fontSize = 10.sp)
     }
 }
 
@@ -1234,11 +1231,15 @@ private fun historyConclusion(summary: SessionSummary): String {
     val v4Peak = v4?.let { protocolPeak(it) } ?: 0
     val v6Peak = v6?.let { protocolPeak(it) } ?: 0
     val fd = listOfNotNull(v4, v6).any { it.phase.contains("FD", true) || it.errorSummary.keys.any { k -> k.contains("FD", true) } }
+    val totalFail = listOfNotNull(v4, v6).sumOf { it.totalFailure }
+    val timeoutFail = listOfNotNull(v4, v6).sumOf { it.errorSummary["超时"] ?: 0 }
     return when {
         abnormal -> "本次非正常中断，结果仅供参考。"
         fd -> "触发手机 FD/Socket 上限，不一定代表宽带到顶。"
         v4 != null && v6 != null && v4Peak in 1..999 && v6Peak >= 5000 -> "IPv4 可能是主要瓶颈，优先怀疑 NAT/CGNAT。"
-        v4 != null && v6 == null && v4Peak in 1..999 -> "仅 IPv4 偏低，建议补测 IPv6。"
+        v4 != null && v6 == null && v4Peak in 1..999 && totalFail > 0 -> "仅 IPv4 偏低且有失败，建议补测 IPv6 判断瓶颈。"
+        v6 != null && v4 == null && v6Peak in 1..999 && totalFail > 0 -> "仅 IPv6 偏低且有失败，建议补测 IPv4 对比。"
+        timeoutFail > 0 || totalFail > 0 -> "存在失败连接，需结合失败原因和目标站复测。"
         else -> "结果可作为本次网络会话能力参考。"
     }
 }
@@ -1249,11 +1250,16 @@ private fun historyAdvice(summary: SessionSummary): List<String> {
     val v4Peak = v4?.let { protocolPeak(it) } ?: 0
     val v6Peak = v6?.let { protocolPeak(it) } ?: 0
     val fd = listOfNotNull(v4, v6).any { it.phase.contains("FD", true) || it.errorSummary.keys.any { k -> k.contains("FD", true) } }
+    val totalFail = listOfNotNull(v4, v6).sumOf { it.totalFailure }
+    val timeoutFail = listOfNotNull(v4, v6).sumOf { it.errorSummary["超时"] ?: 0 }
     return when {
         isAbnormalSummary(summary) -> listOf("保持网络不切换后重新测试。", "检查 VPN、WiFi/蜂窝、4G/5G 是否变化。", "非正常中断结果不要直接作为会话上限。")
         fd -> listOf("降低新增批次或分协议测试。", "观察路由器连接数表，判断宽带侧是否还在增长。", "FD上限更像手机端资源限制。")
         v4 != null && v6 != null && v4Peak in 1..999 && v6Peak >= 5000 -> listOf("IPv4 低、IPv6 高，优先看 IPv4 NAT/CGNAT。", "蜂窝网络可换 APN 或切换 4G/5G 复测。", "WiFi 网络可观察路由器 NAT/连接数表。")
         v4 != null && v6 == null && v4Peak in 1..999 -> listOf("补测 IPv6 或使用分别测试模式。", "如果 IPv6 明显更高，优先怀疑 IPv4 出口策略。", "更换目标站复测排除目标限制。")
+        v6 != null && v4 == null && v6Peak in 1..999 -> listOf("补测 IPv4 或使用分别测试模式。", "如果 IPv4 明显更低，可重点排查 IPv4 出口策略。", "更换目标站复测排除目标限制。")
+        timeoutFail > 0 -> listOf("失败以超时为主，可能是目标站、网络质量或出口策略影响。", "建议更换目标站、换网络、换时间段复测。", "如果只在 IPv4 出现，优先排查 IPv4 NAT/CGNAT。")
+        totalFail > 0 -> listOf("存在失败连接，结果应结合失败原因卡判断。", "建议用相同参数复测一次排除偶发因素。", "分别测试 IPv4/IPv6 更利于判断瓶颈。")
         else -> listOf("保存截图对比不同运营商和网络。", "分别测试 IPv4/IPv6 更利于判断瓶颈。", "异常结果可结合失败原因卡判断。")
     }
 }
@@ -1651,7 +1657,7 @@ private fun VersionInfoDialog(onDismiss: () -> Unit, onOpenGithub: () -> Unit) {
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("项目：NetSessionTester", color = Muted, fontSize = 12.sp)
-                VersionLine("v0.9.8", "当前版本：修复通知点击回到APP、FD上限保护、历史详情卡片、图表动态坐标和诊断同步。")
+                VersionLine("v0.9.8", "当前稳定包：恢复检测详情卡片、版本弹窗、滑动删除、FD保护、通知跳转、图表坐标和流畅测试。")
                 VersionLine("v0.9.7", "修复 FD 上限附近闪退；触发FD上限时优先释放本机连接并保存历史。")
                 VersionLine("v0.9.6", "修复停止按钮、通知跳转、新增批次被200锁死的问题。")
                 VersionLine("v0.9.5", "优化运行日志、历史记录保存、详情展示与备注。")
@@ -1848,6 +1854,8 @@ private fun chartXAxisStep(durationSec: Int): Int = when {
 }
 
 private fun sessionYAxisMax(peak: Int): Int = when {
+    peak <= 200 -> 200
+    peak <= 500 -> 500
     peak <= 1000 -> 1000
     peak <= 2500 -> 2500
     peak <= 5000 -> 5000
@@ -2011,7 +2019,7 @@ private fun PingCompactChartCard(pingPoints: List<PingPoint>) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             SectionTitle("∿", "Ping 测试", Blue)
             Spacer(Modifier.width(8.dp))
-            StatusChip("200ms/次", BlueSoft, Blue, compact = true)
+            StatusChip("500ms/次", BlueSoft, Blue, compact = true)
             Spacer(Modifier.weight(1f))
             StatusChip(if (loss == 0) "● 正常" else "丢包 $loss%", if (loss == 0) GreenSoft else RedSoft, if (loss == 0) Green else ErrorRed, compact = true)
         }
@@ -2023,7 +2031,6 @@ private fun PingCompactChartCard(pingPoints: List<PingPoint>) {
             MiniMetric("丢包", "$loss%", if (loss == 0) Muted else ErrorRed, Modifier.weight(1f))
         }
         PingLineChart(pingPoints)
-        Text("图表仅显示当前测试过程，下次测试将重新开始记录。", color = Muted, fontSize = 10.sp)
     }
 }
 
@@ -2085,17 +2092,22 @@ private fun PingLineChart(points: List<PingPoint>) {
 
 @Composable
 private fun DiagnosisAdviceInlineCard(mode: TestMode, ipv4Stats: ProtocolStats, ipv6Stats: ProtocolStats) {
-    val v4Peak = maxOf(ipv4Stats.activeSessions, ipv4Stats.maxStableSessions, ipv4Stats.totalSuccess)
-    val v6Peak = maxOf(ipv6Stats.activeSessions, ipv6Stats.maxStableSessions, ipv6Stats.totalSuccess)
     val hasV4 = mode != TestMode.IPV6_ONLY && ipv4Stats.totalAttempts > 0
     val hasV6 = mode != TestMode.IPV4_ONLY && ipv6Stats.totalAttempts > 0
-    val conclusion = when {
-        !hasV4 && !hasV6 -> "测试完成后生成实际诊断"
-        hasV4 && hasV6 && v4Peak in 1..999 && v6Peak >= 5000 -> "IPv4 低、IPv6 高，优先怀疑 IPv4 NAT / CGNAT 限制"
-        hasV4 && !hasV6 && v4Peak in 1..999 -> "仅 IPv4 偏低，建议补测 IPv6 或使用分别测试"
-        hasV4 && hasV6 && v4Peak < 1000 && v6Peak < 1000 -> "IPv4 / IPv6 都偏低，建议排查目标站、信号或本机资源"
-        else -> "结果可作为本次网络会话能力参考"
-    }
+    val summary = SessionSummary(
+        startedAtEpochMs = System.currentTimeMillis(),
+        host = "",
+        port = 0,
+        mode = mode,
+        ipv4Stats = if (hasV4) ipv4Stats else null,
+        ipv6Stats = if (hasV6) ipv6Stats else null
+    )
+    val v4Peak = if (hasV4) protocolPeak(ipv4Stats) else 0
+    val v6Peak = if (hasV6) protocolPeak(ipv6Stats) else 0
+    val conclusion = if (!hasV4 && !hasV6) "测试完成后生成实际诊断" else historyConclusion(summary)
+    val advice = if (!hasV4 && !hasV6) {
+        listOf("建议使用分别测试模式，便于对比 IPv4 / IPv6。", "测试后会结合峰值和失败原因自动分析。")
+    } else historyAdvice(summary)
     SoftCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
             SectionTitle("!", "诊断建议", Orange)
@@ -2107,7 +2119,12 @@ private fun DiagnosisAdviceInlineCard(mode: TestMode, ipv4Stats: ProtocolStats, 
             MetricTile("IPv4峰值", if (hasV4) v4Peak.toString() else "—", if (v4Peak in 1..999) ErrorRed else Blue, Modifier.weight(1f))
             MetricTile("IPv6峰值", if (hasV6) v6Peak.toString() else "—", if (v6Peak >= 5000) Green else Blue, Modifier.weight(1f))
         }
-        Text("图表看过程，峰值卡看分享结果；异常中断结果仅供参考。", color = Muted, fontSize = 11.sp)
+        advice.take(3).forEachIndexed { index, line ->
+            Row(verticalAlignment = Alignment.Top) {
+                Text("${index + 1}.", color = Blue, fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(18.dp))
+                Text(line, color = Muted, fontSize = 11.sp, lineHeight = 15.sp, modifier = Modifier.weight(1f))
+            }
+        }
     }
 }
 
@@ -2336,7 +2353,7 @@ private fun HistoryCard(
             }
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 DetailItem(Icons.Filled.SignalCellularAlt, "活动", (mainStats?.activeSessions ?: 0).toString(), Blue, Modifier.weight(1f))
-                DetailItem(Icons.Filled.Shield, "稳定", (mainStats?.maxStableSessions ?: mainStats?.activeSessions ?: 0).toString(), Green, Modifier.weight(1f))
+                DetailItem(Icons.Filled.Assessment, "总计", (mainStats?.totalAttempts ?: 0).toString(), Navy, Modifier.weight(1f))
             }
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 DetailItem(Icons.Filled.WarningAmber, "失败", (mainStats?.totalFailure ?: 0).toString(), ErrorRed, Modifier.weight(1f))
@@ -2359,9 +2376,10 @@ private fun HistoryCard(
             }
             Text(
                 "诊断：${historyConclusion(item)}",
-                color = Muted,
+                color = Orange,
                 fontSize = 11.sp,
                 lineHeight = 14.sp,
+                fontWeight = FontWeight.Bold,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis
             )
@@ -2485,8 +2503,9 @@ private fun BottomNav(selectedTab: MainTab, onSelect: (MainTab) -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .height(60.dp)
+            .height(58.dp)
             .background(Color(0xFFEAF2FF))
+            .navigationBarsPadding()
             .padding(horizontal = 22.dp, vertical = 2.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically

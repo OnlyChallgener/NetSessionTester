@@ -8,6 +8,7 @@ import com.demonv.netsessiontester.model.ResolveResult
 import com.demonv.netsessiontester.model.SessionConfig
 import com.demonv.netsessiontester.model.TestMode
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -79,14 +80,14 @@ class TcpTester {
         protocol: IpProtocol,
         onStats: suspend (ProtocolStats) -> Unit,
         onLog: suspend (LogLine) -> Unit
-    ): ProtocolStats {
+    ): ProtocolStats = coroutineScope {
         release(protocol)
         val addresses = resolveInetAddresses(config.host, protocol)
         if (addresses.isEmpty()) {
             val stats = ProtocolStats(protocol = protocol, phase = "解析失败")
             onStats(stats)
             onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 没有解析到可用地址"))
-            return stats
+            return@coroutineScope stats
         }
 
         val addressText = addresses.mapNotNull { it.hostAddress }.distinct()
@@ -97,32 +98,51 @@ class TcpTester {
         var totalAttempts = 0
         var maxStable = 0
         var lastTotalAttempts = 0
+        var lastStatsAt = System.currentTimeMillis()
         val errors = linkedMapOf<String, Int>()
+        val pending = mutableListOf<Deferred<OpenResult>>()
         var stats = ProtocolStats(protocol = protocol, phase = "建连中", resolvedAddresses = addressText)
+        var stopReason: String? = null
+        var cleanProbePassed = config.batchSize <= config.failureLimit
         onStats(stats)
 
-        while (currentCoroutineContext().isActive && totalSuccess < config.successLimit && totalFailure < config.failureLimit) {
-            val targetBatch = minOf(config.batchSize, config.successLimit - totalSuccess)
-            if (targetBatch <= 0) break
-            val batchResult = openBatch(addresses, config.port, config.timeoutMs, targetBatch)
+        suspend fun collectCompleted(): Int {
+            var completed = 0
+            val sockets = mutableListOf<Socket>()
+            val iterator = pending.iterator()
+            while (iterator.hasNext()) {
+                val job = iterator.next()
+                if (!job.isCompleted) continue
+                iterator.remove()
+                completed++
+                val result = runCatching { job.await() }.getOrNull() ?: continue
+                result.socket?.let { sockets += it }
+                result.error?.let { key ->
+                    errors[key] = (errors[key] ?: 0) + 1
+                    totalFailure++
+                    if (key == "FD上限") stopReason = "FD上限"
+                }
+            }
+            if (sockets.isNotEmpty()) {
+                socketLock.withLock { heldSockets.getValue(protocol).addAll(sockets) }
+                totalSuccess += sockets.size
+            }
+            totalAttempts = totalSuccess + totalFailure
+            return completed
+        }
 
-            totalSuccess += batchResult.successSockets.size
-            val failAdd = batchResult.errors.values.sum()
-            totalFailure += failAdd
-            totalAttempts += batchResult.successSockets.size + failAdd
-            batchResult.errors.forEach { (key, value) -> errors[key] = (errors[key] ?: 0) + value }
-
-            socketLock.withLock { heldSockets.getValue(protocol).addAll(batchResult.successSockets) }
-
+        suspend fun emitStats(forcePhase: String? = null) {
+            val now = System.currentTimeMillis()
             val active = activeCount(protocol)
             maxStable = maxOf(maxStable, active)
             val added = totalAttempts - lastTotalAttempts
+            val elapsedMs = (now - lastStatsAt).coerceAtLeast(1L)
             lastTotalAttempts = totalAttempts
-            val cps = (added * 1000L / config.intervalMs.coerceAtLeast(1L)).toInt()
-
+            lastStatsAt = now
+            val cps = if (added <= 0) 0 else (added * 1000L / elapsedMs).toInt()
             stats = ProtocolStats(
                 protocol = protocol,
-                phase = "建连中",
+                phase = forcePhase ?: "建连中",
                 resolvedAddresses = addressText,
                 activeSessions = active,
                 totalFailure = totalFailure,
@@ -134,36 +154,73 @@ class TcpTester {
                 maxStableSessions = maxStable
             )
             onStats(stats)
-            val successDeltaText = if (batchResult.successSockets.size != config.batchSize) "(+${batchResult.successSockets.size})" else ""
-            val failureDeltaText = if (failAdd > 0) "(+$failAdd)" else ""
-            onLog(LogLine(level = LogLevel.STAT, text = "${protocol.label} 统计 - 成功：$totalSuccess$successDeltaText | 失败：$totalFailure$failureDeltaText | 活动：$active | 总计：$totalAttempts | 新增：$added | CPS：${cps}/秒"))
-
-            if (errors.keys.any { it.contains("FD", ignoreCase = true) }) {
-                val protectedActive = active
-                val protectedStats = stats.copy(
-                    phase = "FD上限保护",
-                    activeSessions = protectedActive,
-                    maxStableSessions = maxOf(maxStable, protectedActive),
-                    errorSummary = errors.toMap()
-                )
-                onStats(protectedStats)
-                onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 触发FD上限，已启动保护释放，结果仅供参考"))
-                release(protocol)
-                return protectedStats
+            if (added > 0 || forcePhase != null) {
+                val successDelta = totalSuccess - (stats.totalSuccess - 0) // only used for readability below
+                val successDeltaText = ""
+                val failureDeltaText = if (errors.isNotEmpty()) "" else ""
+                onLog(LogLine(level = LogLevel.STAT, text = "${protocol.label} 统计 - 成功：$totalSuccess | 失败：$totalFailure | 活动：$active | 总计：$totalAttempts | 新增：$added | CPS：${cps}/秒"))
             }
+        }
+
+        while (currentCoroutineContext().isActive && totalSuccess < config.successLimit && totalFailure < config.failureLimit && stopReason == null) {
+            collectCompleted()
+
+            val remainingSuccess = (config.successLimit - totalSuccess - pending.size).coerceAtLeast(0)
+            val remainingFailure = (config.failureLimit - totalFailure).coerceAtLeast(0)
+            val pendingLimit = maxOf(config.batchSize * 6, 300).coerceAtMost(6000)
+            val canLaunchByPending = (pendingLimit - pending.size).coerceAtLeast(0)
+            val baseBatch = when {
+                !cleanProbePassed -> minOf(config.batchSize, config.failureLimit, 100)
+                totalFailure > 0 -> minOf(config.batchSize, (remainingFailure - pending.size).coerceAtLeast(0))
+                else -> config.batchSize
+            }
+            val launchCount = minOf(baseBatch, remainingSuccess, canLaunchByPending)
+
+            if (launchCount > 0) {
+                repeat(launchCount) { index ->
+                    val address = addresses[(totalAttempts + pending.size + index) % addresses.size]
+                    pending += async(Dispatchers.IO) { openOne(address, config.port, config.timeoutMs) }
+                }
+            }
+
+            val waitUntil = System.currentTimeMillis() + config.intervalMs.coerceAtLeast(50L)
+            while (currentCoroutineContext().isActive && System.currentTimeMillis() < waitUntil) {
+                collectCompleted()
+                if (totalSuccess >= config.successLimit || totalFailure >= config.failureLimit || stopReason != null) break
+                delay(25L)
+            }
+            collectCompleted()
+
+            if (!cleanProbePassed && totalAttempts > 0) {
+                cleanProbePassed = totalFailure == 0
+            }
+
+            emitStats()
 
             if (totalFailure >= config.failureLimit) {
                 onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 达到失败上限：${config.failureLimit}"))
                 break
             }
-            delay(config.intervalMs)
+            if (stopReason == "FD上限") {
+                onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 检测到FD上限，已停止继续建连"))
+                break
+            }
+            if (pending.isEmpty() && launchCount <= 0 && remainingSuccess <= 0) break
         }
 
+        pending.forEach { it.cancel() }
+        pending.clear()
+
         val finalActive = activeCount(protocol)
+        val finalPhase = if (stopReason == "FD上限") "FD上限" else "测试完成"
         val finalStats = stats.copy(
-            phase = "测试完成",
+            phase = finalPhase,
             activeSessions = finalActive,
-            maxStableSessions = maxOf(maxStable, finalActive)
+            maxStableSessions = maxOf(maxStable, finalActive),
+            totalSuccess = totalSuccess,
+            totalFailure = totalFailure,
+            totalAttempts = totalSuccess + totalFailure,
+            errorSummary = errors.toMap()
         )
         onStats(finalStats)
         onLog(LogLine(level = LogLevel.INFO, text = "${protocol.label} 测试完成 - 活动：${finalStats.activeSessions} 失败：${finalStats.totalFailure} 总计：${finalStats.totalAttempts}"))
@@ -172,7 +229,7 @@ class TcpTester {
             release(protocol)
             onLog(LogLine(level = LogLevel.WARN, text = "${protocol.label} 已按设置释放连接。"))
         }
-        return finalStats
+        return@coroutineScope finalStats
     }
 
     private suspend fun openBatch(
@@ -208,17 +265,6 @@ class TcpTester {
             throw e
         } catch (e: Exception) {
             OpenResult(error = classifyError(e))
-        } catch (t: Throwable) {
-            OpenResult(error = classifyThrowable(t))
-        }
-    }
-
-    private fun classifyThrowable(t: Throwable): String {
-        val message = t.message.orEmpty().lowercase()
-        return when {
-            "too many open files" in message || "emfile" in message -> "FD上限"
-            t is OutOfMemoryError -> "内存不足"
-            else -> t.javaClass.simpleName
         }
     }
 
