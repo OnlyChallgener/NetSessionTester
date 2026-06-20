@@ -195,7 +195,6 @@ private data class PingPoint(
 private data class NetworkEnvironment(
     val typeLabel: String = "未知网络",
     val carrierName: String = "未知",
-    val cellularTech: String = "未知",
     val hasWifi: Boolean = false,
     val hasCellular: Boolean = false,
     val hasVpn: Boolean = false,
@@ -211,7 +210,6 @@ private fun detectNetworkEnvironment(context: Context): NetworkEnvironment {
     val hasInternet = caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
     val telephony = context.getSystemService(TelephonyManager::class.java)
     val carrier = runCatching { telephony?.networkOperatorName?.takeIf { it.isNotBlank() } ?: "未知" }.getOrDefault("未知")
-    val networkType = runCatching { telephony?.dataNetworkType ?: TelephonyManager.NETWORK_TYPE_UNKNOWN }.getOrDefault(TelephonyManager.NETWORK_TYPE_UNKNOWN)
     val typeLabel = when {
         hasVpn && hasWifi -> "WiFi + VPN"
         hasVpn && hasCellular -> "蜂窝 + VPN"
@@ -223,7 +221,6 @@ private fun detectNetworkEnvironment(context: Context): NetworkEnvironment {
     return NetworkEnvironment(
         typeLabel = typeLabel,
         carrierName = carrier,
-        cellularTech = cellularTechLabel(networkType),
         hasWifi = hasWifi,
         hasCellular = hasCellular,
         hasVpn = hasVpn,
@@ -231,21 +228,29 @@ private fun detectNetworkEnvironment(context: Context): NetworkEnvironment {
     )
 }
 
-private fun cellularTechLabel(type: Int): String = when (type) {
-    TelephonyManager.NETWORK_TYPE_NR -> "5G NR"
-    TelephonyManager.NETWORK_TYPE_LTE -> "4G LTE"
-    TelephonyManager.NETWORK_TYPE_HSPAP,
-    TelephonyManager.NETWORK_TYPE_HSPA,
-    TelephonyManager.NETWORK_TYPE_HSDPA,
-    TelephonyManager.NETWORK_TYPE_HSUPA,
-    TelephonyManager.NETWORK_TYPE_UMTS -> "3G"
-    TelephonyManager.NETWORK_TYPE_EDGE,
-    TelephonyManager.NETWORK_TYPE_GPRS,
-    TelephonyManager.NETWORK_TYPE_CDMA,
-    TelephonyManager.NETWORK_TYPE_1xRTT,
-    TelephonyManager.NETWORK_TYPE_IDEN -> "2G"
-    else -> "未知"
+
+private fun inferCarrierFromIpv6Prefix(ipv6: String): String {
+    val value = ipv6.trim().lowercase()
+    return when {
+        value.startsWith("2408:") -> "中国联通"
+        value.startsWith("2409:") -> "中国移动"
+        value.startsWith("240e:") -> "中国电信"
+        value.isBlank() || value == "检测中" || value == "不可用" || value == "无" -> "未知"
+        else -> "未知"
+    }
 }
+
+
+private fun displayCarrierFromEnv(env: NetworkEnvironment, ipv6: String): String {
+    val prefixCarrier = inferCarrierFromIpv6Prefix(ipv6)
+    return when {
+        env.hasCellular && env.carrierName.isNotBlank() && env.carrierName != "未知" -> env.carrierName
+        prefixCarrier != "未知" -> prefixCarrier
+        env.hasWifi -> "WiFi"
+        else -> "未知"
+    }
+}
+
 
 private suspend fun tcpPingMs(host: String, port: Int): Int? = withContext(Dispatchers.IO) {
     runCatching {
@@ -2008,8 +2013,7 @@ private fun NetworkEnvironmentCard(
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             EnvInfoTile("网络", env.typeLabel, Blue, Modifier.weight(1f))
-            EnvInfoTile("运营商", if (env.hasCellular) env.carrierName else "非蜂窝", Purple, Modifier.weight(1f))
-            EnvInfoTile("制式", if (env.hasCellular) env.cellularTech else "—", Green, Modifier.weight(1f))
+            EnvInfoTile("运营商", displayCarrierFromEnv(env, publicIpResult.ipv6), Purple, Modifier.weight(1f))
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             EnvInfoTile("IPv4出口", if (maskPrivacy) maskIpText(publicIpResult.ipv4) else publicIpResult.ipv4, Navy, Modifier.weight(1f))
