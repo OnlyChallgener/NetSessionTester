@@ -427,6 +427,11 @@ private data class StunEndpoint(
     val port: Int
 )
 
+private data class StunRequest(
+    val bytes: ByteArray,
+    val transactionId: ByteArray
+)
+
 private data class DnsProbeResult(
     val systemHasA: Boolean,
     val systemHasAaaa: Boolean,
@@ -563,13 +568,16 @@ private fun buildNetworkProbeInfo(
     val multiStun = stun?.successCount ?: 0
     val stunTotal = stun?.totalCount ?: 0
 
+    val strongSymmetric = stunSuccess && !stun!!.portStable && multiStun >= 3
+    val weakPortChange = stunSuccess && !stun!!.portStable && multiStun < 3
+
     val natType = when {
         env.hasVpn -> "代理环境"
         isDirectPublicV4 -> "NAT1 / 开放"
-        stunSuccess && stun?.portStable == true -> "NAT3 / 端口受限型"
-        stunSuccess -> "NAT3 / 对称型"
+        strongSymmetric -> "NAT4 / 对称型"
+        stunSuccess -> "NAT3 / 端口受限型"
         publicV4 != null && full -> "NAT3 / 待确认"
-        publicV4 == null && full -> "NAT4 / UDP受限"
+        publicV4 == null && full -> "UDP受限 / 无法判断"
         else -> "待检测"
     }
 
@@ -578,8 +586,9 @@ private fun buildNetworkProbeInfo(
         isDirectPublicV4 -> "公网直连"
         stun == null && full -> "未知"
         stun == null -> "待检测"
-        stun.portStable -> "端口保持"
-        else -> "端口变化"
+        strongSymmetric -> "端口变化"
+        weakPortChange -> "端口变化待确认"
+        else -> "端口保持"
     }
 
     val filtering = when {
@@ -594,8 +603,10 @@ private fun buildNetworkProbeInfo(
     val confidence = when {
         env.hasVpn -> "低"
         !full -> "低"
-        stun != null && multiStun >= 2 && stun.ipStable -> "高"
-        stun != null -> "中"
+        strongSymmetric && stun!!.ipStable -> "高"
+        stun != null && multiStun >= 3 && stun.ipStable -> "高"
+        stun != null && multiStun >= 2 -> "中"
+        stun != null -> "低"
         publicV4 != null -> "低"
         else -> "低"
     }
@@ -615,10 +626,11 @@ private fun buildNetworkProbeInfo(
         dns.fakeIpDetected -> "检测到Fake-IP，DNS可能被代理工具接管。"
         !dns.systemHasAaaa && dns.domesticHasAaaa -> "系统DNS未返回IPv6，国内备用DNS可解析，可能被AdGuard/代理/路由器策略过滤。"
         !dns.systemHasAaaa && dns.globalHasAaaa -> "系统和国内备用DNS未返回IPv6，国外备用DNS可解析，可能存在地区DNS差异或本地DNS策略影响。"
+        natType.startsWith("NAT4 / 对称") -> "${stunNodeText}多个可用STUN目标返回的外部端口不一致，当前可按对称型/NAT4理解，P2P/游戏联机可能受影响。"
+        natType.startsWith("NAT3 / 端口受限") && weakPortChange -> "${stunNodeText}UDP基础探测可用，但可用节点不足以确认对称型，当前按端口受限型理解，建议换网络或再次刷新复测。"
         natType.startsWith("NAT3 / 端口受限") -> "${stunNodeText}UDP基础探测可用，当前可按端口受限型理解，P2P/游戏联机可能受影响。"
-        natType.startsWith("NAT3 / 对称") -> "${stunNodeText}多个STUN目标返回的外部端口不一致，疑似对称NAT，P2P/游戏联机可能受影响。"
         natType.startsWith("NAT3 / 待确认") -> "公网IPv4可用，但STUN基础探测未成功，NAT类型暂按严格/待确认处理。"
-        natType.startsWith("NAT4") || natType.startsWith("UDP") -> "多个STUN基础请求均失败，当前可按NAT4/UDP受限理解，可能是UDP被防火墙、代理或运营商限制。"
+        natType.startsWith("UDP") -> "多个STUN基础请求均失败，当前仅能判断为UDP受限/无法判断，可能是UDP被防火墙、代理或运营商限制。"
         natType.startsWith("NAT2") -> "UDP映射较稳定，普通联机能力中等。"
         natType.startsWith("NAT1") -> "IPv4可能具备公网直连能力。"
         else -> "网络信息已更新。"
@@ -702,30 +714,45 @@ private fun detectTcpLocalPort(host: String, port: Int, timeoutMs: Int): Int {
 }
 
 private fun stunBindingProbe(): StunProbeResult {
+    // 先做基础 Binding 探测。只有多个基础 STUN 全部失败，才认为 UDP 受限。
+    // hot-chilli 在部分网络不可用，移到末尾兜底，避免它影响第一判断。
     val endpoints = listOf(
         StunEndpoint("stun.miwifi.com", 3478),
-        StunEndpoint("stun.hot-chilli.net", 3478),
+        StunEndpoint("stun.voipstunt.com", 3478),
+        StunEndpoint("stun.voipbuster.com", 3478),
+        StunEndpoint("stun.internetcalls.com", 3478),
+        StunEndpoint("stun.voip.aebc.com", 3478),
+        StunEndpoint("stun.fitauto.ru", 3478),
         StunEndpoint("stun.cloudflare.com", 3478),
         StunEndpoint("stun.syncthing.net", 3478),
         StunEndpoint("stun.l.google.com", 19302),
-        StunEndpoint("stun1.l.google.com", 19302)
+        StunEndpoint("stun1.l.google.com", 19302),
+        StunEndpoint("stun.hot-chilli.net", 3478)
     )
     val results = mutableListOf<StunProbeResult>()
     var attempted = 0
     DatagramSocket().use { socket ->
-        socket.soTimeout = 1400
+        socket.soTimeout = 1800
         val localPort = socket.localPort
         endpoints.forEach { endpoint ->
             val server = runCatching { resolveFirstIpv4(endpoint.host) }.getOrNull() ?: return@forEach
             attempted++
-            val request = buildStunBindingRequest()
-            runCatching {
-                socket.send(DatagramPacket(request, request.size, server, endpoint.port))
-                val buf = ByteArray(768)
-                val packet = DatagramPacket(buf, buf.size)
-                socket.receive(packet)
-                parseStunMappedAddress(packet.data, packet.length, localPort)?.let { result ->
-                    results += result
+            var successForEndpoint = false
+            repeat(2) { retryIndex ->
+                if (successForEndpoint) return@repeat
+                val request = buildStunBindingRequest()
+                runCatching {
+                    socket.send(DatagramPacket(request.bytes, request.bytes.size, server, endpoint.port))
+                    val deadline = System.currentTimeMillis() + if (retryIndex == 0) 1800 else 1200
+                    while (System.currentTimeMillis() < deadline && !successForEndpoint) {
+                        val buf = ByteArray(768)
+                        val packet = DatagramPacket(buf, buf.size)
+                        socket.receive(packet)
+                        parseStunMappedAddress(packet.data, packet.length, localPort, request.transactionId)?.let { result ->
+                            results += result
+                            successForEndpoint = true
+                        }
+                    }
                 }
             }
         }
@@ -745,8 +772,9 @@ private fun resolveFirstIpv4(host: String): InetAddress {
         ?: error("STUN服务器无IPv4地址")
 }
 
-private fun buildStunBindingRequest(): ByteArray {
-    val tx = ByteArray(12) { (System.nanoTime().shr((it % 8) * 8).toInt() and 0xFF).toByte() }
+private fun buildStunBindingRequest(): StunRequest {
+    val seed = System.nanoTime() xor Thread.currentThread().id
+    val tx = ByteArray(12) { (seed.shr((it % 8) * 8).toInt() and 0xFF).toByte() }
     val req = ByteArray(20)
     req[1] = 0x01.toByte()
     req[4] = 0x21.toByte()
@@ -754,10 +782,17 @@ private fun buildStunBindingRequest(): ByteArray {
     req[6] = 0xA4.toByte()
     req[7] = 0x42.toByte()
     System.arraycopy(tx, 0, req, 8, 12)
-    return req
+    return StunRequest(req, tx)
 }
 
-private fun parseStunMappedAddress(data: ByteArray, length: Int, localPort: Int): StunProbeResult? {
+private fun parseStunMappedAddress(data: ByteArray, length: Int, localPort: Int, transactionId: ByteArray): StunProbeResult? {
+    if (length < 20) return null
+    val messageType = ((data[0].toInt() and 0xFF) shl 8) or (data[1].toInt() and 0xFF)
+    if (messageType != 0x0101) return null
+    if (data[4] != 0x21.toByte() || data[5] != 0x12.toByte() || data[6] != 0xA4.toByte() || data[7] != 0x42.toByte()) return null
+    for (i in 0 until 12) {
+        if (data[8 + i] != transactionId[i]) return null
+    }
     var pos = 20
     while (pos + 4 <= length) {
         val type = ((data[pos].toInt() and 0xFF) shl 8) or (data[pos + 1].toInt() and 0xFF)
