@@ -403,7 +403,7 @@ private data class NetworkProbeInfo(
     val confidence: String = "检测中",
     val diagnosis: String = "检测中",
     val proxyNotice: String = "",
-    val refreshMode: String = "轻量刷新"
+    val refreshMode: String = "待检测"
 )
 
 private data class StunProbeResult(
@@ -536,7 +536,7 @@ private fun buildNetworkProbeInfo(
         env.hasVpn -> "可能来自代理出口"
         publicV4 != null && localIpv4 != null && !isPrivateIpv4(localIpv4) && localIpv4 == publicV4 -> "公网直连"
         stun == null && full -> "未知"
-        stun == null -> "手动刷新检测"
+        stun == null -> "待检测"
         stun.mappedPort == stun.localPort -> "端口保持"
         else -> "端口变化"
     }
@@ -544,7 +544,7 @@ private fun buildNetworkProbeInfo(
     val filtering = when {
         env.hasVpn -> "无法准确判断"
         stun == null && full -> "UDP回包失败"
-        stun == null -> "手动刷新检测"
+        stun == null -> "待检测"
         natType.startsWith("NAT1") -> "无明显限制"
         natType.startsWith("NAT2") -> "地址受限"
         else -> "端口受限"
@@ -574,14 +574,14 @@ private fun buildNetworkProbeInfo(
         natType.startsWith("UDP") -> "STUN请求失败，可能是UDP被防火墙、代理或运营商限制。"
         natType.startsWith("NAT2") -> "UDP映射较稳定，普通联机能力中等。"
         natType.startsWith("NAT1") -> "IPv4可能具备公网直连能力。"
-        else -> "基础信息已更新，完整NAT/DNS诊断请手动刷新。"
+        else -> "网络信息已更新。"
     }
 
     return NetworkProbeInfo(
         localIp = localIpv4 ?: localIpv6 ?: "不可用",
         natType = natType,
-        latencyText = latencyMs?.let { "${it}ms" } ?: if (full) "不可用" else "轻量刷新",
-        portText = stun?.mappedPort?.toString() ?: tcpPort?.toString() ?: if (full) "不可用" else "轻量刷新",
+        latencyText = latencyMs?.let { "${it}ms" } ?: "不可用",
+        portText = stun?.mappedPort?.toString() ?: tcpPort?.toString() ?: "不可用",
         priority = priority,
         mappingBehavior = mapping,
         filterBehavior = filtering,
@@ -590,7 +590,7 @@ private fun buildNetworkProbeInfo(
         confidence = confidence,
         diagnosis = diagnosis,
         proxyNotice = if (env.hasVpn) "VPN/代理结果仅供参考" else "",
-        refreshMode = if (full) "完整检测" else "10秒轻量刷新"
+        refreshMode = if (full) "已检测" else "待检测"
     )
 }
 
@@ -881,6 +881,7 @@ private fun NetSessionTesterApp() {
     var pingJob by remember { mutableStateOf<Job?>(null) }
     var networkWatchJob by remember { mutableStateOf<Job?>(null) }
     var testNetworkSignature by remember { mutableStateOf("") }
+    var lastNetworkInfoSignature by remember { mutableStateOf("") }
     var activeRunId by remember { mutableStateOf(0L) }
     var finishInProgress by remember { mutableStateOf(false) }
 
@@ -957,20 +958,38 @@ private fun NetSessionTesterApp() {
     }
 
     fun refreshPublicIp() {
+        if (publicIpLoading) return
         scope.launch {
             publicIpLoading = true
-            val result = PublicIpDetector.detect()
-            publicIpResult = result
-            networkProbeInfo = detectNetworkProbe(result, detectNetworkEnvironment(context), host.ifBlank { "www.baidu.com" }, port.toIntOrNull() ?: 80)
-            publicIpLoading = false
+            try {
+                val result = runCatching { PublicIpDetector.detect() }.getOrElse { PublicIpResult() }
+                publicIpResult = result
+                networkProbeInfo = runCatching {
+                    detectNetworkProbe(result, detectNetworkEnvironment(context), host.ifBlank { "www.baidu.com" }, port.toIntOrNull() ?: 80)
+                }.getOrElse { error ->
+                    NetworkProbeInfo(
+                        localIp = localIpv4Addresses().firstOrNull() ?: localIpv6Addresses().firstOrNull() ?: "不可用",
+                        natType = "检测失败",
+                        latencyText = "不可用",
+                        portText = "不可用",
+                        priority = "未知",
+                        mappingBehavior = "未知",
+                        filterBehavior = "未知",
+                        ipv6Status = "不可用",
+                        dnsStatus = "检测失败",
+                        confidence = "低",
+                        diagnosis = error.message ?: "网络信息检测失败"
+                    )
+                }
+                lastNetworkInfoSignature = currentNetworkSignature(context)
+            } finally {
+                publicIpLoading = false
+            }
         }
     }
 
     fun refreshNetworkInfoLight() {
-        if (publicIpLoading) return
-        scope.launch {
-            networkProbeInfo = detectNetworkProbeLight(publicIpResult, detectNetworkEnvironment(context), host.ifBlank { "www.baidu.com" }, port.toIntOrNull() ?: 80)
-        }
+        refreshPublicIp()
     }
 
     LaunchedEffect(Unit) {
@@ -995,7 +1014,23 @@ private fun NetSessionTesterApp() {
         historySavedCount = historyStore.count()
         historyCounts = historyStore.counts()
         settingsLoaded = true
+        lastNetworkInfoSignature = currentNetworkSignature(context)
         refreshPublicIp()
+    }
+
+    LaunchedEffect(settingsLoaded) {
+        if (settingsLoaded) {
+            lastNetworkInfoSignature = currentNetworkSignature(context)
+            while (true) {
+                delay(2_000L)
+                val nowSignature = currentNetworkSignature(context)
+                if (nowSignature != lastNetworkInfoSignature) {
+                    if (!state.isAdding && !finishInProgress && !publicIpLoading) {
+                        refreshPublicIp()
+                    }
+                }
+            }
+        }
     }
 
     LaunchedEffect(
@@ -1109,15 +1144,6 @@ private fun NetSessionTesterApp() {
                     latestUpdate = info.takeIf { hasNew }
                     updateAvailable = hasNew
                 }
-            }
-        }
-    }
-
-    LaunchedEffect(settingsLoaded, host, port) {
-        if (settingsLoaded) {
-            while (true) {
-                delay(10_000L)
-                if (!finishInProgress) refreshNetworkInfoLight()
             }
         }
     }
@@ -2987,9 +3013,7 @@ private fun NetworkEnvironmentSettingsCard(
         Row(verticalAlignment = Alignment.CenterVertically) {
             SectionTitle("i", "网络信息", Purple)
             Spacer(Modifier.weight(1f))
-            StatusChip(probeInfo.refreshMode, Color(0xFFF8FAFC), Muted, compact = true)
-            Spacer(Modifier.width(6.dp))
-            TextButton(onClick = onRefresh) { Text(if (publicIpLoading) "检测中" else "手动刷新", fontSize = 12.sp) }
+            TextButton(onClick = onRefresh) { Text(if (publicIpLoading) "检测中" else "刷新", fontSize = 12.sp) }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
             InfoMetricTile("⌂", "本地IP", if (maskPrivacy) maskIpText(probeInfo.localIp) else probeInfo.localIp, Color(0xFFE0F7FA), Color(0xFF00A7C6), Modifier.weight(1f))
@@ -2997,7 +3021,8 @@ private fun NetworkEnvironmentSettingsCard(
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
             InfoMetricTile("◎", "公网IPv4", if (maskPrivacy) maskIpText(publicIpResult.ipv4) else publicIpResult.ipv4, BlueSoft, Blue, Modifier.weight(1f), onClick = onCopyPublicIpv4)
-            InfoMetricTile("✓", "IPv6状态", probeInfo.ipv6Status, GreenSoft, Green, Modifier.weight(1f), onClick = onCopyPublicIpv6)
+            val ipv6Display = if (publicIpResult.ipv6.isUsableIpText()) publicIpResult.ipv6 else probeInfo.ipv6Status
+            InfoMetricTile("✓", "公网IPv6", if (maskPrivacy) maskIpText(ipv6Display) else ipv6Display, GreenSoft, Green, Modifier.weight(1f), onClick = onCopyPublicIpv6)
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
             InfoMetricTile("N", "NAT类型", probeInfo.natType, Color(0xFFFFE4E6), ErrorRed, Modifier.weight(1f))
@@ -3022,7 +3047,6 @@ private fun NetworkEnvironmentSettingsCard(
             StatusChip(if (env.hasInternet) "可访问互联网" else "无互联网能力", if (env.hasInternet) GreenSoft else RedSoft, if (env.hasInternet) Green else ErrorRed, compact = true)
             StatusChip("网络 ${env.typeLabel}", Color(0xFFF3E8FF), Purple, compact = true)
             StatusChip("运营商 ${displayCarrierFromEnv(env, publicIpResult.ipv6)}", Color(0xFFF3E8FF), Purple, compact = true)
-            StatusChip("IPv4 NAT 与 IPv6 分开判断", Color(0xFFE0F2FE), Blue, compact = true)
             if (env.hasVpn) StatusChip("VPN/代理仅供参考", Color(0xFFF3E8FF), Purple, compact = true)
         }
     }

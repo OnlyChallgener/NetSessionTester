@@ -292,8 +292,8 @@ Artifact：NetSessionTester-v0.9.8-final-axis-detail-fix-debug-apk
 - 基于上一版 FD Guard 代码包继续修改，版本名仍保持 v0.9.9。
 - Ping 默认保持 500ms，避免引入复杂自动降频造成体验变化。
 - 网络信息卡新增 NAT 映射行为、过滤行为、DNS 诊断、IPv6 状态、置信度和诊断建议。
-- IPv4 NAT 与 IPv6 状态分开显示，降低 NAT 类型误判争议。
+- IPv4 NAT 与 IPv6 公网地址分别展示，避免 NAT 类型误判争议。
 - 检测到 VPN/代理时，NAT、IPv6、出口 IP 结果标记为仅供参考。
 - 系统 DNS 无 AAAA 时，使用阿里/腾讯 DNS 做轻量诊断，提示可能由 AdGuard Home、代理 DNS 或路由器策略导致。
 - 检测到 198.18.0.0/15 Fake-IP 时提示 DNS 可能由代理工具接管。
-- 保留手动刷新，同时增加 10 秒轻量刷新基础网络信息。
+- 进入 App 自动完整检测一次；网络切换后自动重测，刷新按钮可手动重测。
