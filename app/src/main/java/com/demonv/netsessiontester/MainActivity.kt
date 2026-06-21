@@ -1627,74 +1627,85 @@ private fun NetSessionTesterApp() {
         startPingMonitor(config, startedAt)
         startNetworkWatch(startedAt, testNetworkSignature)
 
-        runningJob = scope.launch {
+        runningJob = AppTestRuntime.scope.launch {
             var summary: SessionSummary? = null
             var completedNormally = false
             var failureMsg: String? = null
             try {
                 val oldClosed = tester.release()
                 if (oldClosed > 0) {
-                    appendLog(LogLine(level = LogLevel.WARN, text = "开始新测试前释放旧连接：$oldClosed 条"))
+                    AppTestRuntime.mainScope.launch {
+                        appendLog(LogLine(level = LogLevel.WARN, text = "开始新测试前释放旧连接：$oldClosed 条"))
+                    }
                 }
                 val pair = tester.runSessionHoldTest(
                     rawConfig = config,
                     onStats = statsHandler@ { stats ->
-                        if (activeRunId != startedAt || !state.isAdding) return@statsHandler
-                        recordChartPoint(stats)
-                        state = when (stats.protocol) {
-                            IpProtocol.IPV4 -> state.copy(ipv4Stats = stats, status = "${stats.protocol.label} ${stats.phase}")
-                            IpProtocol.IPV6 -> state.copy(ipv6Stats = stats, status = "${stats.protocol.label} ${stats.phase}")
+                        AppTestRuntime.mainScope.launch {
+                            if (activeRunId != startedAt || !state.isAdding) return@launch
+                            recordChartPoint(stats)
+                            state = when (stats.protocol) {
+                                IpProtocol.IPV4 -> state.copy(ipv4Stats = stats, status = "${stats.protocol.label} ${stats.phase}")
+                                IpProtocol.IPV6 -> state.copy(ipv6Stats = stats, status = "${stats.protocol.label} ${stats.phase}")
+                            }
+                            updateForegroundNotice(context, "${stats.protocol.label} ${stats.phase}｜活动 ${stats.activeSessions}｜失败 ${stats.totalFailure}")
                         }
-                        updateForegroundNotice(context, "${stats.protocol.label} ${stats.phase}｜活动 ${stats.activeSessions}｜失败 ${stats.totalFailure}")
                     },
-                    onLog = { line -> appendLog(line) }
+                    onLog = { line ->
+                        AppTestRuntime.mainScope.launch { appendLog(line) }
+                    }
                 )
+                val uiStats = withContext(Dispatchers.Main.immediate) { state.ipv4Stats to state.ipv6Stats }
                 summary = SessionSummary(
                     startedAtEpochMs = startedAt,
                     host = config.host,
                     port = config.port,
                     mode = config.mode,
                     ipv4Stats = when (config.mode) {
-                        TestMode.IPV4_ONLY -> pair.first ?: state.ipv4Stats
-                        TestMode.IPV4_THEN_IPV6 -> pair.first ?: state.ipv4Stats
+                        TestMode.IPV4_ONLY -> pair.first ?: uiStats.first
+                        TestMode.IPV4_THEN_IPV6 -> pair.first ?: uiStats.first
                         TestMode.IPV6_ONLY -> null
                     },
                     ipv6Stats = when (config.mode) {
-                        TestMode.IPV6_ONLY -> pair.second ?: state.ipv6Stats
-                        TestMode.IPV4_THEN_IPV6 -> pair.second ?: state.ipv6Stats
+                        TestMode.IPV6_ONLY -> pair.second ?: uiStats.second
+                        TestMode.IPV4_THEN_IPV6 -> pair.second ?: uiStats.second
                         TestMode.IPV4_ONLY -> null
                     }
                 )
                 completedNormally = true
             } catch (error: Throwable) {
                 if (error is kotlinx.coroutines.CancellationException) throw error
-                if (!manualStopRequested) {
-                    failureMsg = error.message ?: error.javaClass.simpleName
-                    appendLog(LogLine(level = LogLevel.ERROR, text = "测试中断：$failureMsg"))
+                AppTestRuntime.mainScope.launch {
+                    if (!manualStopRequested) {
+                        failureMsg = error.message ?: error.javaClass.simpleName
+                        appendLog(LogLine(level = LogLevel.ERROR, text = "测试中断：$failureMsg"))
+                    }
                 }
             } finally {
-                alignPingWithSessionEnd()
-                pingJob?.cancel()
-                pingJob = null
-                pingIntervalLabel = "AUTO"
-                networkWatchJob?.cancel()
-                networkWatchJob = null
-                if (!manualStopRequested) {
-                    val finalSummary = summary
-                    val finalReason = finishReasonFor(finalSummary, config).let { reason ->
-                        if (!completedNormally && reason == FinishReason.Completed) FinishReason.Interrupted else reason
+                withContext(Dispatchers.Main.immediate) {
+                    alignPingWithSessionEnd()
+                    pingJob?.cancel()
+                    pingJob = null
+                    pingIntervalLabel = "AUTO"
+                    networkWatchJob?.cancel()
+                    networkWatchJob = null
+                    if (!manualStopRequested) {
+                        val finalSummary = summary
+                        val finalReason = finishReasonFor(finalSummary, config).let { reason ->
+                            if (!completedNormally && reason == FinishReason.Completed) FinishReason.Interrupted else reason
+                        }
+                        scope.launch {
+                            releaseAndFinalize(
+                                reason = finalReason,
+                                summary = finalSummary,
+                                saveHistory = finalReason.saveHistory,
+                                cancelRunningJob = false,
+                                toast = true
+                            )
+                        }
                     }
-                    scope.launch {
-                        releaseAndFinalize(
-                            reason = finalReason,
-                            summary = finalSummary,
-                            saveHistory = finalReason.saveHistory,
-                            cancelRunningJob = false,
-                            toast = true
-                        )
-                    }
+                    runningJob = null
                 }
-                runningJob = null
             }
         }
     }
