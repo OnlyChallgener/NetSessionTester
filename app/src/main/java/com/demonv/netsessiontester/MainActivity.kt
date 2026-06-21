@@ -715,7 +715,7 @@ private fun detectTcpLocalPort(host: String, port: Int, timeoutMs: Int): Int {
 
 private fun stunBindingProbe(): StunProbeResult {
     // 先做基础 Binding 探测。只有多个基础 STUN 全部失败，才认为 UDP 受限。
-    // hot-chilli 在部分网络不可用，移到末尾兜底，避免它影响第一判断。
+    // 使用 8 个基础 STUN 节点；已移除部分网络明确不可用的 hot-chilli。
     val endpoints = listOf(
         StunEndpoint("stun.miwifi.com", 3478),
         StunEndpoint("stun.voipstunt.com", 3478),
@@ -724,10 +724,7 @@ private fun stunBindingProbe(): StunProbeResult {
         StunEndpoint("stun.voip.aebc.com", 3478),
         StunEndpoint("stun.fitauto.ru", 3478),
         StunEndpoint("stun.cloudflare.com", 3478),
-        StunEndpoint("stun.syncthing.net", 3478),
-        StunEndpoint("stun.l.google.com", 19302),
-        StunEndpoint("stun1.l.google.com", 19302),
-        StunEndpoint("stun.hot-chilli.net", 3478)
+        StunEndpoint("stun.syncthing.net", 3478)
     )
     val results = mutableListOf<StunProbeResult>()
     var attempted = 0

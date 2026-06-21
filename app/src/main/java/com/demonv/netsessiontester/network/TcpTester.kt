@@ -122,6 +122,28 @@ class TcpTester {
         val errors = linkedMapOf<String, Int>()
         var stats = ProtocolStats(protocol = protocol, phase = "建连中", resolvedAddresses = addressText)
         var fdSeen = false
+
+        // CPS 自适应调速：10 CPS 只作为短时保护，不作为长期巡航速度。
+        // 普通情况下按用户设置的 batch/interval 运行；连续无成功才短暂降速，
+        // 只要仍有成功连接，就会阶梯恢复，避免长时间卡在 10 CPS。
+        val normalCps = ((config.batchSize * 1000L) / config.intervalMs).toInt().coerceIn(1, 2_000)
+        var cpsCap = normalCps
+        var consecutiveNoSuccessBatches = 0
+        var lowCpsStartedAt = 0L
+        var lastCpsRecoverAt = 0L
+
+        fun cpsCapLaunchLimit(): Int {
+            return ((cpsCap.toLong() * config.intervalMs + 999L) / 1000L).toInt().coerceAtLeast(1)
+        }
+
+        fun nextRecoveryCps(current: Int): Int = when {
+            current <= 10 -> 30
+            current < 60 -> 60
+            current < 100 -> 100
+            current < 150 -> 150
+            else -> (current * 2).coerceAtMost(normalCps)
+        }.coerceAtMost(normalCps).coerceAtLeast(1)
+
         onStats(stats)
 
         fun recordFailure(key: String) {
@@ -165,14 +187,21 @@ class TcpTester {
             val remainingFailure = config.failureLimit - totalFailure
             if (remainingSuccess <= 0 || remainingFailure <= 0) break
 
+            // 失败上限是硬终止；调速只负责保护速度，不能替代失败上限停止。
+            if (totalFailure >= config.failureLimit) {
+                onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 达到失败上限：${config.failureLimit}，已停止新增"))
+                break
+            }
+
             // 速度优先：没有接近失败上限时按用户设定批量并发。
-            // 只有最后一段才按剩余失败值收缩，避免 0.9.8 的 pending 预限速造成卡顿和只能测到一万多。
+            // 接近失败上限时按剩余失败值收缩，避免一次批量把失败数冲过头。
             val nearFailureCap = totalFailure >= (config.failureLimit * 8 / 10)
-            val requestedLaunchCount = if (nearFailureCap) {
+            val baseLaunchCount = if (nearFailureCap) {
                 minOf(config.batchSize, remainingSuccess, remainingFailure)
             } else {
                 minOf(config.batchSize, remainingSuccess)
             }
+            val requestedLaunchCount = minOf(baseLaunchCount, cpsCapLaunchLimit())
             if (requestedLaunchCount <= 0) break
 
             // FD / heap hard guard. Do not wait for EMFILE/OOM. Stop while the
@@ -191,7 +220,9 @@ class TcpTester {
                 batch.successSockets.forEach { socket -> runCatching { socket.close() } }
                 break
             }
-            totalSuccess += batch.successSockets.size
+            val batchSuccess = batch.successSockets.size
+            val failureBeforeBatch = totalFailure
+            totalSuccess += batchSuccess
             socketLock.withLock {
                 if (releaseEpoch.get() == protocolEpoch) {
                     heldSockets.getValue(protocol).addAll(batch.successSockets)
@@ -200,12 +231,42 @@ class TcpTester {
                 }
             }
             batch.errors.forEach { (key, value) ->
-                repeat(value) { recordFailure(key) }
+                repeat(value) {
+                    if (totalFailure < config.failureLimit) recordFailure(key)
+                }
             }
+            val batchFailure = totalFailure - failureBeforeBatch
             if (batch.errors.keys.any { it == "FD上限" || it == "资源保护" }) {
                 fdSeen = true
             }
             totalAttempts = totalSuccess + totalFailure
+
+            // CPS 调速：连续无成功才短暂降到 10 CPS；10 CPS 最多保护约 5 秒，
+            // 如果仍有成功连接则 10 → 30 → 60 → 100 → 150 → 正常速度阶梯恢复。
+            val nowForCps = System.currentTimeMillis()
+            if (batchSuccess <= 0 && batchFailure > 0) {
+                consecutiveNoSuccessBatches++
+            } else if (batchSuccess > 0) {
+                consecutiveNoSuccessBatches = 0
+            }
+
+            if (consecutiveNoSuccessBatches >= 2 && cpsCap > 10) {
+                cpsCap = minOf(10, normalCps)
+                lowCpsStartedAt = nowForCps
+                lastCpsRecoverAt = nowForCps
+                onLog(LogLine(level = LogLevel.WARN, text = "${protocol.label} 连续批次无成功，短时降速到 ${cpsCap} CPS"))
+            } else if (cpsCap < normalCps) {
+                val lowCpsTooLong = lowCpsStartedAt > 0L && nowForCps - lowCpsStartedAt >= 5_000L
+                val hasSuccessAgain = batchSuccess > 0
+                if ((hasSuccessAgain || lowCpsTooLong) && nowForCps - lastCpsRecoverAt >= 3_000L) {
+                    val oldCps = cpsCap
+                    cpsCap = nextRecoveryCps(cpsCap)
+                    lastCpsRecoverAt = nowForCps
+                    if (cpsCap != oldCps) {
+                        onLog(LogLine(level = LogLevel.WARN, text = "${protocol.label} CPS 恢复：$oldCps → $cpsCap"))
+                    }
+                }
+            }
 
             emitStats()
 
@@ -214,14 +275,18 @@ class TcpTester {
                 break
             }
             if (totalFailure >= config.failureLimit) {
-                onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 达到失败上限：${config.failureLimit}"))
+                onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 达到失败上限：${config.failureLimit}，硬终止并进入统一释放"))
                 break
             }
             delay(config.intervalMs)
         }
 
         val finalActive = activeCount(protocol)
-        val finalPhase = if (fdSeen) "FD上限" else "测试完成"
+        val finalPhase = when {
+            fdSeen -> "FD上限"
+            totalFailure >= config.failureLimit -> "失败上限"
+            else -> "测试完成"
+        }
         val finalStats = stats.copy(
             phase = finalPhase,
             activeSessions = finalActive,
