@@ -437,6 +437,12 @@ private fun NetSessionTesterApp() {
         scope.launch { logStore.append(line); logSizeKb = logStore.sizeKb() }
     }
 
+    fun notifyLocalReleased(prefix: String = "本机已释放") {
+        val message = "$prefix，路由器会话表可能延迟数秒下降"
+        appendLog(LogLine(level = LogLevel.WARN, text = message))
+        scope.launch { snackbarHostState.showSnackbar(message) }
+    }
+
     fun resetCurrentCharts() {
         chartPoints = emptyList()
         lastChartSampleAt = emptyMap()
@@ -470,7 +476,7 @@ private fun NetSessionTesterApp() {
         val avg = valid.takeIf { it.isNotEmpty() }?.average()?.roundToInt()
         pingPoints = (pingPoints.filterNot { it.elapsedSec == sec } + PingPoint(elapsedSec = sec, latencyMs = avg))
             .sortedBy { it.elapsedSec }
-            .takeLast(180)
+            .takeLast(360)
     }
 
     fun alignPingWithSessionEnd() {
@@ -479,7 +485,7 @@ private fun NetSessionTesterApp() {
         val elapsed = ((System.currentTimeMillis() - started) / 1_000L).toInt().coerceAtLeast(0)
         val last = pingPoints.lastOrNull()
         if (last != null && last.elapsedSec < elapsed) {
-            pingPoints = (pingPoints + last.copy(elapsedSec = elapsed)).takeLast(180)
+            pingPoints = (pingPoints + last.copy(elapsedSec = elapsed)).takeLast(360)
         }
     }
 
@@ -619,6 +625,7 @@ private fun NetSessionTesterApp() {
         val summary = buildNetworkInterruptedSummary(reason)
         val closed = tester.release()
         appendLog(LogLine(level = LogLevel.WARN, text = "$reason，已释放连接：$closed 条"))
+        notifyLocalReleased("$reason，本机已释放")
         if (summary != null) {
             appendHistorySafely(summary)
             refreshHistory()
@@ -740,6 +747,7 @@ private fun NetSessionTesterApp() {
                     } else {
                         appendLog(LogLine(level = LogLevel.WARN, text = "测试结束收尾，已释放连接：$closed 条"))
                     }
+                    notifyLocalReleased()
 
                     val finalSummary = summary
                     val finalIpv4 = finalSummary?.ipv4Stats ?: state.ipv4Stats
@@ -816,6 +824,7 @@ private fun NetSessionTesterApp() {
         scope.launch {
             val closed = tester.release()
             appendLog(LogLine(level = LogLevel.WARN, text = "手动停止，已立即释放连接：$closed 条"))
+            notifyLocalReleased("手动停止，本机已释放")
             state = state.copy(
                 isAdding = false,
                 status = "手动停止 · 已释放",
@@ -851,6 +860,7 @@ private fun NetSessionTesterApp() {
         scope.launch {
             val closed = tester.release()
             appendLog(LogLine(level = LogLevel.WARN, text = "已强制释放连接：$closed 条"))
+            notifyLocalReleased("强制释放，本机已释放")
             state = state.copy(
                 isAdding = false,
                 status = "已强制释放",
@@ -1329,7 +1339,8 @@ private fun protocolPeak(stats: ProtocolStats): Int = maxOf(stats.activeSessions
 private fun isAbnormalPhase(phase: String): Boolean = phase.contains("中断") || phase.contains("地址丢失") || phase.contains("解析失败") || phase.contains("异常")
 
 private fun isAbnormalSummary(summary: SessionSummary): Boolean = listOfNotNull(summary.ipv4Stats, summary.ipv6Stats).any { s ->
-    isAbnormalPhase(s.phase) || s.errorSummary.keys.any { it.contains("中断") || it.contains("地址丢失") || it.contains("异常") }
+    val isFd = s.phase.contains("FD", true) || s.errorSummary.keys.any { it.contains("FD", true) }
+    !isFd && (isAbnormalPhase(s.phase) || s.errorSummary.keys.any { it.contains("中断") || it.contains("地址丢失") || it.contains("异常") })
 }
 
 private fun historyConclusion(summary: SessionSummary): String {
@@ -1342,8 +1353,8 @@ private fun historyConclusion(summary: SessionSummary): String {
     val totalFail = listOfNotNull(v4, v6).sumOf { it.totalFailure }
     val timeoutFail = listOfNotNull(v4, v6).sumOf { it.errorSummary["超时"] ?: 0 }
     return when {
-        abnormal -> "本次非正常中断，结果仅供参考。"
         fd -> "触发手机 FD/Socket 上限，不一定代表宽带到顶。"
+        abnormal -> "本次非正常中断，结果仅供参考。"
         v4 != null && v6 != null && v4Peak in 1..999 && v6Peak >= 5000 -> "IPv4 可能是主要瓶颈，优先怀疑 NAT/CGNAT。"
         v4 != null && v6 == null && v4Peak in 1..999 && totalFail > 0 -> "仅 IPv4 偏低且有失败，建议补测 IPv6 判断瓶颈。"
         v6 != null && v4 == null && v6Peak in 1..999 && totalFail > 0 -> "仅 IPv6 偏低且有失败，建议补测 IPv4 对比。"
@@ -1361,8 +1372,8 @@ private fun historyAdvice(summary: SessionSummary): List<String> {
     val totalFail = listOfNotNull(v4, v6).sumOf { it.totalFailure }
     val timeoutFail = listOfNotNull(v4, v6).sumOf { it.errorSummary["超时"] ?: 0 }
     return when {
+        fd -> listOf("本机已触发 FD/Socket 上限，结果更像手机端资源限制。", "观察路由器连接数表，判断宽带侧是否还在增长。", "本机已释放，路由器会话表可能延迟数秒下降。")
         isAbnormalSummary(summary) -> listOf("保持网络不切换后重新测试。", "检查 VPN、WiFi/蜂窝、4G/5G 是否变化。", "非正常中断结果不要直接作为会话上限。")
-        fd -> listOf("降低新增批次或分协议测试。", "观察路由器连接数表，判断宽带侧是否还在增长。", "FD上限更像手机端资源限制。")
         v4 != null && v6 != null && v4Peak in 1..999 && v6Peak >= 5000 -> listOf("IPv4 低、IPv6 高，优先看 IPv4 NAT/CGNAT。", "蜂窝网络可换 APN 或切换 4G/5G 复测。", "WiFi 网络可观察路由器 NAT/连接数表。")
         v4 != null && v6 == null && v4Peak in 1..999 -> listOf("补测 IPv6 或使用分别测试模式。", "如果 IPv6 明显更高，优先怀疑 IPv4 出口策略。", "更换目标站复测排除目标限制。")
         v6 != null && v4 == null && v6Peak in 1..999 -> listOf("补测 IPv4 或使用分别测试模式。", "如果 IPv4 明显更低，可重点排查 IPv4 出口策略。", "更换目标站复测排除目标限制。")
@@ -1994,7 +2005,15 @@ private fun timeLabels(minX: Int, maxX: Int, step: Int): List<Int> {
         if (t > minX) labels.add(t)
         t += step
     }
-    if (labels.lastOrNull() != maxX) labels.add(maxX)
+    if (labels.lastOrNull() != maxX) {
+        val last = labels.lastOrNull() ?: minX
+        // 避免末尾出现 210s、211s 这种挤在一起的标注。
+        if (maxX - last < step / 2f && labels.size > 1) {
+            labels[labels.lastIndex] = maxX
+        } else {
+            labels.add(maxX)
+        }
+    }
     return labels.distinct()
 }
 
@@ -2154,12 +2173,12 @@ private fun MiniMetric(label: String, value: String, color: Color, modifier: Mod
 
 @Composable
 private fun PingLineChart(points: List<PingPoint>) {
-    val sorted = points.sortedBy { it.elapsedSec }.takeLast(120)
+    val sorted = points.sortedBy { it.elapsedSec }
     val values = sorted.mapNotNull { it.latencyMs }
     val maxY = pingYAxisMax(values.maxOrNull() ?: 0)
-    val minX = sorted.firstOrNull()?.elapsedSec ?: 0
-    val maxX = maxOf(minX + 1, sorted.lastOrNull()?.elapsedSec ?: 1)
-    val step = chartXAxisStep(maxX - minX)
+    val minX = 0
+    val maxX = maxOf(1, sorted.lastOrNull()?.elapsedSec ?: 1)
+    val step = chartXAxisStep(maxX)
     Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
         Text("延迟(ms)", color = Muted, fontSize = 10.sp)
         Row(modifier = Modifier.fillMaxWidth().height(154.dp), verticalAlignment = Alignment.CenterVertically) {

@@ -268,18 +268,32 @@ class TcpTester {
 
     suspend fun release(protocol: IpProtocol? = null): Int = withContext(Dispatchers.IO) {
         val targets = if (protocol == null) IpProtocol.entries else listOf(protocol)
-        var closed = 0
+        val socketsToClose = mutableListOf<Socket>()
+
+        // 先从持有列表中移除，再并发关闭。
+        // 这样 UI/activeCount 会立即变为 0，路由器端会话表再等待系统慢慢下降。
         socketLock.withLock {
             targets.forEach { p ->
                 val list = heldSockets.getValue(p)
-                list.forEach { socket ->
-                    runCatching { socket.close() }
-                    closed++
-                }
+                socketsToClose += list.toList()
                 list.clear()
             }
         }
-        closed
+
+        if (socketsToClose.isEmpty()) return@withContext 0
+
+        coroutineScope {
+            socketsToClose.chunked(256).map { chunk ->
+                async(Dispatchers.IO) {
+                    var closed = 0
+                    chunk.forEach { socket ->
+                        runCatching { socket.close() }
+                        closed++
+                    }
+                    closed
+                }
+            }.awaitAll().sum()
+        }
     }
 
     suspend fun activeCount(protocol: IpProtocol): Int = withContext(Dispatchers.IO) {
