@@ -292,3 +292,12 @@ Artifact：NetSessionTester-v0.9.8-final-axis-detail-fix-debug-apk
 - 移除 failure budget 子批次限速，恢复 0.9.7 风格高速批量建连。
 - 高并发 connect timeout 强制上限 800ms，避免长超时拖慢批次。
 - 失败数显示按失败停值封顶，FD 上限仍优先判定。
+
+
+## v0.9.8 097 Core CAS Failure Gate
+
+- 保留 0.9.7 高速建连核心，不做 pending 预限速，不牺牲 CPS。
+- 新增 CAS FailureGate：失败数用 AtomicInteger compareAndSet 精准封顶，避免 200 跑成 275/900+。
+- 达到失败上限时立即关闭 pending socket，避免等待长 timeout。
+- FD / Socket 上限优先触发熔断，保留已建立会话并避免闪退。
+- 保留 release 签名配置和 GitHub Actions signed APK 输出。
