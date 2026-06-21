@@ -13,15 +13,18 @@ android {
         minSdk = 26
         targetSdk = 35
         versionCode = 56
-        versionName = "0.9.8-097-speed-core"
+        versionName = "0.9.8"
         vectorDrawables { useSupportLibrary = true }
     }
 
+
+
+    val releaseKeystorePath = System.getenv("ANDROID_KEYSTORE_PATH")
+
     signingConfigs {
         create("release") {
-            val path = System.getenv("ANDROID_KEYSTORE_PATH")
-            if (!path.isNullOrBlank()) {
-                storeFile = file(path)
+            if (!releaseKeystorePath.isNullOrBlank()) {
+                storeFile = file(releaseKeystorePath)
                 storePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
                 keyAlias = System.getenv("ANDROID_KEY_ALIAS")
                 keyPassword = System.getenv("ANDROID_KEY_PASSWORD")
@@ -33,7 +36,9 @@ android {
         release {
             isMinifyEnabled = false
             isShrinkResources = false
-            signingConfig = signingConfigs.getByName("release")
+            if (!releaseKeystorePath.isNullOrBlank()) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
         debug {
             isDebuggable = true

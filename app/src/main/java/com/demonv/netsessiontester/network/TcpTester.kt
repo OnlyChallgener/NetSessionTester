@@ -32,6 +32,11 @@ import java.net.UnknownHostException
 import java.util.Collections
 
 class TcpTester {
+    private companion object {
+        // 高并发会话测试不能被长连接超时拖慢；用户设置更低时尊重用户设置。
+        const val MAX_EFFECTIVE_CONNECT_TIMEOUT_MS = 800
+    }
+
     private val socketLock = Mutex()
     private val heldSockets: MutableMap<IpProtocol, MutableList<Socket>> = mutableMapOf(
         IpProtocol.IPV4 to Collections.synchronizedList(mutableListOf()),
@@ -101,27 +106,26 @@ class TcpTester {
         var stats = ProtocolStats(protocol = protocol, phase = "建连中", resolvedAddresses = addressText)
         onStats(stats)
 
+        val effectiveTimeoutMs = config.timeoutMs.coerceAtMost(MAX_EFFECTIVE_CONNECT_TIMEOUT_MS)
+        if (effectiveTimeoutMs != config.timeoutMs) {
+            onLog(LogLine(level = LogLevel.WARN, text = "${protocol.label} 高并发连接超时已限制为 ${effectiveTimeoutMs}ms，避免长超时拖慢批次"))
+        }
+
         while (currentCoroutineContext().isActive && totalSuccess < config.successLimit && totalFailure < config.failureLimit) {
             val remainingSuccess = config.successLimit - totalSuccess
             val targetBatch = minOf(config.batchSize, remainingSuccess)
             if (targetBatch <= 0) break
 
-            // 不再用 failureLimit 直接限制每批新增，避免“新增”被固定成 200。
-            // 逻辑：无失败时可按用户设置的 500/1000 批量新增；一旦出现失败，后续自动缩小子批次，
-            // 让最终失败数尽量靠近失败停值，而不是大幅超出。
-            val batchResult = openBatchWithFailureBudget(
-                addresses = addresses,
-                port = config.port,
-                timeoutMs = config.timeoutMs,
-                targetCount = targetBatch,
-                failureBudget = (config.failureLimit - totalFailure).coerceAtLeast(0)
-            )
+            // 0.9.7 高速核心：不做 pending 预限速，不按失败额度拆小批次。
+            // 失败停是停止条件，不是提前限速条件；这样 IPv6 可继续冲到 Android FD/Socket 附近。
+            val batchResult = openBatch(addresses, config.port, effectiveTimeoutMs, targetBatch)
 
             totalSuccess += batchResult.successSockets.size
-            val failAdd = batchResult.errors.values.sum()
+            val rawFailAdd = batchResult.errors.values.sum()
+            val failAdd = rawFailAdd.coerceAtMost((config.failureLimit - totalFailure).coerceAtLeast(0))
             totalFailure += failAdd
             totalAttempts += batchResult.successSockets.size + failAdd
-            batchResult.errors.forEach { (key, value) -> errors[key] = (errors[key] ?: 0) + value }
+            mergeErrorsCapped(errors, batchResult.errors, failAdd)
 
             socketLock.withLock { heldSockets.getValue(protocol).addAll(batchResult.successSockets) }
 
@@ -146,7 +150,11 @@ class TcpTester {
             )
             onStats(stats)
             val successDeltaText = if (batchResult.successSockets.size != config.batchSize) "(+${batchResult.successSockets.size})" else ""
-            val failureDeltaText = if (failAdd > 0) "(+$failAdd)" else ""
+            val failureDeltaText = when {
+                rawFailAdd > failAdd && failAdd > 0 -> "(+$failAdd)"
+                failAdd > 0 -> "(+$failAdd)"
+                else -> ""
+            }
             onLog(LogLine(level = LogLevel.STAT, text = "${protocol.label} 统计 - 成功：$totalSuccess$successDeltaText | 失败：$totalFailure$failureDeltaText | 活动：$active | 总计：$totalAttempts | 新增：$added | CPS：${cps}/秒"))
 
             if (batchResult.errors.containsKey("FD上限")) {
@@ -186,40 +194,21 @@ class TcpTester {
         return finalStats
     }
 
-    private suspend fun openBatchWithFailureBudget(
-        addresses: List<InetAddress>,
-        port: Int,
-        timeoutMs: Int,
-        targetCount: Int,
-        failureBudget: Int
-    ): BatchOpenResult {
-        val allSockets = mutableListOf<Socket>()
-        val allErrors = linkedMapOf<String, Int>()
-        var attempted = 0
-        var failed = 0
-        var cautious = false
-
-        while (currentCoroutineContext().isActive && attempted < targetCount && failed < failureBudget) {
-            val remainingTarget = targetCount - attempted
-            val remainingFailureBudget = failureBudget - failed
-
-            // 正常网络下用 100 并发子批次，出现失败后降到 25，避免失败数冲太多。
-            val maxChunk = if (cautious) 25 else 100
-            val chunkSize = minOf(remainingTarget, maxChunk, remainingFailureBudget.coerceAtLeast(1))
-            if (chunkSize <= 0) break
-
-            val result = openBatch(addresses, port, timeoutMs, chunkSize)
-            val failAdd = result.errors.values.sum()
-
-            allSockets += result.successSockets
-            result.errors.forEach { (key, value) -> allErrors[key] = (allErrors[key] ?: 0) + value }
-
-            attempted += result.successSockets.size + failAdd
-            failed += failAdd
-            if (failAdd > 0) cautious = true
+    private fun mergeErrorsCapped(
+        target: MutableMap<String, Int>,
+        source: Map<String, Int>,
+        maxToAdd: Int
+    ) {
+        var remaining = maxToAdd
+        if (remaining <= 0) return
+        source.forEach { (key, value) ->
+            if (remaining <= 0) return@forEach
+            val add = minOf(value, remaining)
+            if (add > 0) {
+                target[key] = (target[key] ?: 0) + add
+                remaining -= add
+            }
         }
-
-        return BatchOpenResult(allSockets, allErrors)
     }
 
     private suspend fun openBatch(
