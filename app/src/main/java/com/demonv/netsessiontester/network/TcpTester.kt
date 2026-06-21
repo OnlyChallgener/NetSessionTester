@@ -40,6 +40,12 @@ class TcpTester {
         const val MAX_EFFECTIVE_CONNECT_TIMEOUT_MS = 800
         // 活动会话超过这个值后，失败上限不再提前结束，继续追 FD 上限。
         const val FD_CHASE_THRESHOLD = 5000
+        // 高活动会话后如果失败已到上限，不再按失败停提前结束；继续冲 FD。
+        // 若高位连续几轮没有任何新增成功，很多 Android 机型不会明确抛 EMFILE，
+        // 这里按“接近 FD 上限并停滞”归类为 FD 上限，避免误判为普通失败。
+        const val FD_NEAR_ACTIVE_THRESHOLD = 28000
+        const val FD_STAGNANT_ROUNDS = 3
+        const val LOW_FAILURE_STOP_ACTIVE_THRESHOLD = 1200
     }
 
     private val socketLock = Mutex()
@@ -139,6 +145,7 @@ class TcpTester {
         var totalAttempts = 0
         var maxStable = 0
         var lastTotalAttempts = 0
+        var stagnantAfterFailureLimitRounds = 0
         val errors = linkedMapOf<String, Int>()
         var stats = ProtocolStats(protocol = protocol, phase = "建连中", resolvedAddresses = addressText)
         val failureGate = FailureGate(config.failureLimit)
@@ -172,6 +179,11 @@ class TcpTester {
             val added = totalAttempts - lastTotalAttempts
             lastTotalAttempts = totalAttempts
             val cps = (added * 1000L / config.intervalMs.coerceAtLeast(1L)).toInt()
+            stagnantAfterFailureLimitRounds = if (failureGate.isLimitReached() && batchResult.successSockets.isEmpty()) {
+                stagnantAfterFailureLimitRounds + 1
+            } else {
+                0
+            }
 
             stats = ProtocolStats(
                 protocol = protocol,
@@ -202,11 +214,29 @@ class TcpTester {
             }
 
             // 失败上限策略：
-            // - 活动会话较低时，失败停用于判定网络/目标已经失败，立即结束。
-            // - 活动会话已经较高时，不因失败上限提前刹车，继续冲 Android FD/Socket 上限。
-            if (failureGate.isLimitReached() && active < FD_CHASE_THRESHOLD) {
-                onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 达到失败上限：${config.failureLimit}"))
-                break
+            // - 失败数用 CAS 封顶，只作为显示和低会话网络的停止条件。
+            // - 活动会话已明显进入高位后，不再因为失败数到上限就提前结束，继续追 Android FD/Socket 上限。
+            // - 部分 Android 机型接近 FD 上限时不会稳定抛出 EMFILE，而是表现为超时/Socket异常；
+            //   高位且连续无新增成功时，按 FD 上限处理，避免误判为普通失败。
+            if (failureGate.isLimitReached()) {
+                val shouldStopAsLowFailure = active < LOW_FAILURE_STOP_ACTIVE_THRESHOLD && totalSuccess < FD_CHASE_THRESHOLD
+                val shouldTreatAsFdLimit = active >= FD_NEAR_ACTIVE_THRESHOLD && stagnantAfterFailureLimitRounds >= FD_STAGNANT_ROUNDS
+
+                if (shouldTreatAsFdLimit) {
+                    errors["FD上限"] = (errors["FD上限"] ?: 0) + 1
+                    stats = stats.copy(
+                        phase = "FD上限",
+                        errorSummary = errors.toMap()
+                    )
+                    onStats(stats)
+                    onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 接近 Android FD上限并连续无新增，按FD上限停止：活动 $active 失败 ${failureGate.value()}"))
+                    break
+                }
+
+                if (shouldStopAsLowFailure) {
+                    onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 达到失败上限：${config.failureLimit}"))
+                    break
+                }
             }
             delay(config.intervalMs)
         }

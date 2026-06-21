@@ -27,6 +27,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.clickable
@@ -1687,11 +1688,12 @@ private fun SoftCard(content: @Composable ColumnScope.() -> Unit) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = ShapeL,
-        colors = CardDefaults.cardColors(containerColor = OneUiSurface.copy(alpha = 0.985f)),
-        elevation = CardDefaults.cardElevation(defaultElevation = 5.dp)
+        colors = CardDefaults.cardColors(containerColor = OneUiSurface),
+        elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
+        border = BorderStroke(0.7.dp, OneUiStroke)
     ) {
         Column(
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 13.dp),
+            modifier = Modifier.padding(horizontal = 15.dp, vertical = 14.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
             content = content
         )
@@ -1703,7 +1705,7 @@ private fun SectionTitle(mark: String, title: String, color: Color) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         MarkBox(mark, color.copy(alpha = 0.13f), color)
         Spacer(Modifier.width(9.dp))
-        Text(title, fontSize = 16.sp, lineHeight = 19.sp, fontWeight = FontWeight.ExtraBold, color = TextDark)
+        Text(title, fontSize = 15.sp, lineHeight = 18.sp, fontWeight = FontWeight.ExtraBold, color = TextDark)
     }
 }
 
@@ -2666,8 +2668,8 @@ private fun String.onlyDigits(): String = filter { it.isDigit() }
 private val IPV4_REGEX = Regex("""\b(?:\d{1,3}\.){3}\d{1,3}\b""")
 private val IPV6_REGEX = Regex("""(?i)(?<![\w.])(?:[0-9a-f]{1,4}:){2,}[0-9a-f]{0,4}(?:%[\w.]+)?(?![\w.])""")
 
-private val BgTop = Color(0xFFF7FAFF)
-private val Bg = Color(0xFFF2F5FB)
+private val BgTop = Color(0xFFFAFCFF)
+private val Bg = Color(0xFFEEF4FC)
 private val TextDark = Color(0xFF101826)
 private val Muted = Color(0xFF66758A)
 private val Border = Color(0xFFE6EAF1)
@@ -2680,10 +2682,11 @@ private val RedSoft = Color(0xFFFFEEF0)
 private val Orange = Color(0xFFFF8A22)
 private val Purple = Color(0xFF8652F6)
 private val Navy = Color(0xFF0B2A5E)
-private val OneUiSurface = Color(0xFFFEFEFF)
-private val OneUiTile = Color(0xFFF7F9FD)
-private val OneUiBottom: Color = Color(0xFFEAF2FF)
-private val OneUiSelected = Color(0xFFEBDDFE)
-private val ShapeL = RoundedCornerShape(30.dp)
-private val ShapeM = RoundedCornerShape(22.dp)
-private val ShapeS = RoundedCornerShape(16.dp)
+private val OneUiSurface = Color(0xFFFFFFFF)
+private val OneUiTile = Color(0xFFF4F7FC)
+private val OneUiBottom: Color = Color(0xFFE8F1FF)
+private val OneUiSelected = Color(0xFFEAD7FF)
+private val OneUiStroke = Color(0xFFE7EDF6)
+private val ShapeL = RoundedCornerShape(34.dp)
+private val ShapeM = RoundedCornerShape(24.dp)
+private val ShapeS = RoundedCornerShape(18.dp)
