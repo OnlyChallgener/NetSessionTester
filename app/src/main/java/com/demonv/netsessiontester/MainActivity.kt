@@ -150,6 +150,7 @@ import com.demonv.netsessiontester.ui.theme.NetSessionTesterTheme
 import com.demonv.netsessiontester.util.CsvExporter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -158,8 +159,14 @@ import java.io.BufferedInputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.io.OutputStreamWriter
+import java.net.DatagramPacket
+import java.net.DatagramSocket
 import java.net.HttpURLConnection
+import java.net.Inet4Address
+import java.net.Inet6Address
+import java.net.InetAddress
 import java.net.InetSocketAddress
+import java.net.NetworkInterface
 import java.net.Socket
 import java.net.URL
 import kotlin.math.roundToInt
@@ -371,6 +378,20 @@ private data class NetworkEnvironment(
     val hasInternet: Boolean = false
 )
 
+private data class NetworkProbeInfo(
+    val localIp: String = "检测中",
+    val natType: String = "检测中",
+    val latencyText: String = "检测中",
+    val portText: String = "检测中",
+    val priority: String = "检测中"
+)
+
+private data class StunProbeResult(
+    val mappedIp: String,
+    val mappedPort: Int,
+    val localPort: Int
+)
+
 private fun detectNetworkEnvironment(context: Context): NetworkEnvironment {
     val connectivity = context.getSystemService(ConnectivityManager::class.java)
     val caps = connectivity?.activeNetwork?.let { connectivity.getNetworkCapabilities(it) }
@@ -409,6 +430,138 @@ private fun displayCarrierFromEnv(env: NetworkEnvironment, ipv6: String): String
         env.hasWifi -> "WiFi"
         else -> "未知"
     }
+}
+
+
+private suspend fun detectNetworkProbe(publicIpResult: PublicIpResult): NetworkProbeInfo = withContext(Dispatchers.IO) {
+    val localIpv4 = localIpv4Addresses().firstOrNull()
+    val localIpv6 = localIpv6Addresses().firstOrNull()
+    val stun = runCatching { stunBindingProbe() }.getOrNull()
+    val latencyMs = runCatching { tcpConnectLatencyMs("www.baidu.com", 80, 1500) }.getOrNull()
+    val tcpPort = runCatching { detectTcpLocalPort("www.baidu.com", 80, 1500) }.getOrNull()
+    val publicV4 = publicIpResult.ipv4.takeIf { isUsableIpv4(it) }
+    val priority = when {
+        publicIpResult.ipv6.isUsableIpText() -> "IPv6"
+        publicV4 != null -> "IPv4"
+        else -> "未知"
+    }
+    val natType = when {
+        publicV4 == null -> "NAT4"
+        localIpv4 != null && !isPrivateIpv4(localIpv4) && localIpv4 == publicV4 -> "NAT1"
+        stun != null && stun.mappedPort == stun.localPort -> "NAT2"
+        stun != null -> "NAT3"
+        else -> "NAT4"
+    }
+    NetworkProbeInfo(
+        localIp = localIpv4 ?: localIpv6 ?: "不可用",
+        natType = natType,
+        latencyText = latencyMs?.let { "${it}ms" } ?: "不可用",
+        portText = stun?.mappedPort?.toString() ?: tcpPort?.toString() ?: "不可用",
+        priority = priority
+    )
+}
+
+private fun String.isUsableIpText(): Boolean {
+    val v = trim()
+    return v.isNotBlank() && v != "不可用" && v != "检测中" && v != "未知"
+}
+
+private fun isUsableIpv4(value: String): Boolean {
+    val v = value.trim()
+    return v.isUsableIpText() && v.count { it == '.' } == 3
+}
+
+private fun localIpv4Addresses(): List<String> = runCatching {
+    NetworkInterface.getNetworkInterfaces().toListCompat().flatMap { it.inetAddresses.toListCompat() }
+        .filterIsInstance<Inet4Address>()
+        .filter { !it.isLoopbackAddress }
+        .mapNotNull { it.hostAddress }
+        .distinct()
+}.getOrDefault(emptyList())
+
+private fun localIpv6Addresses(): List<String> = runCatching {
+    NetworkInterface.getNetworkInterfaces().toListCompat().flatMap { it.inetAddresses.toListCompat() }
+        .filterIsInstance<Inet6Address>()
+        .filter { !it.isLoopbackAddress && !it.isLinkLocalAddress }
+        .mapNotNull { it.hostAddress?.substringBefore('%') }
+        .distinct()
+}.getOrDefault(emptyList())
+
+private fun <T> java.util.Enumeration<T>.toListCompat(): List<T> {
+    val list = mutableListOf<T>()
+    while (hasMoreElements()) list += nextElement()
+    return list
+}
+
+private fun isPrivateIpv4(ip: String): Boolean {
+    val parts = ip.split('.').mapNotNull { it.toIntOrNull() }
+    if (parts.size != 4) return true
+    val a = parts[0]
+    val b = parts[1]
+    return a == 10 ||
+        (a == 172 && b in 16..31) ||
+        (a == 192 && b == 168) ||
+        a == 127 ||
+        (a == 169 && b == 254) ||
+        (a == 100 && b in 64..127)
+}
+
+private fun tcpConnectLatencyMs(host: String, port: Int, timeoutMs: Int): Int {
+    val start = System.currentTimeMillis()
+    Socket().use { socket ->
+        socket.connect(InetSocketAddress(host, port), timeoutMs)
+    }
+    return (System.currentTimeMillis() - start).toInt().coerceAtLeast(1)
+}
+
+private fun detectTcpLocalPort(host: String, port: Int, timeoutMs: Int): Int {
+    Socket().use { socket ->
+        socket.connect(InetSocketAddress(host, port), timeoutMs)
+        return socket.localPort
+    }
+}
+
+private fun stunBindingProbe(): StunProbeResult {
+    val server = InetAddress.getByName("stun.l.google.com")
+    val port = 19302
+    val tx = ByteArray(12) { (System.nanoTime().shr((it % 8) * 8).toInt() and 0xFF).toByte() }
+    val req = ByteArray(20)
+    req[1] = 0x01.toByte()
+    req[4] = 0x21.toByte()
+    req[5] = 0x12.toByte()
+    req[6] = 0xA4.toByte()
+    req[7] = 0x42.toByte()
+    System.arraycopy(tx, 0, req, 8, 12)
+    DatagramSocket().use { socket ->
+        socket.soTimeout = 1600
+        val localPort = socket.localPort
+        socket.send(DatagramPacket(req, req.size, server, port))
+        val buf = ByteArray(512)
+        val packet = DatagramPacket(buf, buf.size)
+        socket.receive(packet)
+        val data = packet.data
+        val length = packet.length
+        var pos = 20
+        while (pos + 4 <= length) {
+            val type = ((data[pos].toInt() and 0xFF) shl 8) or (data[pos + 1].toInt() and 0xFF)
+            val attrLen = ((data[pos + 2].toInt() and 0xFF) shl 8) or (data[pos + 3].toInt() and 0xFF)
+            val value = pos + 4
+            if (value + attrLen <= length && type == 0x0020 && attrLen >= 8) {
+                val family = data[value + 1].toInt() and 0xFF
+                if (family == 0x01) {
+                    val xPort = ((data[value + 2].toInt() and 0xFF) shl 8) or (data[value + 3].toInt() and 0xFF)
+                    val mappedPort = xPort xor 0x2112
+                    val ipBytes = ByteArray(4)
+                    val magic = byteArrayOf(0x21.toByte(), 0x12.toByte(), 0xA4.toByte(), 0x42.toByte())
+                    for (i in 0..3) ipBytes[i] = ((data[value + 4 + i].toInt() xor magic[i].toInt()) and 0xFF).toByte()
+                    val mappedIp = InetAddress.getByAddress(ipBytes).hostAddress ?: ""
+                    return StunProbeResult(mappedIp, mappedPort, localPort)
+                }
+            }
+            pos += 4 + ((attrLen + 3) / 4) * 4
+        }
+    }
+    error("STUN无响应")
 }
 
 private fun currentNetworkSignature(context: Context): String {
@@ -487,6 +640,7 @@ private fun NetSessionTesterApp() {
     var historyCounts by remember { mutableStateOf(HistoryCounts()) }
     var publicIpResult by remember { mutableStateOf(PublicIpResult()) }
     var publicIpLoading by remember { mutableStateOf(false) }
+    var networkProbeInfo by remember { mutableStateOf(NetworkProbeInfo()) }
     var manualStopRequested by remember { mutableStateOf(false) }
     var currentTestConfig by remember { mutableStateOf<SessionConfig?>(null) }
     var currentStartedAt by remember { mutableStateOf(0L) }
@@ -497,6 +651,7 @@ private fun NetSessionTesterApp() {
     var pingJob by remember { mutableStateOf<Job?>(null) }
     var networkWatchJob by remember { mutableStateOf<Job?>(null) }
     var testNetworkSignature by remember { mutableStateOf("") }
+    var activeRunId by remember { mutableStateOf(0L) }
 
     var detailTitle by remember { mutableStateOf<String?>(null) }
     var detailLines by remember { mutableStateOf<List<String>>(emptyList()) }
@@ -573,7 +728,9 @@ private fun NetSessionTesterApp() {
     fun refreshPublicIp() {
         scope.launch {
             publicIpLoading = true
-            publicIpResult = PublicIpDetector.detect()
+            val result = PublicIpDetector.detect()
+            publicIpResult = result
+            networkProbeInfo = detectNetworkProbe(result)
             publicIpLoading = false
         }
     }
@@ -888,16 +1045,25 @@ private fun NetSessionTesterApp() {
 
     suspend fun interruptForNetworkChange(reason: String = "网络环境变化") {
         if (!state.isAdding) return
+        val summary = buildNetworkInterruptedSummary(reason)
         manualStopRequested = true
+        activeRunId = 0L
+        state = state.copy(
+            isAdding = false,
+            status = "$reason · 释放中",
+            error = reason,
+            ipv4Stats = state.ipv4Stats.copy(activeSessions = 0, phase = if (state.ipv4Stats.totalAttempts > 0) "已释放" else state.ipv4Stats.phase),
+            ipv6Stats = state.ipv6Stats.copy(activeSessions = 0, phase = if (state.ipv6Stats.totalAttempts > 0) "已释放" else state.ipv6Stats.phase)
+        )
         runningJob?.cancel()
         runningJob = null
         alignPingWithSessionEnd()
+        currentStartedAt = 0L
         pingJob?.cancel()
         pingJob = null
-        networkWatchJob?.cancel()
+        if (networkWatchJob != currentCoroutineContext()[Job]) networkWatchJob?.cancel()
         networkWatchJob = null
         appendLog(LogLine(level = LogLevel.ERROR, text = "$reason，已中断测试并保存历史。"))
-        val summary = buildNetworkInterruptedSummary(reason)
         val closed = tester.release()
         appendLog(LogLine(level = LogLevel.WARN, text = "$reason，已释放连接：$closed 条"))
         notifyLocalReleased("$reason，本机已释放")
@@ -947,6 +1113,7 @@ private fun NetSessionTesterApp() {
         startForegroundNotice(context, "建连中：${config.mode.label}，目标 ${config.successLimit}")
         val startedAt = System.currentTimeMillis()
         currentStartedAt = startedAt
+        activeRunId = startedAt
         currentTestConfig = config
         testNetworkSignature = currentNetworkSignature(context)
         resetCurrentCharts()
@@ -975,7 +1142,8 @@ private fun NetSessionTesterApp() {
                 }
                 val pair = tester.runSessionHoldTest(
                     rawConfig = config,
-                    onStats = { stats ->
+                    onStats = statsHandler@ { stats ->
+                        if (activeRunId != startedAt || !state.isAdding) return@statsHandler
                         recordChartPoint(stats)
                         state = when (stats.protocol) {
                             IpProtocol.IPV4 -> state.copy(ipv4Stats = stats, status = "${stats.protocol.label} ${stats.phase}")
@@ -1028,6 +1196,8 @@ private fun NetSessionTesterApp() {
                     val finalIpv4 = finalSummary?.ipv4Stats ?: state.ipv4Stats
                     val finalIpv6 = finalSummary?.ipv6Stats ?: state.ipv6Stats
 
+                    activeRunId = 0L
+                    currentStartedAt = 0L
                     state = state.copy(
                         isAdding = false,
                         status = if (completedNormally) "测试完成 · 已释放" else "测试中断 · 已释放",
@@ -1096,6 +1266,14 @@ private fun NetSessionTesterApp() {
         networkWatchJob = null
         appendLog(LogLine(level = LogLevel.WARN, text = "手动停止；已停止新增并保存历史。"))
         saveManualStopSummary("手动停止")
+        activeRunId = 0L
+        currentStartedAt = 0L
+        state = state.copy(
+            isAdding = false,
+            status = "手动停止 · 释放中",
+            ipv4Stats = state.ipv4Stats.copy(activeSessions = 0, phase = if (state.ipv4Stats.totalAttempts > 0) "已释放" else state.ipv4Stats.phase),
+            ipv6Stats = state.ipv6Stats.copy(activeSessions = 0, phase = if (state.ipv6Stats.totalAttempts > 0) "已释放" else state.ipv6Stats.phase)
+        )
         scope.launch {
             val closed = tester.release()
             appendLog(LogLine(level = LogLevel.WARN, text = "手动停止，已立即释放连接：$closed 条"))
@@ -1123,7 +1301,17 @@ private fun NetSessionTesterApp() {
             networkWatchJob = null
             appendLog(LogLine(level = LogLevel.WARN, text = "强制释放；已停止测试并保存历史。"))
             saveManualStopSummary("强制释放")
+            activeRunId = 0L
+            currentStartedAt = 0L
+            state = state.copy(
+                isAdding = false,
+                status = "强制释放 · 释放中",
+                ipv4Stats = state.ipv4Stats.copy(activeSessions = 0, phase = if (state.ipv4Stats.totalAttempts > 0) "已释放" else state.ipv4Stats.phase),
+                ipv6Stats = state.ipv6Stats.copy(activeSessions = 0, phase = if (state.ipv6Stats.totalAttempts > 0) "已释放" else state.ipv6Stats.phase)
+            )
         } else {
+            activeRunId = 0L
+            currentStartedAt = 0L
             runningJob?.cancel()
             runningJob = null
             alignPingWithSessionEnd()
@@ -1316,6 +1504,7 @@ private fun NetSessionTesterApp() {
                     result = state.resolveResult,
                     publicIpResult = publicIpResult,
                     networkEnvironment = detectNetworkEnvironment(context),
+                    networkProbeInfo = networkProbeInfo,
                     publicIpLoading = publicIpLoading,
                     onRefreshPublicIp = { refreshPublicIp() },
                     onCopyPublicIpv4 = { copyText(publicIpResult.ipv4, "IPv4出口地址") },
@@ -1707,6 +1896,7 @@ private fun SettingsPage(
     result: com.demonv.netsessiontester.model.ResolveResult,
     publicIpResult: PublicIpResult,
     networkEnvironment: NetworkEnvironment,
+    networkProbeInfo: NetworkProbeInfo,
     publicIpLoading: Boolean,
     onRefreshPublicIp: () -> Unit,
     onCopyPublicIpv4: () -> Unit,
@@ -1772,6 +1962,7 @@ private fun SettingsPage(
             NetworkEnvironmentSettingsCard(
                 env = networkEnvironment,
                 publicIpResult = publicIpResult,
+                probeInfo = networkProbeInfo,
                 publicIpLoading = publicIpLoading,
                 maskPrivacy = maskPrivacy,
                 onRefresh = onRefreshPublicIp,
@@ -2068,7 +2259,7 @@ private fun PageTitle(
                             .padding(horizontal = 7.dp, vertical = 3.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text("v0.9.8", color = Blue, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        Text("v0.9.9", color = Blue, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                         if (updateProgress != null) {
                             Spacer(Modifier.width(4.dp))
                             Text("${updateProgress}%", color = Purple, fontSize = 9.sp, fontWeight = FontWeight.Bold)
@@ -2114,9 +2305,10 @@ private fun VersionInfoDialog(
             Column(verticalArrangement = Arrangement.spacedBy(9.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("当前版本", color = Muted, fontSize = 12.sp, modifier = Modifier.weight(1f))
-                    StatusChip("v0.9.8", BlueSoft, Blue, compact = true)
+                    StatusChip("v0.9.9", BlueSoft, Blue, compact = true)
                 }
-                VersionLine("v0.9.8", "当前稳定包：保留 0.9.7 高速测速核心，修复释放提示、Ping 轴和网络变化中断。")
+                VersionLine("v0.9.9", "修复释放状态同步；新增 NAT类型、延迟、端口、优先级网络信息卡。")
+                VersionLine("v0.9.8", "保留 0.9.7 高速测速核心，新增更新检测与后台下载。")
                 VersionLine("v0.9.7", "修复 FD 上限附近闪退；触发FD上限时优先释放本机连接并保存历史。")
                 VersionLine("v0.9.6", "修复停止按钮、通知跳转、新增批次被200锁死的问题。")
                 VersionLine("v0.9.5", "优化运行日志、历史记录保存、详情展示与备注。")
@@ -2162,7 +2354,7 @@ private fun UpdateAvailableDialog(
                 Spacer(Modifier.width(10.dp))
                 Column(Modifier.weight(1f)) {
                     Text(info.title.ifBlank { "发现新版本 v${info.versionName}" }, fontWeight = FontWeight.ExtraBold, color = TextDark)
-                    Text("当前 v0.9.8 → 最新 v${info.versionName}", color = Muted, fontSize = 12.sp)
+                    Text("当前 v0.9.9 → 最新 v${info.versionName}", color = Muted, fontSize = 12.sp)
                 }
                 IconButton(onClick = onDismiss) { Icon(Icons.Filled.Close, contentDescription = "关闭", tint = Muted) }
             }
@@ -2570,6 +2762,7 @@ private fun HistoryBarRow(label: String, value: Int, maxValue: Int, color: Color
 private fun NetworkEnvironmentSettingsCard(
     env: NetworkEnvironment,
     publicIpResult: PublicIpResult,
+    probeInfo: NetworkProbeInfo,
     publicIpLoading: Boolean,
     maskPrivacy: Boolean,
     onRefresh: () -> Unit,
@@ -2578,29 +2771,65 @@ private fun NetworkEnvironmentSettingsCard(
 ) {
     SoftCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            SectionTitle("∿", "网络环境", Purple)
+            SectionTitle("i", "网络信息", Purple)
             Spacer(Modifier.weight(1f))
             TextButton(onClick = onRefresh) { Text(if (publicIpLoading) "检测中" else "刷新", fontSize = 12.sp) }
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            MetricTile("网络", env.typeLabel, Blue, Modifier.weight(1f))
-            MetricTile("运营商", displayCarrierFromEnv(env, publicIpResult.ipv6), Purple, Modifier.weight(1f))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            InfoMetricTile("⌂", "本地IP", if (maskPrivacy) maskIpText(probeInfo.localIp) else probeInfo.localIp, Color(0xFFE0F7FA), Color(0xFF00A7C6), Modifier.weight(1f))
+            InfoMetricTile("◴", "延迟", probeInfo.latencyText, Color(0xFFFFF3E0), Orange, Modifier.weight(1f))
         }
-        PublicExitLine(
-            label = "IPv4 出口",
-            value = if (maskPrivacy) maskIpText(publicIpResult.ipv4) else publicIpResult.ipv4,
-            copyValue = publicIpResult.ipv4,
-            onCopy = onCopyPublicIpv4
-        )
-        PublicExitLine(
-            label = "IPv6 出口",
-            value = if (maskPrivacy) maskIpText(publicIpResult.ipv6) else publicIpResult.ipv6,
-            copyValue = publicIpResult.ipv6,
-            onCopy = onCopyPublicIpv6
-        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            InfoMetricTile("◎", "公网IP", if (maskPrivacy) maskIpText(publicIpResult.ipv4) else publicIpResult.ipv4, BlueSoft, Blue, Modifier.weight(1f), onClick = onCopyPublicIpv4)
+            InfoMetricTile("#", "端口", probeInfo.portText, Color(0xFFFCE7F3), Color(0xFFD946EF), Modifier.weight(1f))
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            InfoMetricTile("✓", "IPv6", if (maskPrivacy) maskIpText(publicIpResult.ipv6) else publicIpResult.ipv6, GreenSoft, Green, Modifier.weight(1f), onClick = onCopyPublicIpv6)
+            InfoMetricTile("↕", "优先级", probeInfo.priority, Color(0xFFFFF3E0), Orange, Modifier.weight(1f))
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            InfoMetricTile("N", "NAT类型", probeInfo.natType, Color(0xFFFFE4E6), ErrorRed, Modifier.weight(1f))
+            InfoMetricTile("∿", "网络", env.typeLabel, Color(0xFFF3E8FF), Purple, Modifier.weight(1f))
+        }
         FlowRow(horizontalArrangement = Arrangement.spacedBy(7.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             StatusChip(if (env.hasInternet) "可访问互联网" else "无互联网能力", if (env.hasInternet) GreenSoft else RedSoft, if (env.hasInternet) Green else ErrorRed, compact = true)
+            StatusChip("运营商 ${displayCarrierFromEnv(env, publicIpResult.ipv6)}", Color(0xFFF3E8FF), Purple, compact = true)
             if (env.hasVpn) StatusChip("VPN开启", Color(0xFFF3E8FF), Purple, compact = true)
+        }
+    }
+}
+
+@Composable
+private fun InfoMetricTile(
+    icon: String,
+    label: String,
+    value: String,
+    iconBg: Color,
+    iconColor: Color,
+    modifier: Modifier = Modifier,
+    onClick: (() -> Unit)? = null
+) {
+    val clickableModifier = if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = modifier
+            .heightIn(min = 58.dp)
+            .background(Color(0xFFF8FAFC), ShapeM)
+            .then(clickableModifier)
+            .padding(9.dp)
+    ) {
+        MarkBox(icon, iconBg, iconColor)
+        Spacer(Modifier.width(8.dp))
+        Column(Modifier.weight(1f)) {
+            Text(label, color = Muted, fontSize = 11.sp, maxLines = 1)
+            Text(
+                value,
+                color = TextDark,
+                fontWeight = FontWeight.Bold,
+                fontSize = 14.sp,
+                maxLines = 1,
+                modifier = Modifier.horizontalScroll(rememberScrollState())
+            )
         }
     }
 }

@@ -30,6 +30,7 @@ import java.net.SocketException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 import java.util.Collections
+import java.util.concurrent.atomic.AtomicLong
 
 class TcpTester {
     private val socketLock = Mutex()
@@ -37,6 +38,12 @@ class TcpTester {
         IpProtocol.IPV4 to Collections.synchronizedList(mutableListOf()),
         IpProtocol.IPV6 to Collections.synchronizedList(mutableListOf())
     )
+
+    /**
+     * Release generation. Any openBatch that completes after a release must be discarded.
+     * This prevents the UI/log from saying "released" while late sockets are added back.
+     */
+    private val releaseEpoch = AtomicLong(0L)
 
     suspend fun resolveHost(host: String): ResolveResult = withContext(Dispatchers.IO) {
         val cleanHost = host.trim().removePrefix("[").removeSuffix("]").ifBlank { "www.baidu.com" }
@@ -81,6 +88,7 @@ class TcpTester {
         onLog: suspend (LogLine) -> Unit
     ): ProtocolStats {
         release(protocol)
+        val protocolEpoch = releaseEpoch.get()
         val addresses = resolveInetAddresses(config.host, protocol)
         if (addresses.isEmpty()) {
             val stats = ProtocolStats(protocol = protocol, phase = "解析失败")
@@ -139,7 +147,7 @@ class TcpTester {
             }
         }
 
-        while (currentCoroutineContext().isActive && totalSuccess < config.successLimit && totalFailure < config.failureLimit) {
+        while (currentCoroutineContext().isActive && releaseEpoch.get() == protocolEpoch && totalSuccess < config.successLimit && totalFailure < config.failureLimit) {
             val remainingSuccess = config.successLimit - totalSuccess
             val remainingFailure = config.failureLimit - totalFailure
             if (remainingSuccess <= 0 || remainingFailure <= 0) break
@@ -155,8 +163,18 @@ class TcpTester {
             if (launchCount <= 0) break
 
             val batch = openBatch(addresses, config.port, config.timeoutMs.coerceIn(300, 800), launchCount)
+            if (!currentCoroutineContext().isActive || releaseEpoch.get() != protocolEpoch) {
+                batch.successSockets.forEach { socket -> runCatching { socket.close() } }
+                break
+            }
             totalSuccess += batch.successSockets.size
-            socketLock.withLock { heldSockets.getValue(protocol).addAll(batch.successSockets) }
+            socketLock.withLock {
+                if (releaseEpoch.get() == protocolEpoch) {
+                    heldSockets.getValue(protocol).addAll(batch.successSockets)
+                } else {
+                    batch.successSockets.forEach { socket -> runCatching { socket.close() } }
+                }
+            }
             batch.errors.forEach { (key, value) ->
                 repeat(value) { recordFailure(key) }
             }
@@ -267,6 +285,7 @@ class TcpTester {
     }
 
     suspend fun release(protocol: IpProtocol? = null): Int = withContext(Dispatchers.IO) {
+        releaseEpoch.incrementAndGet()
         val targets = if (protocol == null) IpProtocol.entries else listOf(protocol)
         val socketsToClose = mutableListOf<Socket>()
 
