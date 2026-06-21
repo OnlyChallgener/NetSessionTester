@@ -26,7 +26,7 @@ class TestForegroundService : Service() {
                 return START_NOT_STICKY
             }
             ACTION_START, ACTION_UPDATE, null -> {
-                val text = intent?.getStringExtra(EXTRA_TEXT) ?: "TCP 会话保持测试运行中"
+                val text = intent?.getStringExtra(EXTRA_TEXT) ?: "TCP 会话测试运行中"
                 startForeground(NOTIFICATION_ID, buildNotification(text))
                 return START_STICKY
             }

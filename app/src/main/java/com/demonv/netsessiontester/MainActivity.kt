@@ -409,7 +409,22 @@ private data class NetworkProbeInfo(
 private data class StunProbeResult(
     val mappedIp: String,
     val mappedPort: Int,
-    val localPort: Int
+    val localPort: Int,
+    val successCount: Int = 1,
+    val totalCount: Int = 1,
+    val mappedPorts: Set<Int> = setOf(mappedPort),
+    val mappedIps: Set<String> = setOf(mappedIp)
+) {
+    val portStable: Boolean
+        get() = mappedPorts.size <= 1
+
+    val ipStable: Boolean
+        get() = mappedIps.size <= 1
+}
+
+private data class StunEndpoint(
+    val host: String,
+    val port: Int
 )
 
 private data class DnsProbeResult(
@@ -511,7 +526,7 @@ private fun buildNetworkProbeInfo(
 ): NetworkProbeInfo {
     val localIpv4 = localIpv4Addresses().firstOrNull()
     val localIpv6 = localIpv6Addresses().firstOrNull()
-    val publicV4 = publicIpResult.ipv4.takeIf { isUsableIpv4(it) }
+    val publicV4FromHttp = publicIpResult.ipv4.takeIf { isUsableIpv4(it) }
     val hasPublicV6 = publicIpResult.ipv6.isUsableIpText()
     val dns = runCatching { dnsProbe(targetHost) }.getOrElse {
         DnsProbeResult(
@@ -524,6 +539,7 @@ private fun buildNetworkProbeInfo(
         )
     }
     val stun = if (full && !env.hasVpn) runCatching { stunBindingProbe() }.getOrNull() else null
+    val publicV4 = publicV4FromHttp ?: stun?.mappedIp?.takeIf { isUsableIpv4(it) }
     val latencyMs = if (full) runCatching { tcpConnectLatencyMs(targetHost, targetPort.coerceIn(1, 65535), 1500) }.getOrNull() else null
     val tcpPort = if (full) runCatching { detectTcpLocalPort(targetHost, targetPort.coerceIn(1, 65535), 1500) }.getOrNull() else null
 
@@ -542,39 +558,45 @@ private fun buildNetworkProbeInfo(
         else -> "未发现"
     }
 
+    val isDirectPublicV4 = publicV4 != null && localIpv4 != null && !isPrivateIpv4(localIpv4) && localIpv4 == publicV4
+    val stunSuccess = stun != null
+    val multiStun = stun?.successCount ?: 0
+    val stunTotal = stun?.totalCount ?: 0
+
     val natType = when {
         env.hasVpn -> "代理环境"
-        publicV4 == null -> "NAT4 / UDP受限"
-        localIpv4 != null && !isPrivateIpv4(localIpv4) && localIpv4 == publicV4 -> "NAT1 / 开放"
-        stun != null && stun.mappedPort == stun.localPort -> "NAT2 / 中等"
-        stun != null -> "NAT3 / 严格"
-        full -> "NAT4 / UDP受限"
+        isDirectPublicV4 -> "NAT1 / 开放"
+        stunSuccess && stun?.portStable == true -> "NAT3 / 端口受限型"
+        stunSuccess -> "NAT3 / 对称型"
+        publicV4 != null && full -> "NAT3 / 待确认"
+        publicV4 == null && full -> "NAT4 / UDP受限"
         else -> "待检测"
     }
 
     val mapping = when {
         env.hasVpn -> "可能来自代理出口"
-        publicV4 != null && localIpv4 != null && !isPrivateIpv4(localIpv4) && localIpv4 == publicV4 -> "公网直连"
+        isDirectPublicV4 -> "公网直连"
         stun == null && full -> "未知"
         stun == null -> "待检测"
-        stun.mappedPort == stun.localPort -> "端口保持"
+        stun.portStable -> "端口保持"
         else -> "端口变化"
     }
 
     val filtering = when {
         env.hasVpn -> "无法准确判断"
+        isDirectPublicV4 -> "无明显限制"
+        stun != null -> "端口受限"
+        publicV4 != null && full -> "端口受限待确认"
         stun == null && full -> "UDP回包失败"
-        stun == null -> "待检测"
-        natType.startsWith("NAT1") -> "无明显限制"
-        natType.startsWith("NAT2") -> "地址受限"
-        else -> "端口受限"
+        else -> "待检测"
     }
 
     val confidence = when {
         env.hasVpn -> "低"
         !full -> "低"
-        stun != null && dns.systemHasA -> "中"
+        stun != null && multiStun >= 2 && stun.ipStable -> "高"
         stun != null -> "中"
+        publicV4 != null -> "低"
         else -> "低"
     }
 
@@ -587,13 +609,16 @@ private fun buildNetworkProbeInfo(
         else -> "无AAAA"
     }
 
+    val stunNodeText = if (full && stunTotal > 0) "STUN节点 ${multiStun}/${stunTotal} 成功。" else ""
     val diagnosis = when {
         env.hasVpn -> "检测到VPN/代理，NAT、出口和IPv6结果仅供参考。"
         dns.fakeIpDetected -> "检测到Fake-IP，DNS可能被代理工具接管。"
         !dns.systemHasAaaa && dns.domesticHasAaaa -> "系统DNS未返回IPv6，国内备用DNS可解析，可能被AdGuard/代理/路由器策略过滤。"
         !dns.systemHasAaaa && dns.globalHasAaaa -> "系统和国内备用DNS未返回IPv6，国外备用DNS可解析，可能存在地区DNS差异或本地DNS策略影响。"
-        natType.startsWith("NAT3") -> "疑似CGNAT或严格NAT，P2P/游戏联机可能受影响。"
-        natType.startsWith("NAT4") || natType.startsWith("UDP") -> "STUN请求失败，当前可按NAT4/UDP受限理解，可能是UDP被防火墙、代理或运营商限制。"
+        natType.startsWith("NAT3 / 端口受限") -> "${stunNodeText}UDP基础探测可用，当前可按端口受限型理解，P2P/游戏联机可能受影响。"
+        natType.startsWith("NAT3 / 对称") -> "${stunNodeText}多个STUN目标返回的外部端口不一致，疑似对称NAT，P2P/游戏联机可能受影响。"
+        natType.startsWith("NAT3 / 待确认") -> "公网IPv4可用，但STUN基础探测未成功，NAT类型暂按严格/待确认处理。"
+        natType.startsWith("NAT4") || natType.startsWith("UDP") -> "多个STUN基础请求均失败，当前可按NAT4/UDP受限理解，可能是UDP被防火墙、代理或运营商限制。"
         natType.startsWith("NAT2") -> "UDP映射较稳定，普通联机能力中等。"
         natType.startsWith("NAT1") -> "IPv4可能具备公网直连能力。"
         else -> "网络信息已更新。"
@@ -677,8 +702,50 @@ private fun detectTcpLocalPort(host: String, port: Int, timeoutMs: Int): Int {
 }
 
 private fun stunBindingProbe(): StunProbeResult {
-    val server = InetAddress.getByName("stun.l.google.com")
-    val port = 19302
+    val endpoints = listOf(
+        StunEndpoint("stun.miwifi.com", 3478),
+        StunEndpoint("stun.hot-chilli.net", 3478),
+        StunEndpoint("stun.cloudflare.com", 3478),
+        StunEndpoint("stun.syncthing.net", 3478),
+        StunEndpoint("stun.l.google.com", 19302),
+        StunEndpoint("stun1.l.google.com", 19302)
+    )
+    val results = mutableListOf<StunProbeResult>()
+    var attempted = 0
+    DatagramSocket().use { socket ->
+        socket.soTimeout = 1400
+        val localPort = socket.localPort
+        endpoints.forEach { endpoint ->
+            val server = runCatching { resolveFirstIpv4(endpoint.host) }.getOrNull() ?: return@forEach
+            attempted++
+            val request = buildStunBindingRequest()
+            runCatching {
+                socket.send(DatagramPacket(request, request.size, server, endpoint.port))
+                val buf = ByteArray(768)
+                val packet = DatagramPacket(buf, buf.size)
+                socket.receive(packet)
+                parseStunMappedAddress(packet.data, packet.length, localPort)?.let { result ->
+                    results += result
+                }
+            }
+        }
+    }
+    if (results.isEmpty()) error("STUN基础探测无响应")
+    val representative = results.first()
+    return representative.copy(
+        successCount = results.size,
+        totalCount = attempted.coerceAtLeast(results.size),
+        mappedPorts = results.map { it.mappedPort }.toSet(),
+        mappedIps = results.map { it.mappedIp }.toSet()
+    )
+}
+
+private fun resolveFirstIpv4(host: String): InetAddress {
+    return InetAddress.getAllByName(host).firstOrNull { it is Inet4Address }
+        ?: error("STUN服务器无IPv4地址")
+}
+
+private fun buildStunBindingRequest(): ByteArray {
     val tx = ByteArray(12) { (System.nanoTime().shr((it % 8) * 8).toInt() and 0xFF).toByte() }
     val req = ByteArray(20)
     req[1] = 0x01.toByte()
@@ -687,36 +754,33 @@ private fun stunBindingProbe(): StunProbeResult {
     req[6] = 0xA4.toByte()
     req[7] = 0x42.toByte()
     System.arraycopy(tx, 0, req, 8, 12)
-    DatagramSocket().use { socket ->
-        socket.soTimeout = 1600
-        val localPort = socket.localPort
-        socket.send(DatagramPacket(req, req.size, server, port))
-        val buf = ByteArray(512)
-        val packet = DatagramPacket(buf, buf.size)
-        socket.receive(packet)
-        val data = packet.data
-        val length = packet.length
-        var pos = 20
-        while (pos + 4 <= length) {
-            val type = ((data[pos].toInt() and 0xFF) shl 8) or (data[pos + 1].toInt() and 0xFF)
-            val attrLen = ((data[pos + 2].toInt() and 0xFF) shl 8) or (data[pos + 3].toInt() and 0xFF)
-            val value = pos + 4
-            if (value + attrLen <= length && type == 0x0020 && attrLen >= 8) {
-                val family = data[value + 1].toInt() and 0xFF
-                if (family == 0x01) {
-                    val xPort = ((data[value + 2].toInt() and 0xFF) shl 8) or (data[value + 3].toInt() and 0xFF)
-                    val mappedPort = xPort xor 0x2112
-                    val ipBytes = ByteArray(4)
-                    val magic = byteArrayOf(0x21.toByte(), 0x12.toByte(), 0xA4.toByte(), 0x42.toByte())
-                    for (i in 0..3) ipBytes[i] = ((data[value + 4 + i].toInt() xor magic[i].toInt()) and 0xFF).toByte()
-                    val mappedIp = InetAddress.getByAddress(ipBytes).hostAddress ?: ""
-                    return StunProbeResult(mappedIp, mappedPort, localPort)
+    return req
+}
+
+private fun parseStunMappedAddress(data: ByteArray, length: Int, localPort: Int): StunProbeResult? {
+    var pos = 20
+    while (pos + 4 <= length) {
+        val type = ((data[pos].toInt() and 0xFF) shl 8) or (data[pos + 1].toInt() and 0xFF)
+        val attrLen = ((data[pos + 2].toInt() and 0xFF) shl 8) or (data[pos + 3].toInt() and 0xFF)
+        val value = pos + 4
+        if (value + attrLen <= length && attrLen >= 8) {
+            val family = data[value + 1].toInt() and 0xFF
+            if (family == 0x01 && (type == 0x0020 || type == 0x0001)) {
+                val rawPort = ((data[value + 2].toInt() and 0xFF) shl 8) or (data[value + 3].toInt() and 0xFF)
+                val mappedPort = if (type == 0x0020) rawPort xor 0x2112 else rawPort
+                val ipBytes = ByteArray(4)
+                val magic = byteArrayOf(0x21.toByte(), 0x12.toByte(), 0xA4.toByte(), 0x42.toByte())
+                for (i in 0..3) {
+                    val b = data[value + 4 + i].toInt()
+                    ipBytes[i] = if (type == 0x0020) ((b xor magic[i].toInt()) and 0xFF).toByte() else (b and 0xFF).toByte()
                 }
+                val mappedIp = InetAddress.getByAddress(ipBytes).hostAddress ?: return null
+                return StunProbeResult(mappedIp, mappedPort, localPort)
             }
-            pos += 4 + ((attrLen + 3) / 4) * 4
         }
+        pos += 4 + ((attrLen + 3) / 4) * 4
     }
-    error("STUN无响应")
+    return null
 }
 
 
@@ -2225,7 +2289,7 @@ private fun SettingsPage(
             .padding(horizontal = 14.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
-        item { PageTitle("宽带会话测试器", "TCP 会话保持 · IPv4 / IPv6 分别测试", updateBadge, updateProgress, onVersionClick) }
+        item { PageTitle("宽带会话测试器", "TCP 会话测试 · IPv4 / IPv6 分别测试", updateBadge, updateProgress, onVersionClick) }
         item {
             SoftCard {
                 SectionTitle("◎", "目标设置", Blue)
