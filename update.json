@@ -1,14 +1,18 @@
 {
-  "versionCode": 61,
+  "versionCode": 62,
   "versionName": "0.9.9",
-  "title": "发现新版本 v0.9.9",
+  "title": "发现新版本 v0.9.9 build 62",
   "content": [
-    "修复切换网络/FD上限后界面仍显示连接中的问题",
-    "新增网络信息卡：NAT类型、延迟、端口、优先级",
-    "修复历史页面上下滑动可能闪退的问题",
-    "保留 0.9.7 高速测速核心和精准失败值逻辑"
+    "保持 v0.9.9 主逻辑，基于上一版继续优化稳定性",
+    "Ping 默认保持 500ms，不引入复杂自动降频逻辑",
+    "继续保留 FD 安全保护，接近上限前主动停止并释放",
+    "继续保留统一释放流程，减少 UI 状态和真实连接不一致",
+    "网络信息卡新增 NAT 映射行为、过滤行为、DNS诊断、IPv6状态和置信度",
+    "检测 VPN/代理环境，NAT、IPv6、出口结果标记仅供参考",
+    "系统 DNS 无 AAAA 时使用阿里/腾讯 DNS 做轻量诊断",
+    "保留手动刷新，增加 10 秒轻量刷新基础网络信息"
   ],
-  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v0.9.9/NetSessionTester-v0.9.9-signed.apk",
+  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v0.9.9-62/NetSessionTester-v0.9.9-build62-signed.apk",
   "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/latest",
   "force": false
 }

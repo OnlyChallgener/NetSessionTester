@@ -29,11 +29,24 @@ import java.net.Socket
 import java.net.SocketException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
+import java.io.File
 import java.util.Collections
 import java.util.concurrent.atomic.AtomicLong
 
 class TcpTester {
     private val socketLock = Mutex()
+
+    /**
+     * Keep a small FD reserve so Android / ART / Compose / logging still have room
+     * to open files, Binder fds and sockets while the test is near the device limit.
+     * Without this reserve the process may crash before Java throws a clean
+     * "Too many open files" SocketException.
+     */
+    private val fdReserve = 192
+
+    /** Low memory reserve. If free heap is lower than this, stop before OOM. */
+    private val memoryReserveBytes = 48L * 1024L * 1024L
+
     private val heldSockets: MutableMap<IpProtocol, MutableList<Socket>> = mutableMapOf(
         IpProtocol.IPV4 to Collections.synchronizedList(mutableListOf()),
         IpProtocol.IPV6 to Collections.synchronizedList(mutableListOf())
@@ -112,7 +125,7 @@ class TcpTester {
         onStats(stats)
 
         fun recordFailure(key: String) {
-            if (key == "FD上限") fdSeen = true
+            if (key == "FD上限" || key == "资源保护") fdSeen = true
             if (totalFailure >= config.failureLimit) return
             totalFailure++
             errors[key] = (errors[key] ?: 0) + 1
@@ -155,12 +168,23 @@ class TcpTester {
             // 速度优先：没有接近失败上限时按用户设定批量并发。
             // 只有最后一段才按剩余失败值收缩，避免 0.9.8 的 pending 预限速造成卡顿和只能测到一万多。
             val nearFailureCap = totalFailure >= (config.failureLimit * 8 / 10)
-            val launchCount = if (nearFailureCap) {
+            val requestedLaunchCount = if (nearFailureCap) {
                 minOf(config.batchSize, remainingSuccess, remainingFailure)
             } else {
                 minOf(config.batchSize, remainingSuccess)
             }
-            if (launchCount <= 0) break
+            if (requestedLaunchCount <= 0) break
+
+            // FD / heap hard guard. Do not wait for EMFILE/OOM. Stop while the
+            // process still has enough reserve to update UI, save history and close sockets.
+            val pressure = resourcePressure(requestedLaunchCount)
+            if (pressure.stopNow) {
+                repeat(minOf(remainingFailure, 1)) { recordFailure(pressure.reason) }
+                onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} ${pressure.reason}，已触发保护停止：${pressure.detail}"))
+                fdSeen = true
+                break
+            }
+            val launchCount = minOf(requestedLaunchCount, pressure.allowedLaunch.coerceAtLeast(1))
 
             val batch = openBatch(addresses, config.port, config.timeoutMs.coerceIn(300, 800), launchCount, protocolEpoch)
             if (!currentCoroutineContext().isActive || releaseEpoch.get() != protocolEpoch) {
@@ -177,6 +201,9 @@ class TcpTester {
             }
             batch.errors.forEach { (key, value) ->
                 repeat(value) { recordFailure(key) }
+            }
+            if (batch.errors.keys.any { it == "FD上限" || it == "资源保护" }) {
+                fdSeen = true
             }
             totalAttempts = totalSuccess + totalFailure
 
@@ -222,30 +249,39 @@ class TcpTester {
         expectedEpoch: Long
     ): BatchOpenResult = coroutineScope {
         if (releaseEpoch.get() != expectedEpoch) return@coroutineScope BatchOpenResult(emptyList(), emptyMap())
-        val jobs = (0 until count).map { index ->
-            async(Dispatchers.IO) {
-                if (releaseEpoch.get() != expectedEpoch) {
-                    OpenResult(discarded = true)
-                } else {
-                    val address = addresses[index % addresses.size]
-                    openOne(address, port, timeoutMs, expectedEpoch)
+        try {
+            val safeCount = count.coerceIn(1, 512)
+            val jobs = (0 until safeCount).map { index ->
+                async(Dispatchers.IO) {
+                    if (releaseEpoch.get() != expectedEpoch) {
+                        OpenResult(discarded = true)
+                    } else {
+                        val address = addresses[index % addresses.size]
+                        openOne(address, port, timeoutMs, expectedEpoch)
+                    }
                 }
             }
+            val results = jobs.awaitAll()
+            val sockets = mutableListOf<Socket>()
+            val errors = linkedMapOf<String, Int>()
+            results.forEach { result ->
+                result.socket?.let { sockets += it }
+                result.error?.let { errors[it] = (errors[it] ?: 0) + 1 }
+            }
+            BatchOpenResult(sockets, errors)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (t: Throwable) {
+            // Last-chance guard for rare native/ART pressure around FD limit.
+            BatchOpenResult(emptyList(), mapOf(classifyError(t) to 1))
         }
-        val results = jobs.awaitAll()
-        val sockets = mutableListOf<Socket>()
-        val errors = linkedMapOf<String, Int>()
-        results.forEach { result ->
-            result.socket?.let { sockets += it }
-            result.error?.let { errors[it] = (errors[it] ?: 0) + 1 }
-        }
-        BatchOpenResult(sockets, errors)
     }
 
     private fun openOne(address: InetAddress, port: Int, timeoutMs: Int, expectedEpoch: Long): OpenResult {
+        var socket: Socket? = null
         return try {
             if (releaseEpoch.get() != expectedEpoch) return OpenResult(discarded = true)
-            val socket = Socket()
+            socket = Socket()
             socket.keepAlive = true
             socket.tcpNoDelay = true
             socket.connect(InetSocketAddress(address, port), timeoutMs)
@@ -257,12 +293,13 @@ class TcpTester {
             }
         } catch (e: CancellationException) {
             throw e
-        } catch (e: Exception) {
-            OpenResult(error = classifyError(e))
+        } catch (t: Throwable) {
+            runCatching { socket?.close() }
+            OpenResult(error = classifyError(t))
         }
     }
 
-    private fun classifyError(e: Exception): String {
+    private fun classifyError(e: Throwable): String {
         val message = e.message.orEmpty().lowercase()
         return when (e) {
             is SocketTimeoutException -> "超时"
@@ -282,8 +319,74 @@ class TcpTester {
                 "broken pipe" in message -> "已断开"
                 else -> "Socket异常"
             }
+            is OutOfMemoryError -> "资源保护"
             else -> e.javaClass.simpleName
         }
+    }
+
+    private fun currentFdCount(): Int {
+        return runCatching { File("/proc/self/fd").list()?.size ?: -1 }.getOrDefault(-1)
+    }
+
+    private fun maxOpenFiles(): Int {
+        return runCatching {
+            File("/proc/self/limits").readLines()
+                .firstOrNull { it.startsWith("Max open files") }
+                ?.trim()
+                ?.split(Regex("\\s+"))
+                ?.getOrNull(3)
+                ?.toIntOrNull()
+        }.getOrNull() ?: 32768
+    }
+
+    private fun availableHeapBytes(): Long {
+        val runtime = Runtime.getRuntime()
+        return runtime.maxMemory() - (runtime.totalMemory() - runtime.freeMemory())
+    }
+
+    private fun resourcePressure(requestedLaunch: Int): ResourcePressure {
+        val fdNow = currentFdCount()
+        val fdMax = maxOpenFiles()
+        val heapFree = availableHeapBytes()
+        val fdSafeMax = (fdMax - fdReserve).coerceAtLeast(128)
+
+        if (heapFree in 1 until memoryReserveBytes) {
+            return ResourcePressure(
+                stopNow = true,
+                allowedLaunch = 0,
+                reason = "资源保护",
+                detail = "可用堆内存约 ${heapFree / 1024 / 1024}MB，低于保护阈值 ${memoryReserveBytes / 1024 / 1024}MB"
+            )
+        }
+
+        if (fdNow > 0) {
+            val remaining = fdSafeMax - fdNow
+            if (remaining <= 0) {
+                return ResourcePressure(
+                    stopNow = true,
+                    allowedLaunch = 0,
+                    reason = "FD上限",
+                    detail = "当前FD=$fdNow，上限=$fdMax，预留=$fdReserve"
+                )
+            }
+            val allowed = remaining.coerceAtMost(requestedLaunch)
+            if (allowed <= 0) {
+                return ResourcePressure(
+                    stopNow = true,
+                    allowedLaunch = 0,
+                    reason = "FD上限",
+                    detail = "当前FD=$fdNow，上限=$fdMax，预留=$fdReserve"
+                )
+            }
+            return ResourcePressure(
+                stopNow = false,
+                allowedLaunch = allowed,
+                reason = "",
+                detail = "当前FD=$fdNow，上限=$fdMax，预留=$fdReserve"
+            )
+        }
+
+        return ResourcePressure(stopNow = false, allowedLaunch = requestedLaunch, reason = "", detail = "FD未知")
     }
 
     private suspend fun resolveInetAddresses(host: String, protocol: IpProtocol): List<InetAddress> = withContext(Dispatchers.IO) {
@@ -345,6 +448,13 @@ class TcpTester {
             list.size
         }
     }
+
+    private data class ResourcePressure(
+        val stopNow: Boolean,
+        val allowedLaunch: Int,
+        val reason: String,
+        val detail: String
+    )
 
     private data class OpenResult(val socket: Socket? = null, val error: String? = null, val discarded: Boolean = false)
     private data class BatchOpenResult(val successSockets: List<Socket>, val errors: Map<String, Int>)

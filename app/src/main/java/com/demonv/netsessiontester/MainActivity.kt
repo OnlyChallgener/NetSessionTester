@@ -395,13 +395,29 @@ private data class NetworkProbeInfo(
     val natType: String = "检测中",
     val latencyText: String = "检测中",
     val portText: String = "检测中",
-    val priority: String = "检测中"
+    val priority: String = "检测中",
+    val mappingBehavior: String = "检测中",
+    val filterBehavior: String = "检测中",
+    val ipv6Status: String = "检测中",
+    val dnsStatus: String = "检测中",
+    val confidence: String = "检测中",
+    val diagnosis: String = "检测中",
+    val proxyNotice: String = "",
+    val refreshMode: String = "轻量刷新"
 )
 
 private data class StunProbeResult(
     val mappedIp: String,
     val mappedPort: Int,
     val localPort: Int
+)
+
+private data class DnsProbeResult(
+    val systemHasA: Boolean,
+    val systemHasAaaa: Boolean,
+    val backupHasAaaa: Boolean,
+    val fakeIpDetected: Boolean,
+    val error: String? = null
 )
 
 private fun detectNetworkEnvironment(context: Context): NetworkEnvironment {
@@ -445,31 +461,136 @@ private fun displayCarrierFromEnv(env: NetworkEnvironment, ipv6: String): String
 }
 
 
-private suspend fun detectNetworkProbe(publicIpResult: PublicIpResult): NetworkProbeInfo = withContext(Dispatchers.IO) {
+private suspend fun detectNetworkProbe(
+    publicIpResult: PublicIpResult,
+    env: NetworkEnvironment,
+    targetHost: String,
+    targetPort: Int
+): NetworkProbeInfo = withContext(Dispatchers.IO) {
+    buildNetworkProbeInfo(
+        publicIpResult = publicIpResult,
+        env = env,
+        targetHost = targetHost,
+        targetPort = targetPort,
+        full = true
+    )
+}
+
+private suspend fun detectNetworkProbeLight(
+    publicIpResult: PublicIpResult,
+    env: NetworkEnvironment,
+    targetHost: String,
+    targetPort: Int
+): NetworkProbeInfo = withContext(Dispatchers.IO) {
+    buildNetworkProbeInfo(
+        publicIpResult = publicIpResult,
+        env = env,
+        targetHost = targetHost,
+        targetPort = targetPort,
+        full = false
+    )
+}
+
+private fun buildNetworkProbeInfo(
+    publicIpResult: PublicIpResult,
+    env: NetworkEnvironment,
+    targetHost: String,
+    targetPort: Int,
+    full: Boolean
+): NetworkProbeInfo {
     val localIpv4 = localIpv4Addresses().firstOrNull()
     val localIpv6 = localIpv6Addresses().firstOrNull()
-    val stun = runCatching { stunBindingProbe() }.getOrNull()
-    val latencyMs = runCatching { tcpConnectLatencyMs("www.baidu.com", 80, 1500) }.getOrNull()
-    val tcpPort = runCatching { detectTcpLocalPort("www.baidu.com", 80, 1500) }.getOrNull()
     val publicV4 = publicIpResult.ipv4.takeIf { isUsableIpv4(it) }
+    val hasPublicV6 = publicIpResult.ipv6.isUsableIpText()
+    val dns = runCatching { dnsProbe(targetHost) }.getOrElse { DnsProbeResult(false, false, false, false, it.message ?: it.javaClass.simpleName) }
+    val stun = if (full && !env.hasVpn) runCatching { stunBindingProbe() }.getOrNull() else null
+    val latencyMs = if (full) runCatching { tcpConnectLatencyMs(targetHost, targetPort.coerceIn(1, 65535), 1500) }.getOrNull() else null
+    val tcpPort = if (full) runCatching { detectTcpLocalPort(targetHost, targetPort.coerceIn(1, 65535), 1500) }.getOrNull() else null
+
     val priority = when {
-        publicIpResult.ipv6.isUsableIpText() -> "IPv6"
+        env.hasVpn && !hasPublicV6 -> "代理路径"
+        hasPublicV6 -> "IPv6"
         publicV4 != null -> "IPv4"
         else -> "未知"
     }
-    val natType = when {
-        publicV4 == null -> "NAT4"
-        localIpv4 != null && !isPrivateIpv4(localIpv4) && localIpv4 == publicV4 -> "NAT1"
-        stun != null && stun.mappedPort == stun.localPort -> "NAT2"
-        stun != null -> "NAT3"
-        else -> "NAT4"
+
+    val ipv6Status = when {
+        env.hasVpn && !dns.systemHasAaaa && dns.backupHasAaaa -> "代理/DNS可能过滤"
+        hasPublicV6 && dns.systemHasAaaa -> "公网可用"
+        hasPublicV6 -> "公网地址"
+        dns.systemHasAaaa || dns.backupHasAaaa -> "有AAAA待验证"
+        else -> "未发现"
     }
-    NetworkProbeInfo(
+
+    val natType = when {
+        env.hasVpn -> "代理环境"
+        publicV4 == null -> "UDP受限"
+        localIpv4 != null && !isPrivateIpv4(localIpv4) && localIpv4 == publicV4 -> "NAT1 / 开放"
+        stun != null && stun.mappedPort == stun.localPort -> "NAT2 / 中等"
+        stun != null -> "NAT3 / 严格"
+        full -> "UDP受限"
+        else -> "待手动检测"
+    }
+
+    val mapping = when {
+        env.hasVpn -> "可能来自代理出口"
+        publicV4 != null && localIpv4 != null && !isPrivateIpv4(localIpv4) && localIpv4 == publicV4 -> "公网直连"
+        stun == null && full -> "未知"
+        stun == null -> "手动刷新检测"
+        stun.mappedPort == stun.localPort -> "端口保持"
+        else -> "端口变化"
+    }
+
+    val filtering = when {
+        env.hasVpn -> "无法准确判断"
+        stun == null && full -> "UDP回包失败"
+        stun == null -> "手动刷新检测"
+        natType.startsWith("NAT1") -> "无明显限制"
+        natType.startsWith("NAT2") -> "地址受限"
+        else -> "端口受限"
+    }
+
+    val confidence = when {
+        env.hasVpn -> "低"
+        !full -> "低"
+        stun != null && dns.systemHasA -> "中"
+        stun != null -> "中"
+        else -> "低"
+    }
+
+    val dnsStatus = when {
+        dns.fakeIpDetected -> "疑似Fake-IP"
+        dns.systemHasAaaa -> "系统AAAA正常"
+        dns.backupHasAaaa -> "备用AAAA可用"
+        dns.error != null -> "DNS异常"
+        else -> "无AAAA"
+    }
+
+    val diagnosis = when {
+        env.hasVpn -> "检测到VPN/代理，NAT、出口和IPv6结果仅供参考。"
+        dns.fakeIpDetected -> "检测到Fake-IP，DNS可能被代理工具接管。"
+        !dns.systemHasAaaa && dns.backupHasAaaa -> "系统DNS未返回IPv6，可能被AdGuard/代理/路由器策略过滤。"
+        natType.startsWith("NAT3") -> "疑似CGNAT或严格NAT，P2P/游戏联机可能受影响。"
+        natType.startsWith("UDP") -> "STUN请求失败，可能是UDP被防火墙、代理或运营商限制。"
+        natType.startsWith("NAT2") -> "UDP映射较稳定，普通联机能力中等。"
+        natType.startsWith("NAT1") -> "IPv4可能具备公网直连能力。"
+        else -> "基础信息已更新，完整NAT/DNS诊断请手动刷新。"
+    }
+
+    return NetworkProbeInfo(
         localIp = localIpv4 ?: localIpv6 ?: "不可用",
         natType = natType,
-        latencyText = latencyMs?.let { "${it}ms" } ?: "不可用",
-        portText = stun?.mappedPort?.toString() ?: tcpPort?.toString() ?: "不可用",
-        priority = priority
+        latencyText = latencyMs?.let { "${it}ms" } ?: if (full) "不可用" else "轻量刷新",
+        portText = stun?.mappedPort?.toString() ?: tcpPort?.toString() ?: if (full) "不可用" else "轻量刷新",
+        priority = priority,
+        mappingBehavior = mapping,
+        filterBehavior = filtering,
+        ipv6Status = ipv6Status,
+        dnsStatus = dnsStatus,
+        confidence = confidence,
+        diagnosis = diagnosis,
+        proxyNotice = if (env.hasVpn) "VPN/代理结果仅供参考" else "",
+        refreshMode = if (full) "完整检测" else "10秒轻量刷新"
     )
 }
 
@@ -574,6 +695,103 @@ private fun stunBindingProbe(): StunProbeResult {
         }
     }
     error("STUN无响应")
+}
+
+
+private fun dnsProbe(host: String): DnsProbeResult {
+    val cleanHost = host.trim().removePrefix("[").removeSuffix("]").ifBlank { "www.baidu.com" }
+    val system = runCatching { InetAddress.getAllByName(cleanHost).toList() }.getOrDefault(emptyList())
+    val systemHasA = system.any { it is Inet4Address }
+    val systemHasAaaa = system.any { it is Inet6Address }
+    val fakeIp = system.filterIsInstance<Inet4Address>().any { isFakeIpAddress(it.hostAddress.orEmpty()) }
+    val backupHasAaaa = if (!systemHasAaaa) {
+        listOf("223.5.5.5", "119.29.29.29").any { server -> runCatching { dnsQueryHasAaaa(cleanHost, server) }.getOrDefault(false) }
+    } else {
+        false
+    }
+    return DnsProbeResult(systemHasA, systemHasAaaa, backupHasAaaa, fakeIp)
+}
+
+private fun isFakeIpAddress(ip: String): Boolean {
+    val p = ip.split('.').mapNotNull { it.toIntOrNull() }
+    return p.size == 4 && p[0] == 198 && p[1] in 18..19
+}
+
+private fun dnsQueryHasAaaa(host: String, server: String): Boolean {
+    val txId = (System.nanoTime().toInt() and 0xFFFF)
+    val query = buildDnsQuery(host, txId, qType = 28)
+    DatagramSocket().use { socket ->
+        socket.soTimeout = 1200
+        socket.send(DatagramPacket(query, query.size, InetAddress.getByName(server), 53))
+        val buf = ByteArray(1024)
+        val packet = DatagramPacket(buf, buf.size)
+        socket.receive(packet)
+        return parseDnsHasAnswer(packet.data, packet.length, txId, qType = 28)
+    }
+}
+
+private fun buildDnsQuery(host: String, txId: Int, qType: Int): ByteArray {
+    val labels = host.trimEnd('.').split('.').filter { it.isNotBlank() }
+    val size = 12 + labels.sumOf { it.toByteArray(Charsets.UTF_8).size + 1 } + 1 + 4
+    val out = ByteArray(size)
+    out[0] = ((txId shr 8) and 0xFF).toByte()
+    out[1] = (txId and 0xFF).toByte()
+    out[2] = 0x01
+    out[5] = 0x01
+    var pos = 12
+    labels.forEach { label ->
+        val bytes = label.toByteArray(Charsets.UTF_8)
+        out[pos++] = bytes.size.toByte()
+        bytes.forEach { out[pos++] = it }
+    }
+    out[pos++] = 0
+    out[pos++] = ((qType shr 8) and 0xFF).toByte()
+    out[pos++] = (qType and 0xFF).toByte()
+    out[pos++] = 0
+    out[pos] = 1
+    return out
+}
+
+private fun parseDnsHasAnswer(data: ByteArray, length: Int, txId: Int, qType: Int): Boolean {
+    if (length < 12) return false
+    val id = ((data[0].toInt() and 0xFF) shl 8) or (data[1].toInt() and 0xFF)
+    if (id != txId) return false
+    val qd = ((data[4].toInt() and 0xFF) shl 8) or (data[5].toInt() and 0xFF)
+    val an = ((data[6].toInt() and 0xFF) shl 8) or (data[7].toInt() and 0xFF)
+    var pos = 12
+    repeat(qd) {
+        pos = skipDnsName(data, length, pos)
+        if (pos < 0 || pos + 4 > length) return false
+        pos += 4
+    }
+    repeat(an) {
+        pos = skipDnsName(data, length, pos)
+        if (pos < 0 || pos + 10 > length) return false
+        val type = ((data[pos].toInt() and 0xFF) shl 8) or (data[pos + 1].toInt() and 0xFF)
+        val rdLen = ((data[pos + 8].toInt() and 0xFF) shl 8) or (data[pos + 9].toInt() and 0xFF)
+        pos += 10
+        if (pos + rdLen > length) return false
+        if (type == qType && rdLen > 0) return true
+        pos += rdLen
+    }
+    return false
+}
+
+private fun skipDnsName(data: ByteArray, length: Int, start: Int): Int {
+    var pos = start
+    var jumped = false
+    var jumps = 0
+    while (pos in 0 until length) {
+        val len = data[pos].toInt() and 0xFF
+        if (len == 0) return if (jumped) start + 2 else pos + 1
+        if ((len and 0xC0) == 0xC0) {
+            if (pos + 1 >= length) return -1
+            if (++jumps > 8) return -1
+            return pos + 2
+        }
+        pos += 1 + len
+    }
+    return -1
 }
 
 private fun currentNetworkSignature(context: Context): String {
@@ -743,8 +961,15 @@ private fun NetSessionTesterApp() {
             publicIpLoading = true
             val result = PublicIpDetector.detect()
             publicIpResult = result
-            networkProbeInfo = detectNetworkProbe(result)
+            networkProbeInfo = detectNetworkProbe(result, detectNetworkEnvironment(context), host.ifBlank { "www.baidu.com" }, port.toIntOrNull() ?: 80)
             publicIpLoading = false
+        }
+    }
+
+    fun refreshNetworkInfoLight() {
+        if (publicIpLoading) return
+        scope.launch {
+            networkProbeInfo = detectNetworkProbeLight(publicIpResult, detectNetworkEnvironment(context), host.ifBlank { "www.baidu.com" }, port.toIntOrNull() ?: 80)
         }
     }
 
@@ -884,6 +1109,15 @@ private fun NetSessionTesterApp() {
                     latestUpdate = info.takeIf { hasNew }
                     updateAvailable = hasNew
                 }
+            }
+        }
+    }
+
+    LaunchedEffect(settingsLoaded, host, port) {
+        if (settingsLoaded) {
+            while (true) {
+                delay(10_000L)
+                if (!finishInProgress) refreshNetworkInfoLight()
             }
         }
     }
@@ -1139,14 +1373,21 @@ private fun NetSessionTesterApp() {
         }
         stopForegroundNotice(context)
 
-        val closed = withContext(Dispatchers.IO) { tester.closeDetachedSockets(snapshot) }
-        appendLog(LogLine(level = LogLevel.WARN, text = "${reason.label}：后台 close 完成：$closed 条"))
+        try {
+            val closed = runCatching { withContext(Dispatchers.IO) { tester.closeDetachedSockets(snapshot) } }
+                .getOrElse { error ->
+                    appendLog(LogLine(level = LogLevel.ERROR, text = "${reason.label}：后台 close 异常：${error.message ?: error.javaClass.simpleName}"))
+                    0
+                }
+            appendLog(LogLine(level = LogLevel.WARN, text = "${reason.label}：后台 close 完成：$closed 条"))
 
-        if (saveHistory && summary != null) {
-            appendHistorySafely(summary)
-            refreshHistory()
+            if (saveHistory && summary != null) {
+                appendHistorySafely(summary)
+                refreshHistory()
+            }
+        } finally {
+            finishInProgress = false
         }
-        finishInProgress = false
     }
 
     suspend fun interruptForNetworkChange(reason: String = "网络环境变化") {
@@ -1247,7 +1488,8 @@ private fun NetSessionTesterApp() {
                     }
                 )
                 completedNormally = true
-            } catch (error: Exception) {
+            } catch (error: Throwable) {
+                if (error is kotlinx.coroutines.CancellationException) throw error
                 if (!manualStopRequested) {
                     failureMsg = error.message ?: error.javaClass.simpleName
                     appendLog(LogLine(level = LogLevel.ERROR, text = "测试中断：$failureMsg"))
@@ -2729,6 +2971,7 @@ private fun HistoryBarRow(label: String, value: Int, maxValue: Int, color: Color
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun NetworkEnvironmentSettingsCard(
     env: NetworkEnvironment,
@@ -2744,28 +2987,43 @@ private fun NetworkEnvironmentSettingsCard(
         Row(verticalAlignment = Alignment.CenterVertically) {
             SectionTitle("i", "网络信息", Purple)
             Spacer(Modifier.weight(1f))
-            TextButton(onClick = onRefresh) { Text(if (publicIpLoading) "检测中" else "刷新", fontSize = 12.sp) }
+            StatusChip(probeInfo.refreshMode, Color(0xFFF8FAFC), Muted, compact = true)
+            Spacer(Modifier.width(6.dp))
+            TextButton(onClick = onRefresh) { Text(if (publicIpLoading) "检测中" else "手动刷新", fontSize = 12.sp) }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
             InfoMetricTile("⌂", "本地IP", if (maskPrivacy) maskIpText(probeInfo.localIp) else probeInfo.localIp, Color(0xFFE0F7FA), Color(0xFF00A7C6), Modifier.weight(1f))
             InfoMetricTile("◴", "延迟", probeInfo.latencyText, Color(0xFFFFF3E0), Orange, Modifier.weight(1f))
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-            InfoMetricTile("◎", "公网IP", if (maskPrivacy) maskIpText(publicIpResult.ipv4) else publicIpResult.ipv4, BlueSoft, Blue, Modifier.weight(1f), onClick = onCopyPublicIpv4)
-            InfoMetricTile("#", "端口", probeInfo.portText, Color(0xFFFCE7F3), Color(0xFFD946EF), Modifier.weight(1f))
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-            InfoMetricTile("✓", "IPv6", if (maskPrivacy) maskIpText(publicIpResult.ipv6) else publicIpResult.ipv6, GreenSoft, Green, Modifier.weight(1f), onClick = onCopyPublicIpv6)
-            InfoMetricTile("↕", "优先级", probeInfo.priority, Color(0xFFFFF3E0), Orange, Modifier.weight(1f))
+            InfoMetricTile("◎", "公网IPv4", if (maskPrivacy) maskIpText(publicIpResult.ipv4) else publicIpResult.ipv4, BlueSoft, Blue, Modifier.weight(1f), onClick = onCopyPublicIpv4)
+            InfoMetricTile("✓", "IPv6状态", probeInfo.ipv6Status, GreenSoft, Green, Modifier.weight(1f), onClick = onCopyPublicIpv6)
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
             InfoMetricTile("N", "NAT类型", probeInfo.natType, Color(0xFFFFE4E6), ErrorRed, Modifier.weight(1f))
-            InfoMetricTile("∿", "网络", env.typeLabel, Color(0xFFF3E8FF), Purple, Modifier.weight(1f))
+            InfoMetricTile("↕", "优先级", probeInfo.priority, Color(0xFFFFF3E0), Orange, Modifier.weight(1f))
         }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            InfoMetricTile("M", "映射行为", probeInfo.mappingBehavior, Color(0xFFE0F2FE), Blue, Modifier.weight(1f))
+            InfoMetricTile("F", "过滤行为", probeInfo.filterBehavior, Color(0xFFFCE7F3), Color(0xFFD946EF), Modifier.weight(1f))
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            InfoMetricTile("D", "DNS诊断", probeInfo.dnsStatus, Color(0xFFF3E8FF), Purple, Modifier.weight(1f))
+            InfoMetricTile("C", "置信度", probeInfo.confidence, Color(0xFFF8FAFC), Muted, Modifier.weight(1f))
+        }
+        Text(
+            probeInfo.diagnosis,
+            color = if (probeInfo.proxyNotice.isNotBlank()) Purple else Muted,
+            fontSize = 12.sp,
+            lineHeight = 16.sp,
+            modifier = Modifier.fillMaxWidth().background(Color(0xFFF8FAFC), ShapeM).padding(10.dp)
+        )
         FlowRow(horizontalArrangement = Arrangement.spacedBy(7.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             StatusChip(if (env.hasInternet) "可访问互联网" else "无互联网能力", if (env.hasInternet) GreenSoft else RedSoft, if (env.hasInternet) Green else ErrorRed, compact = true)
+            StatusChip("网络 ${env.typeLabel}", Color(0xFFF3E8FF), Purple, compact = true)
             StatusChip("运营商 ${displayCarrierFromEnv(env, publicIpResult.ipv6)}", Color(0xFFF3E8FF), Purple, compact = true)
-            if (env.hasVpn) StatusChip("VPN开启", Color(0xFFF3E8FF), Purple, compact = true)
+            StatusChip("IPv4 NAT 与 IPv6 分开判断", Color(0xFFE0F2FE), Blue, compact = true)
+            if (env.hasVpn) StatusChip("VPN/代理仅供参考", Color(0xFFF3E8FF), Purple, compact = true)
         }
     }
 }
