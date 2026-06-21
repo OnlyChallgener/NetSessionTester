@@ -226,6 +226,21 @@ private fun displayCarrierFromEnv(env: NetworkEnvironment, ipv6: String): String
     }
 }
 
+private fun currentNetworkSignature(context: Context): String {
+    val connectivity = context.getSystemService(ConnectivityManager::class.java)
+    val network = connectivity?.activeNetwork ?: return "none"
+    val caps = connectivity.getNetworkCapabilities(network)
+    val transports = buildList {
+        if (caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true) add("wifi")
+        if (caps?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) == true) add("cellular")
+        if (caps?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true) add("vpn")
+        if (caps?.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) == true) add("ethernet")
+    }.joinToString("+").ifBlank { "unknown" }
+    val internet = caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
+    val validated = caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true
+    return "${network}|$transports|internet=$internet|validated=$validated"
+}
+
 private suspend fun tcpPingMs(host: String, port: Int): Int? = withContext(Dispatchers.IO) {
     runCatching {
         val start = System.nanoTime()
@@ -295,6 +310,8 @@ private fun NetSessionTesterApp() {
     var lastChartSampleAt by remember { mutableStateOf<Map<IpProtocol, Long>>(emptyMap()) }
     var pingPoints by remember { mutableStateOf<List<PingPoint>>(emptyList()) }
     var pingJob by remember { mutableStateOf<Job?>(null) }
+    var networkWatchJob by remember { mutableStateOf<Job?>(null) }
+    var testNetworkSignature by remember { mutableStateOf("") }
 
     var detailTitle by remember { mutableStateOf<String?>(null) }
     var detailLines by remember { mutableStateOf<List<String>>(emptyList()) }
@@ -345,15 +362,6 @@ private fun NetSessionTesterApp() {
         }
         clipboardManager.setText(AnnotatedString(clean))
         scope.launch { snackbarHostState.showSnackbar("已复制$label：$clean") }
-    }
-
-
-    fun appendLog(line: LogLine) {
-        state = state.copy(logs = (state.logs + line).takeLast(500))
-        scope.launch {
-            logStore.append(line)
-            logSizeKb = logStore.sizeKb()
-        }
     }
 
 
@@ -424,6 +432,10 @@ private fun NetSessionTesterApp() {
         }
     }
 
+    fun appendLog(line: LogLine) {
+        state = state.copy(logs = (state.logs + line).takeLast(500))
+        scope.launch { logStore.append(line); logSizeKb = logStore.sizeKb() }
+    }
 
     fun resetCurrentCharts() {
         chartPoints = emptyList()
@@ -564,6 +576,79 @@ private fun NetSessionTesterApp() {
         }
     }
 
+    fun stoppedStatsForNetworkChange(current: ProtocolStats, reason: String): ProtocolStats {
+        return current.copy(
+            phase = reason,
+            errorSummary = current.errorSummary + (reason to 1)
+        )
+    }
+
+    fun buildNetworkInterruptedSummary(reason: String): SessionSummary? {
+        val config = currentTestConfig ?: buildConfig() ?: return null
+        val ipv4 = when (config.mode) {
+            TestMode.IPV4_ONLY -> stoppedStatsForNetworkChange(state.ipv4Stats, reason)
+            TestMode.IPV4_THEN_IPV6 -> if (state.ipv4Stats.totalAttempts > 0) stoppedStatsForNetworkChange(state.ipv4Stats, reason) else null
+            TestMode.IPV6_ONLY -> null
+        }
+        val ipv6 = when (config.mode) {
+            TestMode.IPV6_ONLY -> stoppedStatsForNetworkChange(state.ipv6Stats, reason)
+            TestMode.IPV4_THEN_IPV6 -> if (state.ipv6Stats.totalAttempts > 0) stoppedStatsForNetworkChange(state.ipv6Stats, reason) else null
+            TestMode.IPV4_ONLY -> null
+        }
+        return SessionSummary(
+            startedAtEpochMs = if (currentStartedAt > 0L) currentStartedAt else System.currentTimeMillis(),
+            host = config.host,
+            port = config.port,
+            mode = config.mode,
+            ipv4Stats = ipv4,
+            ipv6Stats = ipv6
+        )
+    }
+
+    suspend fun interruptForNetworkChange(reason: String = "网络环境变化") {
+        if (!state.isAdding) return
+        manualStopRequested = true
+        runningJob?.cancel()
+        runningJob = null
+        alignPingWithSessionEnd()
+        pingJob?.cancel()
+        pingJob = null
+        appendLog(LogLine(level = LogLevel.ERROR, text = "$reason，已中断测试并保存历史。"))
+        val summary = buildNetworkInterruptedSummary(reason)
+        val closed = tester.release()
+        appendLog(LogLine(level = LogLevel.WARN, text = "$reason，已释放连接：$closed 条"))
+        if (summary != null) {
+            appendHistorySafely(summary)
+            refreshHistory()
+            state = state.copy(
+                isAdding = false,
+                status = "$reason · 已释放",
+                summary = summary,
+                error = reason,
+                ipv4Stats = summary.ipv4Stats?.copy(activeSessions = 0) ?: state.ipv4Stats.copy(activeSessions = 0),
+                ipv6Stats = summary.ipv6Stats?.copy(activeSessions = 0) ?: state.ipv6Stats.copy(activeSessions = 0)
+            )
+        } else {
+            state = state.copy(isAdding = false, status = "$reason · 已释放", error = reason)
+        }
+        stopForegroundNotice(context)
+    }
+
+    fun startNetworkWatch(startedAt: Long, signature: String) {
+        networkWatchJob?.cancel()
+        networkWatchJob = scope.launch {
+            delay(1500L)
+            while (currentStartedAt == startedAt && state.isAdding) {
+                val now = currentNetworkSignature(context)
+                if (now != signature) {
+                    interruptForNetworkChange("网络环境变化")
+                    break
+                }
+                delay(1000L)
+            }
+        }
+    }
+
     fun startTest() {
         val config = buildConfig() ?: return
         ensureNotificationPermission()
@@ -573,6 +658,7 @@ private fun NetSessionTesterApp() {
         val startedAt = System.currentTimeMillis()
         currentStartedAt = startedAt
         currentTestConfig = config
+        testNetworkSignature = currentNetworkSignature(context)
         resetCurrentCharts()
         refreshPublicIp()
         manualStopRequested = false
@@ -586,6 +672,7 @@ private fun NetSessionTesterApp() {
         )
         appendLog(LogLine(level = LogLevel.INFO, text = "目标：${config.host}:${config.port} | 模式：${config.mode.label} | 新增：${config.batchSize} | 间隔：${config.intervalMs}ms"))
         startPingMonitor(config, startedAt)
+        startNetworkWatch(startedAt, testNetworkSignature)
 
         runningJob = scope.launch {
             var summary: SessionSummary? = null
@@ -636,6 +723,8 @@ private fun NetSessionTesterApp() {
                 alignPingWithSessionEnd()
                 pingJob?.cancel()
                 pingJob = null
+                networkWatchJob?.cancel()
+                networkWatchJob = null
                 if (!manualStopRequested) {
                     val closed = tester.release()
                     if (completedNormally) {
@@ -712,6 +801,8 @@ private fun NetSessionTesterApp() {
         alignPingWithSessionEnd()
         pingJob?.cancel()
         pingJob = null
+        networkWatchJob?.cancel()
+        networkWatchJob = null
         appendLog(LogLine(level = LogLevel.WARN, text = "手动停止；已停止新增并保存历史。"))
         saveManualStopSummary("手动停止")
         scope.launch {
@@ -736,6 +827,8 @@ private fun NetSessionTesterApp() {
             alignPingWithSessionEnd()
             pingJob?.cancel()
             pingJob = null
+            networkWatchJob?.cancel()
+            networkWatchJob = null
             appendLog(LogLine(level = LogLevel.WARN, text = "强制释放；已停止测试并保存历史。"))
             saveManualStopSummary("强制释放")
         } else {
@@ -744,6 +837,8 @@ private fun NetSessionTesterApp() {
             alignPingWithSessionEnd()
             pingJob?.cancel()
             pingJob = null
+            networkWatchJob?.cancel()
+            networkWatchJob = null
         }
         scope.launch {
             val closed = tester.release()
@@ -824,9 +919,7 @@ private fun NetSessionTesterApp() {
                     shape = ShapeM,
                     modifier = Modifier.fillMaxWidth()
                 )
-            },
-            shape = ShapeL,
-            containerColor = OneUiSurface
+            }
         )
     }
 
@@ -851,9 +944,7 @@ private fun NetSessionTesterApp() {
                 ) {
                     detailLines.forEach { Text(it, color = TextDark, fontSize = 12.sp) }
                 }
-            },
-            shape = ShapeL,
-            containerColor = OneUiSurface
+            }
         )
     }
 
@@ -1114,8 +1205,7 @@ private fun HistoryDetailDialog(summary: SessionSummary, maskPrivacy: Boolean, o
                 }
             }
         },
-        shape = ShapeL,
-        containerColor = OneUiSurface
+        shape = ShapeL
     )
 }
 
@@ -1431,7 +1521,7 @@ private fun TestPage(
         item {
             SoftCard {
                 SectionTitle("∿", "测试控制", Blue)
-                Text(if (isAdding) "● 正在运行 · 已连接目标" else "状态：$status", color = if (isAdding) Green else Muted, fontWeight = FontWeight.Medium, fontSize = 12.sp, lineHeight = 15.sp)
+                Text(if (isAdding) "● 正在运行 · 已连接目标" else "状态：$status", color = if (isAdding) Green else Muted, fontWeight = FontWeight.Medium)
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     Button(onClick = onStart, enabled = !isAdding, modifier = Modifier.weight(1f).height(38.dp), shape = ShapeM) {
                         Icon(Icons.Filled.PlayArrow, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("开始", fontSize = 13.sp)
@@ -1634,14 +1724,14 @@ private fun PageTitle(title: String, subtitle: String?) {
 
     Column(modifier = Modifier.padding(top = 4.dp, bottom = 2.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(title, fontSize = 24.sp, lineHeight = 28.sp, fontWeight = FontWeight.ExtraBold, color = TextDark)
+            Text(title, fontSize = 22.sp, lineHeight = 25.sp, fontWeight = FontWeight.ExtraBold, color = TextDark)
             if (title == "宽带会话测试器") {
                 Spacer(Modifier.width(8.dp))
                 Box(
                     modifier = Modifier
-                        .background(BlueSoft, RoundedCornerShape(16.dp))
+                        .background(BlueSoft, RoundedCornerShape(10.dp))
                         .clickable { showVersionDialog = true }
-                        .padding(horizontal = 9.dp, vertical = 4.dp)
+                        .padding(horizontal = 7.dp, vertical = 3.dp)
                 ) {
                     Text("v0.9.8", color = Blue, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                 }
@@ -1674,8 +1764,7 @@ private fun VersionInfoDialog(onDismiss: () -> Unit, onOpenGithub: () -> Unit) {
                 Text("https://github.com/OnlyChallgener/NetSessionTester", color = Blue, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
         },
-        shape = ShapeL,
-        containerColor = OneUiSurface
+        shape = ShapeL
     )
 }
 
@@ -1692,12 +1781,12 @@ private fun SoftCard(content: @Composable ColumnScope.() -> Unit) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = ShapeL,
-        colors = CardDefaults.cardColors(containerColor = OneUiSurface.copy(alpha = 0.985f)),
-        elevation = CardDefaults.cardElevation(defaultElevation = 5.dp)
+        colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.96f)),
+        elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
     ) {
         Column(
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 13.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+            modifier = Modifier.padding(9.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
             content = content
         )
     }
@@ -1706,9 +1795,9 @@ private fun SoftCard(content: @Composable ColumnScope.() -> Unit) {
 @Composable
 private fun SectionTitle(mark: String, title: String, color: Color) {
     Row(verticalAlignment = Alignment.CenterVertically) {
-        MarkBox(mark, color.copy(alpha = 0.13f), color)
-        Spacer(Modifier.width(9.dp))
-        Text(title, fontSize = 16.sp, lineHeight = 19.sp, fontWeight = FontWeight.ExtraBold, color = TextDark)
+        MarkBox(mark, color.copy(alpha = 0.12f), color)
+        Spacer(Modifier.width(10.dp))
+        Text(title, fontSize = 17.sp, fontWeight = FontWeight.Bold, color = TextDark)
     }
 }
 
@@ -1716,12 +1805,11 @@ private fun SectionTitle(mark: String, title: String, color: Color) {
 private fun MarkBox(mark: String, bg: Color, fg: Color) {
     Box(
         modifier = Modifier
-            .width(38.dp)
-            .height(38.dp)
-            .background(bg, RoundedCornerShape(15.dp)),
+            .background(bg, RoundedCornerShape(11.dp))
+            .padding(7.dp),
         contentAlignment = Alignment.Center
     ) {
-        Icon(iconFor(mark), contentDescription = null, tint = fg, modifier = Modifier.width(18.dp).height(18.dp))
+        Icon(iconFor(mark), contentDescription = null, tint = fg, modifier = Modifier.width(16.dp).height(16.dp))
     }
 }
 
@@ -1746,7 +1834,7 @@ private fun CleanField(
         textStyle = MaterialTheme.typography.bodyMedium.copy(fontSize = 13.sp),
         shape = ShapeM,
         keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
-        modifier = modifier.fillMaxWidth().height(56.dp)
+        modifier = modifier.fillMaxWidth().height(52.dp)
     )
 }
 
@@ -1760,7 +1848,7 @@ private fun ParamField(label: String, value: String, onValueChange: (String) -> 
         textStyle = MaterialTheme.typography.bodyMedium.copy(fontSize = 13.sp),
         shape = ShapeM,
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-        modifier = modifier.height(58.dp)
+        modifier = modifier.height(56.dp)
     )
 }
 
@@ -1770,7 +1858,7 @@ private fun ModeSelector(mode: TestMode, onModeChange: (TestMode) -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .background(OneUiTile, ShapeM)
+            .background(Color(0xFFF8FAFC), ShapeM)
             .padding(3.dp),
         horizontalArrangement = Arrangement.spacedBy(3.dp)
     ) {
@@ -1780,7 +1868,7 @@ private fun ModeSelector(mode: TestMode, onModeChange: (TestMode) -> Unit) {
             Box(
                 modifier = Modifier
                     .weight(1f)
-                    .background(if (selected) OneUiSurface else Color.Transparent, ShapeM)
+                    .background(if (selected) Color.White else Color.Transparent, ShapeM)
                     .clickable { onModeChange(item) }
                     .padding(vertical = 10.dp),
                 contentAlignment = Alignment.Center
@@ -1804,7 +1892,7 @@ private fun SessionStatsCard(
         Row(verticalAlignment = Alignment.CenterVertically) {
             SectionTitle("▮", title, Blue)
             Spacer(Modifier.weight(1f))
-            Text(stats.phase, color = Blue, fontWeight = FontWeight.Bold, maxLines = 1, fontSize = 12.sp)
+            Text(stats.phase, color = Blue, fontWeight = FontWeight.Bold, maxLines = 1, fontSize = 13.sp)
         }
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             MetricTile("活动", stats.activeSessions.toString(), Blue, Modifier.weight(1f))
@@ -1831,7 +1919,7 @@ private fun SessionStatsCard(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(72.dp)
-                    .background(OneUiTile, ShapeM),
+                    .background(Color(0xFFF8FAFC), ShapeM),
                 contentAlignment = Alignment.Center
             ) { Text("开始测试后显示本次曲线", color = Muted, fontSize = 12.sp) }
         } else {
@@ -1847,7 +1935,7 @@ private fun ChartModeSelector(chartMode: ChartMode, onChartModeChange: (ChartMod
             val selected = chartMode == mode
             Box(
                 modifier = Modifier
-                    .background(if (selected) OneUiSelected else Color.White, ShapeM)
+                    .background(if (selected) Color(0xFFEBDCFD) else Color.White, ShapeM)
                     .clickable { onChartModeChange(mode) }
                     .padding(horizontal = 12.dp, vertical = 7.dp)
             ) {
@@ -1921,7 +2009,7 @@ private fun SessionGrowthChart(points: List<ChartPoint>) {
             Column(modifier = Modifier.width(34.dp).height(145.dp), verticalArrangement = Arrangement.SpaceBetween) {
                 axisLabels(maxY).forEach { Text(it.toString(), color = Muted, fontSize = 9.sp, maxLines = 1) }
             }
-            Canvas(modifier = Modifier.weight(1f).height(145.dp).background(OneUiTile, ShapeS).padding(6.dp)) {
+            Canvas(modifier = Modifier.weight(1f).height(145.dp).background(Color(0xFFF8FAFC), ShapeS).padding(6.dp)) {
                 val w = size.width
                 val h = size.height
                 repeat(4) { idx ->
@@ -1958,7 +2046,7 @@ private fun SessionGrowthChart(points: List<ChartPoint>) {
 private fun SessionPeakChart(stats: ProtocolStats, points: List<ChartPoint>) {
     val peak = maxOf(stats.activeSessions, stats.maxStableSessions, stats.totalSuccess, points.maxOfOrNull { it.active } ?: 0)
     val maxValue = sessionYAxisMax(maxOf(peak, stats.totalFailure, stats.totalAttempts))
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.background(OneUiTile, ShapeM).padding(10.dp)) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.background(Color(0xFFF8FAFC), ShapeM).padding(10.dp)) {
         HistoryBarRow("活动峰值", peak, maxValue, Blue)
         HistoryBarRow("失败累计", stats.totalFailure, maxValue, ErrorRed)
         HistoryBarRow("总计尝试", stats.totalAttempts, maxValue, Navy)
@@ -2048,10 +2136,10 @@ private fun PingCompactChartCard(pingPoints: List<PingPoint>) {
 
 @Composable
 private fun MiniMetric(label: String, value: String, color: Color, modifier: Modifier = Modifier) {
-    Box(modifier = modifier.background(OneUiTile, ShapeM).padding(horizontal = 7.dp, vertical = 7.dp)) {
-        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text(label, color = Muted, fontSize = 9.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
-            Text(value, color = color, fontSize = 12.sp, lineHeight = 14.sp, fontWeight = FontWeight.ExtraBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    Box(modifier = modifier.background(Color(0xFFF8FAFC), ShapeM).padding(horizontal = 5.dp, vertical = 5.dp)) {
+        Column {
+            Text(label, color = Muted, fontSize = 9.sp, maxLines = 1)
+            Text(value, color = color, fontSize = 11.sp, lineHeight = 13.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
     }
 }
@@ -2070,7 +2158,7 @@ private fun PingLineChart(points: List<PingPoint>) {
             Column(modifier = Modifier.width(34.dp).height(142.dp), verticalArrangement = Arrangement.SpaceBetween) {
                 axisLabels(maxY).forEach { Text(it.toString(), color = Muted, fontSize = 9.sp, maxLines = 1) }
             }
-            Canvas(modifier = Modifier.weight(1f).height(142.dp).background(OneUiTile, ShapeS).padding(6.dp)) {
+            Canvas(modifier = Modifier.weight(1f).height(142.dp).background(Color(0xFFF8FAFC), ShapeS).padding(6.dp)) {
                 val w = size.width
                 val h = size.height
                 repeat(4) { idx ->
@@ -2126,7 +2214,7 @@ private fun DiagnosisAdviceInlineCard(mode: TestMode, ipv4Stats: ProtocolStats, 
             Spacer(Modifier.weight(1f))
             StatusChip("自动分析", BlueSoft, Blue, compact = true)
         }
-        Text(conclusion, color = TextDark, fontSize = 13.sp, fontWeight = FontWeight.Bold, lineHeight = 17.sp)
+        Text(conclusion, color = TextDark, fontSize = 14.sp, fontWeight = FontWeight.Bold, lineHeight = 18.sp)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             MetricTile("IPv4峰值", if (hasV4) v4Peak.toString() else "—", if (v4Peak in 1..999) ErrorRed else Blue, Modifier.weight(1f))
             MetricTile("IPv6峰值", if (hasV6) v6Peak.toString() else "—", if (v6Peak >= 5000) Green else Blue, Modifier.weight(1f))
@@ -2146,12 +2234,12 @@ private fun MetricTile(label: String, value: String, color: Color, modifier: Mod
     Card(
         modifier = modifier,
         shape = ShapeM,
-        colors = CardDefaults.cardColors(containerColor = OneUiTile),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFFF8FAFC)),
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
     ) {
-        Column(Modifier.padding(horizontal = 8.dp, vertical = 7.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text(label, color = Muted, fontSize = 9.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
-            Text(value, color = color, fontSize = 13.sp, lineHeight = 15.sp, fontWeight = FontWeight.ExtraBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Column(Modifier.padding(horizontal = 7.dp, vertical = 6.dp)) {
+            Text(label, color = Muted, fontSize = 10.sp, maxLines = 1)
+            Text(value, color = color, fontSize = 13.sp, lineHeight = 15.sp, fontWeight = FontWeight.Bold, maxLines = 1)
         }
     }
 }
@@ -2425,7 +2513,7 @@ private fun HistoryCard(
 private fun DetailItem(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, value: String, color: Color, modifier: Modifier = Modifier) {
     Row(
         modifier = modifier
-            .background(OneUiTile, RoundedCornerShape(10.dp))
+            .background(Color(0xFFF8FAFC), RoundedCornerShape(10.dp))
             .padding(horizontal = 8.dp, vertical = 7.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -2442,10 +2530,10 @@ private fun DetailItem(icon: androidx.compose.ui.graphics.vector.ImageVector, la
 private fun StatusChip(text: String, bg: Color, fg: Color, compact: Boolean = false) {
     Box(
         modifier = Modifier
-            .background(bg.copy(alpha = 0.92f), RoundedCornerShape(if (compact) 18.dp else 22.dp))
-            .padding(horizontal = if (compact) 11.dp else 14.dp, vertical = if (compact) 6.dp else 8.dp)
+            .background(bg, RoundedCornerShape(if (compact) 12.dp else 14.dp))
+            .padding(horizontal = if (compact) 9.dp else 11.dp, vertical = if (compact) 5.dp else 7.dp)
     ) {
-        Text(text, color = fg, fontWeight = FontWeight.ExtraBold, fontSize = if (compact) 11.sp else 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(text, color = fg, fontWeight = FontWeight.Bold, fontSize = if (compact) 11.sp else 12.sp, maxLines = 1)
     }
 }
 
@@ -2514,46 +2602,41 @@ private fun PublicExitLine(
 
 @Composable
 private fun BottomNav(selectedTab: MainTab, onSelect: (MainTab) -> Unit) {
-    Column(
+    Row(
         modifier = Modifier
             .fillMaxWidth()
-            .background(OneUiBottom.copy(alpha = 0.96f))
+            .height(58.dp)
+            .background(Color(0xFFEAF2FF))
             .navigationBarsPadding()
-            .padding(horizontal = 18.dp, vertical = 5.dp)
+            .padding(horizontal = 22.dp, vertical = 2.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(58.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            MainTab.entries.forEach { tab ->
-                val selected = selectedTab == tab
-                val image = when (tab) {
-                    MainTab.SETTINGS -> Icons.Filled.Settings
-                    MainTab.TEST -> Icons.Filled.PlayArrow
-                    MainTab.LOGS -> Icons.Filled.Article
-                }
-                Column(
-                    modifier = Modifier
-                        .width(94.dp)
-                        .height(54.dp)
-                        .background(if (selected) OneUiSelected else Color.Transparent, RoundedCornerShape(28.dp))
-                        .clickable { onSelect(tab) }
-                        .padding(vertical = 5.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center
-                ) {
-                    Icon(
-                        image,
-                        contentDescription = tab.label,
-                        tint = if (selected) Blue else Muted,
-                        modifier = Modifier.width(23.dp).height(23.dp)
-                    )
-                    Spacer(Modifier.height(3.dp))
-                    Text(tab.label, color = TextDark, fontSize = 11.sp, lineHeight = 13.sp, fontWeight = if (selected) FontWeight.Bold else FontWeight.SemiBold, maxLines = 1)
-                }
+        MainTab.entries.forEach { tab ->
+            val selected = selectedTab == tab
+            val image = when (tab) {
+                MainTab.SETTINGS -> Icons.Filled.Settings
+                MainTab.TEST -> Icons.Filled.PlayArrow
+                MainTab.LOGS -> Icons.Filled.Article
+            }
+            Column(
+                modifier = Modifier
+                    .width(86.dp)
+                    .height(56.dp)
+                    .background(if (selected) Color(0xFFEBDCFD) else Color.Transparent, RoundedCornerShape(24.dp))
+                    .clickable { onSelect(tab) }
+                    .padding(vertical = 5.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                Icon(
+                    image,
+                    contentDescription = tab.label,
+                    tint = if (selected) Blue else Muted,
+                    modifier = Modifier.width(22.dp).height(22.dp)
+                )
+                Spacer(Modifier.height(3.dp))
+                Text(tab.label, color = TextDark, fontSize = 11.sp, lineHeight = 13.sp, maxLines = 1)
             }
         }
     }
@@ -2671,24 +2754,20 @@ private fun String.onlyDigits(): String = filter { it.isDigit() }
 private val IPV4_REGEX = Regex("""\b(?:\d{1,3}\.){3}\d{1,3}\b""")
 private val IPV6_REGEX = Regex("""(?i)(?<![\w.])(?:[0-9a-f]{1,4}:){2,}[0-9a-f]{0,4}(?:%[\w.]+)?(?![\w.])""")
 
-private val BgTop = Color(0xFFF7FAFF)
-private val Bg = Color(0xFFF2F5FB)
-private val TextDark = Color(0xFF101826)
-private val Muted = Color(0xFF66758A)
-private val Border = Color(0xFFE6EAF1)
-private val Blue = Color(0xFF2F6FE4)
-private val BlueSoft = Color(0xFFEAF3FF)
-private val Green = Color(0xFF18A867)
-private val GreenSoft = Color(0xFFEAF8F0)
-private val ErrorRed = Color(0xFFEF4B55)
-private val RedSoft = Color(0xFFFFEEF0)
-private val Orange = Color(0xFFFF8A22)
-private val Purple = Color(0xFF8652F6)
-private val Navy = Color(0xFF0B2A5E)
-private val OneUiSurface = Color(0xFFFEFEFF)
-private val OneUiTile = Color(0xFFF7F9FD)
-private val OneUiBottom: Color = Color(0xFFEAF2FF)
-private val OneUiSelected = Color(0xFFEBDDFE)
-private val ShapeL = RoundedCornerShape(30.dp)
-private val ShapeM = RoundedCornerShape(22.dp)
-private val ShapeS = RoundedCornerShape(16.dp)
+private val BgTop = Color(0xFFF8FBFF)
+private val Bg = Color(0xFFF6F8FC)
+private val TextDark = Color(0xFF111827)
+private val Muted = Color(0xFF64748B)
+private val Border = Color(0xFFE5E7EB)
+private val Blue = Color(0xFF2563EB)
+private val BlueSoft = Color(0xFFEFF6FF)
+private val Green = Color(0xFF16A34A)
+private val GreenSoft = Color(0xFFEAFBF0)
+private val ErrorRed = Color(0xFFEF4444)
+private val RedSoft = Color(0xFFFFF1F2)
+private val Orange = Color(0xFFF97316)
+private val Purple = Color(0xFF7C3AED)
+private val Navy = Color(0xFF0F2F6E)
+private val ShapeL = RoundedCornerShape(20.dp)
+private val ShapeM = RoundedCornerShape(14.dp)
+private val ShapeS = RoundedCornerShape(10.dp)

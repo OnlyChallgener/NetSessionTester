@@ -30,55 +30,13 @@ import java.net.SocketException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 import java.util.Collections
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicInteger
 
 class TcpTester {
-    private companion object {
-        // 高并发会话测试不能被长连接超时拖慢；用户设置更低时尊重用户设置。
-        const val MAX_EFFECTIVE_CONNECT_TIMEOUT_MS = 800
-        // 活动会话超过这个值后，失败上限不再提前结束，继续追 FD 上限。
-        const val FD_CHASE_THRESHOLD = 5000
-    }
-
     private val socketLock = Mutex()
     private val heldSockets: MutableMap<IpProtocol, MutableList<Socket>> = mutableMapOf(
         IpProtocol.IPV4 to Collections.synchronizedList(mutableListOf()),
         IpProtocol.IPV6 to Collections.synchronizedList(mutableListOf())
     )
-
-    /**
-     * 高并发失败计数门：
-     * - 用 CAS 精准封顶，失败停=200 时 UI/历史最多显示 200。
-     * - 失败上限只是“是否停止新增”的判断信号，不提前限速、不提前关闭 pending。
-     * - 当活动会话已经很高时继续冲 FD 上限；活动很低时按失败上限停止。
-     */
-    private class FailureGate(private val limit: Int) {
-        private val count = AtomicInteger(0)
-        private val reachedLimit = AtomicBoolean(false)
-
-        fun value(): Int = count.get().coerceAtMost(limit)
-        fun isLimitReached(): Boolean = reachedLimit.get()
-
-        /**
-         * @return true 表示这一次失败被计入；超过上限后的失败不再计数。
-         */
-        fun recordFailure(): Boolean {
-            while (true) {
-                val current = count.get()
-                if (current >= limit) {
-                    reachedLimit.set(true)
-                    return false
-                }
-                val next = current + 1
-                if (count.compareAndSet(current, next)) {
-                    if (next >= limit) reachedLimit.set(true)
-                    return true
-                }
-            }
-        }
-    }
 
     suspend fun resolveHost(host: String): ResolveResult = withContext(Dispatchers.IO) {
         val cleanHost = host.trim().removePrefix("[").removeSuffix("]").ifBlank { "www.baidu.com" }
@@ -141,29 +99,29 @@ class TcpTester {
         var lastTotalAttempts = 0
         val errors = linkedMapOf<String, Int>()
         var stats = ProtocolStats(protocol = protocol, phase = "建连中", resolvedAddresses = addressText)
-        val failureGate = FailureGate(config.failureLimit)
         onStats(stats)
 
-        val effectiveTimeoutMs = config.timeoutMs.coerceAtMost(MAX_EFFECTIVE_CONNECT_TIMEOUT_MS)
-        if (effectiveTimeoutMs != config.timeoutMs) {
-            onLog(LogLine(level = LogLevel.WARN, text = "${protocol.label} 高并发连接超时已限制为 ${effectiveTimeoutMs}ms，避免长超时拖慢批次"))
-        }
-
-        while (currentCoroutineContext().isActive && totalSuccess < config.successLimit) {
+        while (currentCoroutineContext().isActive && totalSuccess < config.successLimit && totalFailure < config.failureLimit) {
             val remainingSuccess = config.successLimit - totalSuccess
             val targetBatch = minOf(config.batchSize, remainingSuccess)
             if (targetBatch <= 0) break
 
-            // 0.9.7 高速核心：不做 pending 预限速，不按失败额度拆小批次。
-            // 失败停是停止条件，不是提前限速条件；这样 IPv6 可继续冲到 Android FD/Socket 附近。
-            val batchResult = openBatch(addresses, config.port, effectiveTimeoutMs, targetBatch, failureGate)
+            // 不再用 failureLimit 直接限制每批新增，避免“新增”被固定成 200。
+            // 逻辑：无失败时可按用户设置的 500/1000 批量新增；一旦出现失败，后续自动缩小子批次，
+            // 让最终失败数尽量靠近失败停值，而不是大幅超出。
+            val batchResult = openBatchWithFailureBudget(
+                addresses = addresses,
+                port = config.port,
+                timeoutMs = config.timeoutMs,
+                targetCount = targetBatch,
+                failureBudget = (config.failureLimit - totalFailure).coerceAtLeast(0)
+            )
 
             totalSuccess += batchResult.successSockets.size
-            val previousFailure = totalFailure
-            totalFailure = failureGate.value()
-            val failAdd = (totalFailure - previousFailure).coerceAtLeast(0)
+            val failAdd = batchResult.errors.values.sum()
+            totalFailure += failAdd
             totalAttempts += batchResult.successSockets.size + failAdd
-            mergeErrors(errors, batchResult.errors)
+            batchResult.errors.forEach { (key, value) -> errors[key] = (errors[key] ?: 0) + value }
 
             socketLock.withLock { heldSockets.getValue(protocol).addAll(batchResult.successSockets) }
 
@@ -191,7 +149,7 @@ class TcpTester {
             val failureDeltaText = if (failAdd > 0) "(+$failAdd)" else ""
             onLog(LogLine(level = LogLevel.STAT, text = "${protocol.label} 统计 - 成功：$totalSuccess$successDeltaText | 失败：$totalFailure$failureDeltaText | 活动：$active | 总计：$totalAttempts | 新增：$added | CPS：${cps}/秒"))
 
-            if (batchResult.fdLimitDetected) {
+            if (batchResult.errors.containsKey("FD上限")) {
                 stats = stats.copy(
                     phase = "FD上限",
                     errorSummary = errors.toMap()
@@ -201,10 +159,7 @@ class TcpTester {
                 break
             }
 
-            // 失败上限策略：
-            // - 活动会话较低时，失败停用于判定网络/目标已经失败，立即结束。
-            // - 活动会话已经较高时，不因失败上限提前刹车，继续冲 Android FD/Socket 上限。
-            if (failureGate.isLimitReached() && active < FD_CHASE_THRESHOLD) {
+            if (totalFailure >= config.failureLimit) {
                 onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 达到失败上限：${config.failureLimit}"))
                 break
             }
@@ -231,99 +186,74 @@ class TcpTester {
         return finalStats
     }
 
-    private fun mergeErrors(
-        target: MutableMap<String, Int>,
-        source: Map<String, Int>
-    ) {
-        source.forEach { (key, value) ->
-            if (value > 0) target[key] = (target[key] ?: 0) + value
+    private suspend fun openBatchWithFailureBudget(
+        addresses: List<InetAddress>,
+        port: Int,
+        timeoutMs: Int,
+        targetCount: Int,
+        failureBudget: Int
+    ): BatchOpenResult {
+        val allSockets = mutableListOf<Socket>()
+        val allErrors = linkedMapOf<String, Int>()
+        var attempted = 0
+        var failed = 0
+        var cautious = false
+
+        while (currentCoroutineContext().isActive && attempted < targetCount && failed < failureBudget) {
+            val remainingTarget = targetCount - attempted
+            val remainingFailureBudget = failureBudget - failed
+
+            // 正常网络下用 100 并发子批次，出现失败后降到 25，避免失败数冲太多。
+            val maxChunk = if (cautious) 25 else 100
+            val chunkSize = minOf(remainingTarget, maxChunk, remainingFailureBudget.coerceAtLeast(1))
+            if (chunkSize <= 0) break
+
+            val result = openBatch(addresses, port, timeoutMs, chunkSize)
+            val failAdd = result.errors.values.sum()
+
+            allSockets += result.successSockets
+            result.errors.forEach { (key, value) -> allErrors[key] = (allErrors[key] ?: 0) + value }
+
+            attempted += result.successSockets.size + failAdd
+            failed += failAdd
+            if (failAdd > 0) cautious = true
         }
+
+        return BatchOpenResult(allSockets, allErrors)
     }
 
     private suspend fun openBatch(
         addresses: List<InetAddress>,
         port: Int,
         timeoutMs: Int,
-        count: Int,
-        failureGate: FailureGate
+        count: Int
     ): BatchOpenResult = coroutineScope {
-        val pendingSockets = ConcurrentHashMap.newKeySet<Socket>()
-        val successSockets = Collections.synchronizedList(mutableListOf<Socket>())
-        val errorCounters = ConcurrentHashMap<String, AtomicInteger>()
-        val fdLimitDetected = AtomicBoolean(false)
-
-        fun addError(name: String) {
-            errorCounters.getOrPut(name) { AtomicInteger(0) }.incrementAndGet()
-        }
-
-        fun closePendingSockets() {
-            pendingSockets.forEach { socket -> runCatching { socket.close() } }
-        }
-
         val jobs = (0 until count).map { index ->
             async(Dispatchers.IO) {
                 val address = addresses[index % addresses.size]
-                val result = openOneTracked(address, port, timeoutMs, pendingSockets)
-
-                result.socket?.let { socket ->
-                    if (!fdLimitDetected.get()) {
-                        successSockets.add(socket)
-                    } else {
-                        runCatching { socket.close() }
-                    }
-                    return@async
-                }
-
-                val error = result.error ?: return@async
-                if (error == "FD上限") {
-                    addError(error)
-                    fdLimitDetected.set(true)
-                    closePendingSockets()
-                    return@async
-                }
-
-                if (failureGate.recordFailure()) {
-                    addError(error)
-                }
+                openOne(address, port, timeoutMs)
             }
         }
-        jobs.awaitAll()
-
-        BatchOpenResult(
-            successSockets = successSockets.toList(),
-            errors = errorCounters.mapValues { it.value.get() },
-            fdLimitDetected = fdLimitDetected.get()
-        )
+        val results = jobs.awaitAll()
+        val sockets = mutableListOf<Socket>()
+        val errors = linkedMapOf<String, Int>()
+        results.forEach { result ->
+            result.socket?.let { sockets += it }
+            result.error?.let { errors[it] = (errors[it] ?: 0) + 1 }
+        }
+        BatchOpenResult(sockets, errors)
     }
 
-    private fun openOneTracked(
-        address: InetAddress,
-        port: Int,
-        timeoutMs: Int,
-        pendingSockets: MutableSet<Socket>
-    ): OpenResult {
-        val socket = try {
-            Socket()
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            return OpenResult(error = classifyError(e))
-        }
-
-        pendingSockets.add(socket)
+    private fun openOne(address: InetAddress, port: Int, timeoutMs: Int): OpenResult {
         return try {
+            val socket = Socket()
             socket.keepAlive = true
             socket.tcpNoDelay = true
             socket.connect(InetSocketAddress(address, port), timeoutMs)
-            pendingSockets.remove(socket)
             OpenResult(socket = socket)
         } catch (e: CancellationException) {
-            pendingSockets.remove(socket)
-            runCatching { socket.close() }
             throw e
         } catch (e: Exception) {
-            pendingSockets.remove(socket)
-            runCatching { socket.close() }
             OpenResult(error = classifyError(e))
         }
     }
@@ -397,9 +327,5 @@ class TcpTester {
     }
 
     private data class OpenResult(val socket: Socket? = null, val error: String? = null)
-    private data class BatchOpenResult(
-        val successSockets: List<Socket>,
-        val errors: Map<String, Int>,
-        val fdLimitDetected: Boolean = false
-    )
+    private data class BatchOpenResult(val successSockets: List<Socket>, val errors: Map<String, Int>)
 }

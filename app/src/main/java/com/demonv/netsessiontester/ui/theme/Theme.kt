@@ -6,13 +6,12 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 
 private val LightColors = lightColorScheme(
-    primary = Color(0xFF2F6FE4),
-    secondary = Color(0xFF18A867),
-    tertiary = Color(0xFF8652F6),
-    background = Color(0xFFF2F5FB),
-    surface = Color(0xFFFEFEFF),
-    surfaceVariant = Color(0xFFF7F9FD),
-    error = Color(0xFFEF4B55)
+    primary = Color(0xFF2563EB),
+    secondary = Color(0xFF16A34A),
+    tertiary = Color(0xFF7C3AED),
+    background = Color(0xFFF6F8FC),
+    surface = Color.White,
+    error = Color(0xFFEF4444)
 )
 
 @Composable

@@ -283,40 +283,10 @@ Artifact：NetSessionTester-v0.9.8-final-axis-detail-fix-debug-apk
 - GitHub Actions 改为 release 签名 APK，使用仓库 Secrets：ANDROID_KEYSTORE_BASE64 / ANDROID_KEYSTORE_PASSWORD / ANDROID_KEY_ALIAS / ANDROID_KEY_PASSWORD。
 - versionCode = 56，versionName = 0.9.8。
 
-## v0.9.8 performance core check
 
-- TCP 测试核心不使用 OkHttp，因此不存在 OkHttp Dispatcher maxRequests / maxRequestsPerHost 限制。
-- 会话保持测试使用 java.net.Socket + Kotlin Coroutine async(Dispatchers.IO) 并发打开连接。
-- 发包/建连循环不在 UI 线程，不使用单线程 Handler，不使用全局 send 锁。
-- socketLock 只用于维护 heldSockets 列表，不包住 socket.connect。
-- 移除 failure budget 子批次限速，恢复 0.9.7 风格高速批量建连。
-- 高并发 connect timeout 强制上限 800ms，避免长超时拖慢批次。
-- 失败数显示按失败停值封顶，FD 上限仍优先判定。
+## v0.9.8 097 Core Precise Failure + Network Watch
 
-
-## v0.9.8 097 Core CAS Failure Gate
-
-- 保留 0.9.7 高速建连核心，不做 pending 预限速，不牺牲 CPS。
-- 新增 CAS FailureGate：失败数用 AtomicInteger compareAndSet 精准封顶，避免 200 跑成 275/900+。
-- 达到失败上限时立即关闭 pending socket，避免等待长 timeout。
-- FD / Socket 上限优先触发熔断，保留已建立会话并避免闪退。
-- 保留 release 签名配置和 GitHub Actions signed APK 输出。
-
-
-## v0.9.8 OneUI9 UI Refresh
-
-- 仅刷新界面风格，不改 TCP 测试核心。
-- 保留 0.9.7 高速核心与 CAS 精准失败数逻辑。
-- 卡片、指标块、分段按钮、底部导航、弹窗统一为 OneUI9 风格的大圆角、浅色层级和柔和阴影。
-- 保留签名发布配置，GitHub Actions 继续输出 signed release APK。
-- 回归保护：通知跳转、FD保护、版本弹窗、历史详情卡片、滑动删除、图表坐标、Ping 500ms 均未删除。
-
-
-## v0.9.8 OneUI9 FD200 UI Tune
-
-- 保持 0.9.7 高速测试核心，不做 pending 预限速。
-- 失败数使用 CAS 精准封顶，失败停=200 时 UI/历史最多显示 200。
-- 活动会话超过 5000 后，失败上限不再提前结束，继续追 Android FD/Socket 上限。
-- FD 上限优先停止并释放，避免闪退。
-- 圈出的测试控制、会话标题、指标卡、诊断建议、最近日志等字号整体小一号。
-- 保留 GitHub Release 签名配置。
+- 测速核心参考 NetSessionTester_v0.9.7_changelog_fix：按失败设定值停止，不再追顶 FD。
+- 失败停为 200 时，到达 200 后停止测试，释放连接并保存历史。
+- 切换 WiFi/蜂窝/VPN 或活动网络变化时，自动中断测试、释放连接并保存历史记录。
+- 保留 0.9.8 UI、历史、诊断、签名发布配置。
