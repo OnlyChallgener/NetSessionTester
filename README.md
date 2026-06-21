@@ -1,3 +1,17 @@
+# NetSessionTester
+
+## v0.9.9 Unified Release Finalize Patch
+
+- 版本仍保持 `v0.9.9`，代码包基于 `NetSessionTester_v0.9.9_update_netinfo_release_fix_signed` 修改。
+- 新增统一终止收尾模型：正常完成、失败上限、FD/Socket 上限、手动停止、强制释放、网络切换、解析失败统一进入 `releaseAndFinalize()`。
+- 收尾顺序固定为：停止新增连接 → generation 增加 → 取消任务 → 快照并清空 heldSockets → UI 立即显示“已释放” → 后台多线程 close socket → 保存历史 → 写日志/提示。
+- `TcpTester` 新增 `detachForRelease()` 与 `closeDetachedSockets()`，避免 3 万级 socket close 时 UI 长时间停在“连接中/释放中”。
+- `openBatch/openOne` 增加 `expectedEpoch` 判断，释放开始后 late socket 会被立即 close，不能再 add 回 heldSockets。
+- FD 上限诊断状态保持 `FD上限 · 已释放`，不再写成“非正常中断”。
+- 手动停止和网络环境变化会保存历史；强制释放只清 UI 和连接，不强制新增历史。
+
+---
+
 # NetSessionTester v0.8.2 Bottom 60
 
 宽带会话测试器，Kotlin + Jetpack Compose 原生版。

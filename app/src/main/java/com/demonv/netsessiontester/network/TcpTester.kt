@@ -162,7 +162,7 @@ class TcpTester {
             }
             if (launchCount <= 0) break
 
-            val batch = openBatch(addresses, config.port, config.timeoutMs.coerceIn(300, 800), launchCount)
+            val batch = openBatch(addresses, config.port, config.timeoutMs.coerceIn(300, 800), launchCount, protocolEpoch)
             if (!currentCoroutineContext().isActive || releaseEpoch.get() != protocolEpoch) {
                 batch.successSockets.forEach { socket -> runCatching { socket.close() } }
                 break
@@ -218,12 +218,18 @@ class TcpTester {
         addresses: List<InetAddress>,
         port: Int,
         timeoutMs: Int,
-        count: Int
+        count: Int,
+        expectedEpoch: Long
     ): BatchOpenResult = coroutineScope {
+        if (releaseEpoch.get() != expectedEpoch) return@coroutineScope BatchOpenResult(emptyList(), emptyMap())
         val jobs = (0 until count).map { index ->
             async(Dispatchers.IO) {
-                val address = addresses[index % addresses.size]
-                openOne(address, port, timeoutMs)
+                if (releaseEpoch.get() != expectedEpoch) {
+                    OpenResult(discarded = true)
+                } else {
+                    val address = addresses[index % addresses.size]
+                    openOne(address, port, timeoutMs, expectedEpoch)
+                }
             }
         }
         val results = jobs.awaitAll()
@@ -236,13 +242,19 @@ class TcpTester {
         BatchOpenResult(sockets, errors)
     }
 
-    private fun openOne(address: InetAddress, port: Int, timeoutMs: Int): OpenResult {
+    private fun openOne(address: InetAddress, port: Int, timeoutMs: Int, expectedEpoch: Long): OpenResult {
         return try {
+            if (releaseEpoch.get() != expectedEpoch) return OpenResult(discarded = true)
             val socket = Socket()
             socket.keepAlive = true
             socket.tcpNoDelay = true
             socket.connect(InetSocketAddress(address, port), timeoutMs)
-            OpenResult(socket = socket)
+            if (releaseEpoch.get() != expectedEpoch) {
+                runCatching { socket.close() }
+                OpenResult(discarded = true)
+            } else {
+                OpenResult(socket = socket)
+            }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -284,13 +296,17 @@ class TcpTester {
         }.distinctBy { it.hostAddress }
     }
 
-    suspend fun release(protocol: IpProtocol? = null): Int = withContext(Dispatchers.IO) {
+    /**
+     * Snapshot and clear held sockets immediately.
+     *
+     * Callers can update UI to "已释放" right after this returns, then close the
+     * returned snapshot in the background. releaseEpoch is incremented first so
+     * late sockets opened by an old batch are closed and never added back.
+     */
+    suspend fun detachForRelease(protocol: IpProtocol? = null): List<Socket> = withContext(Dispatchers.IO) {
         releaseEpoch.incrementAndGet()
         val targets = if (protocol == null) IpProtocol.entries else listOf(protocol)
         val socketsToClose = mutableListOf<Socket>()
-
-        // 先从持有列表中移除，再并发关闭。
-        // 这样 UI/activeCount 会立即变为 0，路由器端会话表再等待系统慢慢下降。
         socketLock.withLock {
             targets.forEach { p ->
                 val list = heldSockets.getValue(p)
@@ -298,9 +314,11 @@ class TcpTester {
                 list.clear()
             }
         }
+        socketsToClose
+    }
 
+    suspend fun closeDetachedSockets(socketsToClose: List<Socket>): Int = withContext(Dispatchers.IO) {
         if (socketsToClose.isEmpty()) return@withContext 0
-
         coroutineScope {
             socketsToClose.chunked(256).map { chunk ->
                 async(Dispatchers.IO) {
@@ -315,6 +333,11 @@ class TcpTester {
         }
     }
 
+    suspend fun release(protocol: IpProtocol? = null): Int {
+        val snapshot = detachForRelease(protocol)
+        return closeDetachedSockets(snapshot)
+    }
+
     suspend fun activeCount(protocol: IpProtocol): Int = withContext(Dispatchers.IO) {
         socketLock.withLock {
             val list = heldSockets.getValue(protocol)
@@ -323,6 +346,6 @@ class TcpTester {
         }
     }
 
-    private data class OpenResult(val socket: Socket? = null, val error: String? = null)
+    private data class OpenResult(val socket: Socket? = null, val error: String? = null, val discarded: Boolean = false)
     private data class BatchOpenResult(val successSockets: List<Socket>, val errors: Map<String, Int>)
 }

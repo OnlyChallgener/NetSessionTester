@@ -182,6 +182,18 @@ private enum class ChartMode(val label: String) {
     PEAK("峰值/最高值")
 }
 
+private enum class FinishReason(val label: String, val saveHistory: Boolean) {
+    Completed("测试完成", true),
+    FailureLimit("失败上限", true),
+    FdLimit("FD上限", true),
+    ManualStop("手动停止", true),
+    ForceRelease("强制释放", false),
+    NetworkChange("网络环境变化", true),
+    DnsFail("解析失败", false),
+    Interrupted("测试中断", true),
+    ServiceDestroyed("服务销毁保护", true)
+}
+
 private data class ChartPoint(
     val protocol: IpProtocol,
     val elapsedSec: Int,
@@ -652,6 +664,7 @@ private fun NetSessionTesterApp() {
     var networkWatchJob by remember { mutableStateOf<Job?>(null) }
     var testNetworkSignature by remember { mutableStateOf("") }
     var activeRunId by remember { mutableStateOf(0L) }
+    var finishInProgress by remember { mutableStateOf(false) }
 
     var detailTitle by remember { mutableStateOf<String?>(null) }
     var detailLines by remember { mutableStateOf<List<String>>(emptyList()) }
@@ -1001,11 +1014,8 @@ private fun NetSessionTesterApp() {
     }
 
     suspend fun appendHistorySafely(summary: SessionSummary) {
-        // 触发 Android FD/Socket 上限时，先释放本机连接，再写历史，避免写文件时再次撞上 FD 上限。
-        if (hasFdLimit(summary)) {
-            val closed = tester.release()
-            appendLog(LogLine(level = LogLevel.WARN, text = "检测到FD上限，已先释放本机连接再保存历史：$closed 条"))
-        }
+        // 注意：统一收尾函数会先 detach/清空 heldSockets，再调用这里。
+        // 保存历史失败不能影响释放状态。
         runCatching {
             historyStore.append(summary)
             historyStore.trim(100)
@@ -1043,45 +1053,112 @@ private fun NetSessionTesterApp() {
         )
     }
 
+    fun stoppedStatsFor(protocol: IpProtocol, current: ProtocolStats, reason: String = "手动停止"): ProtocolStats {
+        return current.copy(
+            phase = reason,
+            errorSummary = current.errorSummary + (reason to 1)
+        )
+    }
+
+    fun buildStoppedSummary(reason: String): SessionSummary? {
+        val config = currentTestConfig ?: buildConfig() ?: return null
+        val ipv4 = when (config.mode) {
+            TestMode.IPV4_ONLY -> stoppedStatsFor(IpProtocol.IPV4, state.ipv4Stats, reason)
+            TestMode.IPV4_THEN_IPV6 -> if (state.ipv4Stats.totalAttempts > 0) stoppedStatsFor(IpProtocol.IPV4, state.ipv4Stats, reason) else null
+            TestMode.IPV6_ONLY -> null
+        }
+        val ipv6 = when (config.mode) {
+            TestMode.IPV6_ONLY -> stoppedStatsFor(IpProtocol.IPV6, state.ipv6Stats, reason)
+            TestMode.IPV4_THEN_IPV6 -> if (state.ipv6Stats.totalAttempts > 0) stoppedStatsFor(IpProtocol.IPV6, state.ipv6Stats, reason) else null
+            TestMode.IPV4_ONLY -> null
+        }
+        return SessionSummary(
+            startedAtEpochMs = if (currentStartedAt > 0L) currentStartedAt else System.currentTimeMillis(),
+            host = config.host,
+            port = config.port,
+            mode = config.mode,
+            ipv4Stats = ipv4,
+            ipv6Stats = ipv6
+        )
+    }
+
+    fun finishReasonFor(summary: SessionSummary?, config: SessionConfig?): FinishReason {
+        if (summary == null) return FinishReason.Interrupted
+        if (hasFdLimit(summary)) return FinishReason.FdLimit
+        val stats = listOfNotNull(summary.ipv4Stats, summary.ipv6Stats)
+        if (stats.isNotEmpty() && stats.all { it.phase == "解析失败" || it.errorSummary.keys.any { key -> key.contains("DNS") } }) {
+            return FinishReason.DnsFail
+        }
+        val failureLimitValue = config?.failureLimit ?: failureLimit.toIntOrNull() ?: Int.MAX_VALUE
+        if (stats.any { it.totalFailure >= failureLimitValue }) return FinishReason.FailureLimit
+        return FinishReason.Completed
+    }
+
+    suspend fun releaseAndFinalize(
+        reason: FinishReason,
+        summary: SessionSummary?,
+        saveHistory: Boolean = reason.saveHistory,
+        cancelRunningJob: Boolean = true,
+        toast: Boolean = true
+    ) {
+        if (finishInProgress && reason != FinishReason.ForceRelease) return
+        finishInProgress = true
+        manualStopRequested = true
+
+        val currentJob = currentCoroutineContext()[Job]
+        if (cancelRunningJob && runningJob != currentJob) {
+            runningJob?.cancel()
+            runningJob = null
+        }
+        alignPingWithSessionEnd()
+        if (pingJob != currentJob) pingJob?.cancel()
+        pingJob = null
+        if (networkWatchJob != currentJob) networkWatchJob?.cancel()
+        networkWatchJob = null
+        activeRunId = 0L
+        currentStartedAt = 0L
+
+        val snapshot = tester.detachForRelease()
+        val finalStatus = if (reason == FinishReason.ForceRelease) "已释放" else "${reason.label} · 已释放"
+        val baseIpv4 = summary?.ipv4Stats ?: state.ipv4Stats
+        val baseIpv6 = summary?.ipv6Stats ?: state.ipv6Stats
+
+        state = state.copy(
+            isAdding = false,
+            status = finalStatus,
+            summary = summary ?: state.summary,
+            error = if (reason == FinishReason.Completed || reason == FinishReason.ForceRelease) null else reason.label,
+            ipv4Stats = baseIpv4.copy(activeSessions = 0, phase = if (baseIpv4.totalAttempts > 0) "已释放" else baseIpv4.phase),
+            ipv6Stats = baseIpv6.copy(activeSessions = 0, phase = if (baseIpv6.totalAttempts > 0) "已释放" else baseIpv6.phase)
+        )
+
+        appendLog(LogLine(level = LogLevel.WARN, text = "${reason.label}：已停止新增，已清空活动连接，后台释放 ${snapshot.size} 条 socket"))
+        notifyLocalReleased(if (reason == FinishReason.ForceRelease) "本机已释放" else "${reason.label}，本机已释放")
+        if (toast) {
+            runCatching { Toast.makeText(context, finalStatus, Toast.LENGTH_SHORT).show() }
+        }
+        stopForegroundNotice(context)
+
+        val closed = withContext(Dispatchers.IO) { tester.closeDetachedSockets(snapshot) }
+        appendLog(LogLine(level = LogLevel.WARN, text = "${reason.label}：后台 close 完成：$closed 条"))
+
+        if (saveHistory && summary != null) {
+            appendHistorySafely(summary)
+            refreshHistory()
+        }
+        finishInProgress = false
+    }
+
     suspend fun interruptForNetworkChange(reason: String = "网络环境变化") {
         if (!state.isAdding) return
         val summary = buildNetworkInterruptedSummary(reason)
-        manualStopRequested = true
-        activeRunId = 0L
-        state = state.copy(
-            isAdding = false,
-            status = "$reason · 释放中",
-            error = reason,
-            ipv4Stats = state.ipv4Stats.copy(activeSessions = 0, phase = if (state.ipv4Stats.totalAttempts > 0) "已释放" else state.ipv4Stats.phase),
-            ipv6Stats = state.ipv6Stats.copy(activeSessions = 0, phase = if (state.ipv6Stats.totalAttempts > 0) "已释放" else state.ipv6Stats.phase)
-        )
-        runningJob?.cancel()
-        runningJob = null
-        alignPingWithSessionEnd()
-        currentStartedAt = 0L
-        pingJob?.cancel()
-        pingJob = null
-        if (networkWatchJob != currentCoroutineContext()[Job]) networkWatchJob?.cancel()
-        networkWatchJob = null
         appendLog(LogLine(level = LogLevel.ERROR, text = "$reason，已中断测试并保存历史。"))
-        val closed = tester.release()
-        appendLog(LogLine(level = LogLevel.WARN, text = "$reason，已释放连接：$closed 条"))
-        notifyLocalReleased("$reason，本机已释放")
-        if (summary != null) {
-            appendHistorySafely(summary)
-            refreshHistory()
-            state = state.copy(
-                isAdding = false,
-                status = "$reason · 已释放",
-                summary = summary,
-                error = reason,
-                ipv4Stats = summary.ipv4Stats?.copy(activeSessions = 0) ?: state.ipv4Stats.copy(activeSessions = 0),
-                ipv6Stats = summary.ipv6Stats?.copy(activeSessions = 0) ?: state.ipv6Stats.copy(activeSessions = 0)
-            )
-        } else {
-            state = state.copy(isAdding = false, status = "$reason · 已释放", error = reason)
-        }
-        stopForegroundNotice(context)
+        releaseAndFinalize(
+            reason = FinishReason.NetworkChange,
+            summary = summary,
+            saveHistory = true,
+            cancelRunningJob = true
+        )
     }
 
     fun startNetworkWatch(startedAt: Long, signature: String) {
@@ -1169,8 +1246,6 @@ private fun NetSessionTesterApp() {
                         TestMode.IPV4_ONLY -> null
                     }
                 )
-                appendHistorySafely(summary!!)
-                refreshHistory()
                 completedNormally = true
             } catch (error: Exception) {
                 if (!manualStopRequested) {
@@ -1184,153 +1259,49 @@ private fun NetSessionTesterApp() {
                 networkWatchJob?.cancel()
                 networkWatchJob = null
                 if (!manualStopRequested) {
-                    val closed = tester.release()
-                    if (completedNormally) {
-                        appendLog(LogLine(level = LogLevel.WARN, text = "测试完成，已立即释放连接：$closed 条"))
-                    } else {
-                        appendLog(LogLine(level = LogLevel.WARN, text = "测试结束收尾，已释放连接：$closed 条"))
-                    }
-                    notifyLocalReleased()
-
                     val finalSummary = summary
-                    val finalIpv4 = finalSummary?.ipv4Stats ?: state.ipv4Stats
-                    val finalIpv6 = finalSummary?.ipv6Stats ?: state.ipv6Stats
-
-                    activeRunId = 0L
-                    currentStartedAt = 0L
-                    state = state.copy(
-                        isAdding = false,
-                        status = if (completedNormally) "测试完成 · 已释放" else "测试中断 · 已释放",
-                        summary = finalSummary ?: state.summary,
-                        error = failureMsg,
-                        ipv4Stats = if (config.mode != TestMode.IPV6_ONLY) {
-                            finalIpv4.copy(activeSessions = 0, phase = if (finalIpv4.totalAttempts > 0) "已释放" else finalIpv4.phase)
-                        } else state.ipv4Stats,
-                        ipv6Stats = if (config.mode != TestMode.IPV4_ONLY) {
-                            finalIpv6.copy(activeSessions = 0, phase = if (finalIpv6.totalAttempts > 0) "已释放" else finalIpv6.phase)
-                        } else state.ipv6Stats
-                    )
-                    stopForegroundNotice(context)
+                    val finalReason = finishReasonFor(finalSummary, config).let { reason ->
+                        if (!completedNormally && reason == FinishReason.Completed) FinishReason.Interrupted else reason
+                    }
+                    scope.launch {
+                        releaseAndFinalize(
+                            reason = finalReason,
+                            summary = finalSummary,
+                            saveHistory = finalReason.saveHistory,
+                            cancelRunningJob = false,
+                            toast = true
+                        )
+                    }
                 }
                 runningJob = null
             }
         }
     }
 
-    fun stoppedStatsFor(protocol: IpProtocol, current: ProtocolStats, reason: String = "手动停止"): ProtocolStats {
-        return current.copy(
-            phase = reason,
-            errorSummary = current.errorSummary + (reason to 1)
-        )
-    }
-
-    fun saveManualStopSummary(reason: String = "手动停止") {
-        val config = currentTestConfig ?: buildConfig() ?: return
-        val ipv4 = when (config.mode) {
-            TestMode.IPV4_ONLY -> stoppedStatsFor(IpProtocol.IPV4, state.ipv4Stats, reason)
-            TestMode.IPV4_THEN_IPV6 -> stoppedStatsFor(IpProtocol.IPV4, state.ipv4Stats, reason)
-            TestMode.IPV6_ONLY -> null
-        }
-        val ipv6 = when (config.mode) {
-            TestMode.IPV6_ONLY -> stoppedStatsFor(IpProtocol.IPV6, state.ipv6Stats, reason)
-            TestMode.IPV4_THEN_IPV6 -> if (state.ipv6Stats.totalAttempts > 0) stoppedStatsFor(IpProtocol.IPV6, state.ipv6Stats, reason) else null
-            TestMode.IPV4_ONLY -> null
-        }
-        val summary = SessionSummary(
-            startedAtEpochMs = if (currentStartedAt > 0L) currentStartedAt else System.currentTimeMillis(),
-            host = config.host,
-            port = config.port,
-            mode = config.mode,
-            ipv4Stats = ipv4,
-            ipv6Stats = ipv6
-        )
-        scope.launch {
-            appendHistorySafely(summary)
-            refreshHistory()
-            state = state.copy(
-                summary = summary,
-                ipv4Stats = ipv4 ?: state.ipv4Stats,
-                ipv6Stats = ipv6 ?: state.ipv6Stats
-            )
-        }
-    }
-
     fun stopAdding() {
-        manualStopRequested = true
-        runningJob?.cancel()
-        runningJob = null
-        alignPingWithSessionEnd()
-        pingJob?.cancel()
-        pingJob = null
-        networkWatchJob?.cancel()
-        networkWatchJob = null
-        appendLog(LogLine(level = LogLevel.WARN, text = "手动停止；已停止新增并保存历史。"))
-        saveManualStopSummary("手动停止")
-        activeRunId = 0L
-        currentStartedAt = 0L
-        state = state.copy(
-            isAdding = false,
-            status = "手动停止 · 释放中",
-            ipv4Stats = state.ipv4Stats.copy(activeSessions = 0, phase = if (state.ipv4Stats.totalAttempts > 0) "已释放" else state.ipv4Stats.phase),
-            ipv6Stats = state.ipv6Stats.copy(activeSessions = 0, phase = if (state.ipv6Stats.totalAttempts > 0) "已释放" else state.ipv6Stats.phase)
-        )
+        val summary = buildStoppedSummary("手动停止")
+        appendLog(LogLine(level = LogLevel.WARN, text = "手动停止；统一收尾，先释放再保存历史。"))
         scope.launch {
-            val closed = tester.release()
-            appendLog(LogLine(level = LogLevel.WARN, text = "手动停止，已立即释放连接：$closed 条"))
-            notifyLocalReleased("手动停止，本机已释放")
-            state = state.copy(
-                isAdding = false,
-                status = "手动停止 · 已释放",
-                ipv4Stats = state.ipv4Stats.copy(activeSessions = 0, phase = if (state.ipv4Stats.totalAttempts > 0) "已释放" else state.ipv4Stats.phase),
-                ipv6Stats = state.ipv6Stats.copy(activeSessions = 0, phase = if (state.ipv6Stats.totalAttempts > 0) "已释放" else state.ipv6Stats.phase)
+            releaseAndFinalize(
+                reason = FinishReason.ManualStop,
+                summary = summary,
+                saveHistory = true,
+                cancelRunningJob = true
             )
-            stopForegroundNotice(context)
         }
     }
 
     fun releaseAll() {
         val wasRunning = state.isAdding
-        if (wasRunning) {
-            manualStopRequested = true
-            runningJob?.cancel()
-            runningJob = null
-            alignPingWithSessionEnd()
-            pingJob?.cancel()
-            pingJob = null
-            networkWatchJob?.cancel()
-            networkWatchJob = null
-            appendLog(LogLine(level = LogLevel.WARN, text = "强制释放；已停止测试并保存历史。"))
-            saveManualStopSummary("强制释放")
-            activeRunId = 0L
-            currentStartedAt = 0L
-            state = state.copy(
-                isAdding = false,
-                status = "强制释放 · 释放中",
-                ipv4Stats = state.ipv4Stats.copy(activeSessions = 0, phase = if (state.ipv4Stats.totalAttempts > 0) "已释放" else state.ipv4Stats.phase),
-                ipv6Stats = state.ipv6Stats.copy(activeSessions = 0, phase = if (state.ipv6Stats.totalAttempts > 0) "已释放" else state.ipv6Stats.phase)
-            )
-        } else {
-            activeRunId = 0L
-            currentStartedAt = 0L
-            runningJob?.cancel()
-            runningJob = null
-            alignPingWithSessionEnd()
-            pingJob?.cancel()
-            pingJob = null
-            networkWatchJob?.cancel()
-            networkWatchJob = null
-        }
+        val summary = if (wasRunning) buildStoppedSummary("强制释放") else null
+        appendLog(LogLine(level = LogLevel.WARN, text = "强制释放；统一收尾，立即清空 UI 状态和连接。"))
         scope.launch {
-            val closed = tester.release()
-            appendLog(LogLine(level = LogLevel.WARN, text = "已强制释放连接：$closed 条"))
-            notifyLocalReleased("强制释放，本机已释放")
-            state = state.copy(
-                isAdding = false,
-                status = "已强制释放",
-                ipv4Stats = state.ipv4Stats.copy(activeSessions = 0, phase = if (state.ipv4Stats.totalAttempts > 0) "已释放" else state.ipv4Stats.phase),
-                ipv6Stats = state.ipv6Stats.copy(activeSessions = 0, phase = if (state.ipv6Stats.totalAttempts > 0) "已释放" else state.ipv6Stats.phase)
+            releaseAndFinalize(
+                reason = FinishReason.ForceRelease,
+                summary = summary,
+                saveHistory = false,
+                cancelRunningJob = true
             )
-            stopForegroundNotice(context)
         }
     }
 
