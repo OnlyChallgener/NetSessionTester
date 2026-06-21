@@ -236,9 +236,9 @@ private fun currentNetworkSignature(context: Context): String {
         if (caps?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true) add("vpn")
         if (caps?.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) == true) add("ethernet")
     }.joinToString("+").ifBlank { "unknown" }
-    val internet = caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
-    val validated = caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true
-    return "${network}|$transports|internet=$internet|validated=$validated"
+    // 只检测真实网络切换：activeNetwork 或传输类型变化。
+    // 不把 VALIDATED/INTERNET 放进去，避免运营商抖动导致误中断。
+    return "${network}|$transports"
 }
 
 private suspend fun tcpPingMs(host: String, port: Int): Int? = withContext(Dispatchers.IO) {
@@ -613,6 +613,8 @@ private fun NetSessionTesterApp() {
         alignPingWithSessionEnd()
         pingJob?.cancel()
         pingJob = null
+        networkWatchJob?.cancel()
+        networkWatchJob = null
         appendLog(LogLine(level = LogLevel.ERROR, text = "$reason，已中断测试并保存历史。"))
         val summary = buildNetworkInterruptedSummary(reason)
         val closed = tester.release()
@@ -638,11 +640,17 @@ private fun NetSessionTesterApp() {
         networkWatchJob?.cancel()
         networkWatchJob = scope.launch {
             delay(1500L)
+            var consecutiveChanged = 0
             while (currentStartedAt == startedAt && state.isAdding) {
                 val now = currentNetworkSignature(context)
                 if (now != signature) {
-                    interruptForNetworkChange("网络环境变化")
-                    break
+                    consecutiveChanged++
+                    if (consecutiveChanged >= 2) {
+                        interruptForNetworkChange("网络环境变化")
+                        break
+                    }
+                } else {
+                    consecutiveChanged = 0
                 }
                 delay(1000L)
             }
@@ -1521,7 +1529,7 @@ private fun TestPage(
         item {
             SoftCard {
                 SectionTitle("∿", "测试控制", Blue)
-                Text(if (isAdding) "● 正在运行 · 已连接目标" else "状态：$status", color = if (isAdding) Green else Muted, fontWeight = FontWeight.Medium)
+                Text(if (isAdding) "● 正在运行 · 已连接目标" else "状态：$status", color = if (isAdding) Green else Muted, fontWeight = FontWeight.Medium, fontSize = 12.sp)
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     Button(onClick = onStart, enabled = !isAdding, modifier = Modifier.weight(1f).height(38.dp), shape = ShapeM) {
                         Icon(Icons.Filled.PlayArrow, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("开始", fontSize = 13.sp)
@@ -1641,7 +1649,7 @@ private fun LogsPage(
         item {
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 4.dp, bottom = 5.dp)) {
                 Column(modifier = Modifier.weight(1f)) {
-                    Text("检测历史", fontSize = 21.sp, fontWeight = FontWeight.ExtraBold, color = TextDark)
+                    Text("检测历史", fontSize = 19.sp, fontWeight = FontWeight.ExtraBold, color = TextDark)
                     Text("已保存 ${historySavedCount} 条 · 占用 ${historySizeKb}KB", color = Muted, fontSize = 11.sp)
                 }
                 OutlinedButton(onClick = onClear, shape = ShapeM, modifier = Modifier.height(36.dp)) {
@@ -1797,7 +1805,7 @@ private fun SectionTitle(mark: String, title: String, color: Color) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         MarkBox(mark, color.copy(alpha = 0.12f), color)
         Spacer(Modifier.width(10.dp))
-        Text(title, fontSize = 17.sp, fontWeight = FontWeight.Bold, color = TextDark)
+        Text(title, fontSize = 14.sp, fontWeight = FontWeight.Bold, color = TextDark)
     }
 }
 
@@ -1892,7 +1900,7 @@ private fun SessionStatsCard(
         Row(verticalAlignment = Alignment.CenterVertically) {
             SectionTitle("▮", title, Blue)
             Spacer(Modifier.weight(1f))
-            Text(stats.phase, color = Blue, fontWeight = FontWeight.Bold, maxLines = 1, fontSize = 13.sp)
+            Text(stats.phase, color = Blue, fontWeight = FontWeight.Bold, maxLines = 1, fontSize = 12.sp)
         }
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             MetricTile("活动", stats.activeSessions.toString(), Blue, Modifier.weight(1f))
@@ -2138,7 +2146,7 @@ private fun PingCompactChartCard(pingPoints: List<PingPoint>) {
 private fun MiniMetric(label: String, value: String, color: Color, modifier: Modifier = Modifier) {
     Box(modifier = modifier.background(Color(0xFFF8FAFC), ShapeM).padding(horizontal = 5.dp, vertical = 5.dp)) {
         Column {
-            Text(label, color = Muted, fontSize = 9.sp, maxLines = 1)
+            Text(label, color = Muted, fontSize = 8.sp, maxLines = 1)
             Text(value, color = color, fontSize = 11.sp, lineHeight = 13.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
     }
@@ -2238,8 +2246,8 @@ private fun MetricTile(label: String, value: String, color: Color, modifier: Mod
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
     ) {
         Column(Modifier.padding(horizontal = 7.dp, vertical = 6.dp)) {
-            Text(label, color = Muted, fontSize = 10.sp, maxLines = 1)
-            Text(value, color = color, fontSize = 13.sp, lineHeight = 15.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+            Text(label, color = Muted, fontSize = 8.sp, maxLines = 1)
+            Text(value, color = color, fontSize = 11.sp, lineHeight = 13.sp, fontWeight = FontWeight.Bold, maxLines = 1)
         }
     }
 }
@@ -2319,7 +2327,7 @@ private fun CompactLogLine(line: LogLine, maskPrivacy: Boolean) {
             color = Muted,
             modifier = Modifier.width(62.dp),
             maxLines = 1,
-            fontSize = 12.sp,
+            fontSize = 11.sp,
             fontFamily = FontFamily.Monospace
         )
         Box(
@@ -2327,7 +2335,7 @@ private fun CompactLogLine(line: LogLine, maskPrivacy: Boolean) {
                 .background(color.copy(alpha = 0.12f), RoundedCornerShape(8.dp))
                 .padding(horizontal = 7.dp, vertical = 3.dp)
         ) {
-            Text(tag, color = color, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+            Text(tag, color = color, fontWeight = FontWeight.Bold, fontSize = 10.sp)
         }
         Spacer(Modifier.width(8.dp))
         Box(
@@ -2340,7 +2348,7 @@ private fun CompactLogLine(line: LogLine, maskPrivacy: Boolean) {
                 color = TextDark,
                 maxLines = 1,
                 softWrap = false,
-                fontSize = 12.sp
+                fontSize = 11.sp
             )
         }
     }
@@ -2355,8 +2363,8 @@ private fun SwipeDeleteHistoryCard(
     onEditRemark: () -> Unit,
     onDelete: () -> Unit
 ) {
-    val revealWidthPx = with(LocalDensity.current) { 116.dp.toPx() }
-    val thresholdPx = revealWidthPx * 0.30f
+    val revealWidthPx = with(LocalDensity.current) { 78.dp.toPx() }
+    val thresholdPx = revealWidthPx * 0.35f
     var dragOffset by remember(item.id) { mutableStateOf(0f) }
     val isRevealed = kotlin.math.abs(dragOffset) >= revealWidthPx * 0.9f
     val revealLeft = dragOffset > 0f
@@ -2366,24 +2374,22 @@ private fun SwipeDeleteHistoryCard(
             Box(
                 modifier = Modifier
                     .align(if (revealLeft) Alignment.CenterStart else Alignment.CenterEnd)
-                    .width(104.dp)
-                    .heightIn(min = 184.dp)
+                    .width(72.dp)
+                    .heightIn(min = 156.dp)
                     .background(
-                        brush = Brush.horizontalGradient(
-                            colors = if (revealLeft) {
-                                listOf(Color(0xFFE85D5D), Color(0xFFF6B3B3))
-                            } else {
-                                listOf(Color(0xFFF8D2D2), Color(0xFFE85D5D))
-                            }
-                        ),
-                        shape = RoundedCornerShape(34.dp)
+                        ErrorRed,
+                        if (revealLeft) {
+                            RoundedCornerShape(topStart = 28.dp, bottomStart = 28.dp, topEnd = 14.dp, bottomEnd = 14.dp)
+                        } else {
+                            RoundedCornerShape(topEnd = 28.dp, bottomEnd = 28.dp, topStart = 14.dp, bottomStart = 14.dp)
+                        }
                     )
                     .clickable(onClick = onDelete),
                 contentAlignment = Alignment.Center
             ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Icon(Icons.Filled.DeleteOutline, contentDescription = "删除", tint = Color.White, modifier = Modifier.width(26.dp).height(26.dp))
-                    Text("删除", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.ExtraBold)
+                Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Icon(Icons.Filled.DeleteOutline, contentDescription = "删除", tint = Color.White, modifier = Modifier.width(22.dp).height(22.dp))
+                    Text("删除", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                 }
             }
         }

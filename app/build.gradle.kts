@@ -12,19 +12,16 @@ android {
         applicationId = "com.demonv.netsessiontester"
         minSdk = 26
         targetSdk = 35
-        versionCode = 57
+        versionCode = 58
         versionName = "0.9.8"
         vectorDrawables { useSupportLibrary = true }
     }
 
-
-
-    val releaseKeystorePath = System.getenv("ANDROID_KEYSTORE_PATH")
-
     signingConfigs {
         create("release") {
-            if (!releaseKeystorePath.isNullOrBlank()) {
-                storeFile = file(releaseKeystorePath)
+            val path = System.getenv("ANDROID_KEYSTORE_PATH")
+            if (!path.isNullOrBlank()) {
+                storeFile = file(path)
                 storePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
                 keyAlias = System.getenv("ANDROID_KEY_ALIAS")
                 keyPassword = System.getenv("ANDROID_KEY_PASSWORD")
@@ -36,9 +33,7 @@ android {
         release {
             isMinifyEnabled = false
             isShrinkResources = false
-            if (!releaseKeystorePath.isNullOrBlank()) {
-                signingConfig = signingConfigs.getByName("release")
-            }
+            signingConfig = signingConfigs.getByName("release")
         }
         debug {
             isDebuggable = true
