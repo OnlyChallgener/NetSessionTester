@@ -19,6 +19,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.MediaStore
+import android.provider.Settings
 import android.telephony.TelephonyManager
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -50,6 +51,7 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -73,10 +75,13 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Switch
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Article
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Assessment
 import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Info
@@ -87,10 +92,13 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.SignalCellularAlt
+import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.WarningAmber
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -120,6 +128,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.core.view.WindowCompat
 import com.demonv.netsessiontester.data.HistoryStore
 import com.demonv.netsessiontester.data.HistoryCounts
@@ -144,9 +153,15 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
+import java.io.BufferedInputStream
+import java.io.File
+import java.io.FileOutputStream
 import java.io.OutputStreamWriter
+import java.net.HttpURLConnection
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.net.URL
 import kotlin.math.roundToInt
 
 private enum class MainTab(val label: String, val mark: String) {
@@ -176,6 +191,176 @@ private data class PingPoint(
     val latencyMs: Int?,
     val timeEpochMs: Long = System.currentTimeMillis()
 )
+
+
+private const val UPDATE_JSON_URL = "https://raw.githubusercontent.com/OnlyChallgener/NetSessionTester/main/update.json"
+private const val PROJECT_GITHUB_URL = "https://github.com/OnlyChallgener/NetSessionTester"
+private const val UPDATE_POSTPONE_MS = 8 * 60 * 1000L
+
+private data class UpdateInfo(
+    val versionCode: Long,
+    val versionName: String,
+    val title: String,
+    val content: List<String>,
+    val apkUrl: String,
+    val githubUrl: String,
+    val force: Boolean = false
+)
+
+private data class UpdateDownloadUi(
+    val active: Boolean = false,
+    val finished: Boolean = false,
+    val failed: Boolean = false,
+    val progress: Int = 0,
+    val downloadedBytes: Long = 0L,
+    val totalBytes: Long = 0L,
+    val speedBytesPerSecond: Long = 0L,
+    val message: String = "",
+    val apkFilePath: String? = null
+)
+
+private fun currentAppVersionCode(context: Context): Long = runCatching {
+    val info = context.packageManager.getPackageInfo(context.packageName, 0)
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) info.longVersionCode else info.versionCode.toLong()
+}.getOrDefault(0L)
+
+private fun formatBytes(bytes: Long): String = when {
+    bytes <= 0L -> "0 KB"
+    bytes < 1024L * 1024L -> "${(bytes / 1024L).coerceAtLeast(1L)} KB"
+    else -> String.format(java.util.Locale.US, "%.2f MB", bytes / 1024.0 / 1024.0)
+}
+
+private fun formatSpeed(bytesPerSecond: Long): String = when {
+    bytesPerSecond <= 0L -> "-- KB/s"
+    bytesPerSecond < 1024L * 1024L -> "${(bytesPerSecond / 1024L).coerceAtLeast(1L)} KB/s"
+    else -> String.format(java.util.Locale.US, "%.2f MB/s", bytesPerSecond / 1024.0 / 1024.0)
+}
+
+private suspend fun fetchUpdateInfo(updateJsonUrl: String = UPDATE_JSON_URL): UpdateInfo = withContext(Dispatchers.IO) {
+    val conn = (URL(updateJsonUrl).openConnection() as HttpURLConnection).apply {
+        connectTimeout = 6000
+        readTimeout = 8000
+        requestMethod = "GET"
+        setRequestProperty("Accept", "application/json")
+        setRequestProperty("Cache-Control", "no-cache")
+    }
+    try {
+        val code = conn.responseCode
+        if (code !in 200..299) error("更新信息读取失败：HTTP $code")
+        val text = conn.inputStream.bufferedReader().use { it.readText() }
+        val obj = JSONObject(text)
+        val contentObj = obj.optJSONArray("content")
+        val content = if (contentObj != null) {
+            buildList {
+                for (i in 0 until contentObj.length()) add(contentObj.optString(i))
+            }.filter { it.isNotBlank() }
+        } else {
+            obj.optString("content", "").lines().filter { it.isNotBlank() }
+        }
+        UpdateInfo(
+            versionCode = obj.optLong("versionCode", 0L),
+            versionName = obj.optString("versionName", ""),
+            title = obj.optString("title", "发现新版本"),
+            content = content.ifEmpty { listOf("优化稳定性和界面体验。") },
+            apkUrl = obj.optString("apkUrl", ""),
+            githubUrl = obj.optString("githubUrl", PROJECT_GITHUB_URL),
+            force = obj.optBoolean("force", false)
+        )
+    } finally {
+        conn.disconnect()
+    }
+}
+
+private suspend fun downloadUpdateApk(
+    context: Context,
+    info: UpdateInfo,
+    onProgress: (UpdateDownloadUi) -> Unit
+): File = withContext(Dispatchers.IO) {
+    if (info.apkUrl.isBlank()) error("更新包链接为空")
+    val dir = File(context.getExternalFilesDir(null), "updates").apply { mkdirs() }
+    val apkName = "NetSessionTester-v${info.versionName.ifBlank { info.versionCode.toString() }}-signed.apk"
+    val outFile = File(dir, apkName)
+    if (outFile.exists()) outFile.delete()
+
+    val conn = (URL(info.apkUrl).openConnection() as HttpURLConnection).apply {
+        connectTimeout = 8000
+        readTimeout = 15000
+        requestMethod = "GET"
+        setRequestProperty("User-Agent", "NetSessionTester/${info.versionName}")
+    }
+    try {
+        val code = conn.responseCode
+        if (code !in 200..299) error("下载失败：HTTP $code")
+        val total = conn.contentLengthLong.takeIf { it > 0L } ?: 0L
+        val start = System.currentTimeMillis()
+        var lastAt = start
+        var lastBytes = 0L
+        var downloaded = 0L
+        var slowSince = 0L
+        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+        BufferedInputStream(conn.inputStream).use { input ->
+            FileOutputStream(outFile).use { output ->
+                while (true) {
+                    val read = input.read(buffer)
+                    if (read <= 0) break
+                    output.write(buffer, 0, read)
+                    downloaded += read
+                    val now = System.currentTimeMillis()
+                    if (now - lastAt >= 500L) {
+                        val deltaBytes = downloaded - lastBytes
+                        val deltaMs = (now - lastAt).coerceAtLeast(1L)
+                        val speed = deltaBytes * 1000L / deltaMs
+                        val progress = if (total > 0L) ((downloaded * 100L / total).toInt()).coerceIn(0, 99) else 0
+                        val elapsed = now - start
+                        val slow = elapsed > 8_000L && speed in 1L until 30L * 1024L
+                        slowSince = when {
+                            slow && slowSince == 0L -> now
+                            !slow -> 0L
+                            else -> slowSince
+                        }
+                        val msg = if (slowSince > 0L && now - slowSince > 10_000L) {
+                            "下载速度较慢，建议切换代理网络或打开 GitHub 手动下载"
+                        } else "正在下载更新包"
+                        onProgress(UpdateDownloadUi(true, false, false, progress, downloaded, total, speed, msg, outFile.absolutePath))
+                        lastAt = now
+                        lastBytes = downloaded
+                    }
+                }
+            }
+        }
+        onProgress(UpdateDownloadUi(active = false, finished = true, progress = 100, downloadedBytes = downloaded, totalBytes = total, speedBytesPerSecond = 0L, message = "下载完成", apkFilePath = outFile.absolutePath))
+        outFile
+    } catch (e: Exception) {
+        runCatching { outFile.delete() }
+        onProgress(UpdateDownloadUi(active = false, failed = true, message = e.message ?: "下载失败，建议切换代理网络或打开 GitHub"))
+        throw e
+    } finally {
+        conn.disconnect()
+    }
+}
+
+private fun installDownloadedApk(context: Context, apkFile: File) {
+    if (!apkFile.exists()) {
+        Toast.makeText(context, "更新包不存在，请重新下载", Toast.LENGTH_SHORT).show()
+        return
+    }
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !context.packageManager.canRequestPackageInstalls()) {
+        val intent = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
+            data = Uri.parse("package:${context.packageName}")
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        context.startActivity(intent)
+        Toast.makeText(context, "请允许本应用安装更新包，授权后再点立即安装", Toast.LENGTH_LONG).show()
+        return
+    }
+    val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", apkFile)
+    val intent = Intent(Intent.ACTION_VIEW).apply {
+        setDataAndType(uri, "application/vnd.android.package-archive")
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+    context.startActivity(intent)
+}
 
 private data class NetworkEnvironment(
     val typeLabel: String = "未知网络",
@@ -320,6 +505,15 @@ private fun NetSessionTesterApp() {
     var editingRemarkText by remember { mutableStateOf("") }
     var showRunLogDetail by remember { mutableStateOf(false) }
 
+    val updatePrefs = remember { context.getSharedPreferences("app_update", Context.MODE_PRIVATE) }
+    var latestUpdate by remember { mutableStateOf<UpdateInfo?>(null) }
+    var updateAvailable by remember { mutableStateOf(false) }
+    var checkingUpdate by remember { mutableStateOf(false) }
+    var showVersionDialog by remember { mutableStateOf(false) }
+    var showUpdateDialog by remember { mutableStateOf(false) }
+    var showDownloadDialog by remember { mutableStateOf(false) }
+    var downloadUi by remember { mutableStateOf(UpdateDownloadUi()) }
+
     BackHandler(enabled = showRunLogDetail) { showRunLogDetail = false }
 
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
@@ -441,6 +635,87 @@ private fun NetSessionTesterApp() {
         val message = "$prefix，路由器会话表可能延迟数秒下降"
         appendLog(LogLine(level = LogLevel.WARN, text = message))
         scope.launch { snackbarHostState.showSnackbar(message) }
+    }
+
+    fun openGithub(url: String = PROJECT_GITHUB_URL) {
+        runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
+    }
+
+    fun postponeUpdate() {
+        updatePrefs.edit().putLong("postpone_until", System.currentTimeMillis() + UPDATE_POSTPONE_MS).apply()
+        showUpdateDialog = false
+        scope.launch { snackbarHostState.showSnackbar("已稍后更新，8分钟内不再自动提醒") }
+    }
+
+    fun checkForUpdate(manual: Boolean = false) {
+        scope.launch {
+            checkingUpdate = true
+            runCatching { fetchUpdateInfo() }
+                .onSuccess { info ->
+                    val hasNew = info.versionCode > currentAppVersionCode(context)
+                    latestUpdate = info.takeIf { hasNew }
+                    updateAvailable = hasNew
+                    if (hasNew) {
+                        showVersionDialog = false
+                        showUpdateDialog = true
+                    } else if (manual) {
+                        snackbarHostState.showSnackbar("已是最新版本")
+                    }
+                }
+                .onFailure { e ->
+                    if (manual) snackbarHostState.showSnackbar(e.message ?: "检测更新失败")
+                }
+            checkingUpdate = false
+        }
+    }
+
+    fun startUpdateDownload(info: UpdateInfo) {
+        showUpdateDialog = false
+        showDownloadDialog = true
+        downloadUi = UpdateDownloadUi(active = true, message = "正在准备下载")
+        scope.launch {
+            runCatching {
+                downloadUpdateApk(context.applicationContext, info) { ui ->
+                    scope.launch { downloadUi = ui }
+                }
+            }.onSuccess { file ->
+                downloadUi = UpdateDownloadUi(
+                    active = false,
+                    finished = true,
+                    progress = 100,
+                    downloadedBytes = file.length(),
+                    totalBytes = file.length(),
+                    message = "下载完成",
+                    apkFilePath = file.absolutePath
+                )
+                showDownloadDialog = true
+                snackbarHostState.showSnackbar("更新包下载完成，可以安装")
+            }.onFailure { e ->
+                downloadUi = UpdateDownloadUi(active = false, failed = true, message = e.message ?: "下载失败，建议切换代理网络或打开 GitHub")
+                showDownloadDialog = true
+            }
+        }
+    }
+
+    fun installReadyApk() {
+        val path = downloadUi.apkFilePath ?: return
+        installDownloadedApk(context, File(path))
+    }
+
+    LaunchedEffect(settingsLoaded) {
+        if (settingsLoaded) {
+            delay(1200L)
+            val postponeUntil = updatePrefs.getLong("postpone_until", 0L)
+            if (System.currentTimeMillis() >= postponeUntil) {
+                checkForUpdate(manual = false)
+            } else {
+                runCatching { fetchUpdateInfo() }.onSuccess { info ->
+                    val hasNew = info.versionCode > currentAppVersionCode(context)
+                    latestUpdate = info.takeIf { hasNew }
+                    updateAvailable = hasNew
+                }
+            }
+        }
     }
 
     fun resetCurrentCharts() {
@@ -966,6 +1241,39 @@ private fun NetSessionTesterApp() {
         )
     }
 
+    if (showVersionDialog) {
+        VersionInfoDialog(
+            checkingUpdate = checkingUpdate,
+            updateAvailable = updateAvailable,
+            onCheckUpdate = { checkForUpdate(manual = true) },
+            onDismiss = { showVersionDialog = false },
+            onOpenGithub = { openGithub(PROJECT_GITHUB_URL) }
+        )
+    }
+
+    latestUpdate?.let { info ->
+        if (showUpdateDialog) {
+            UpdateAvailableDialog(
+                info = info,
+                onDismiss = { showUpdateDialog = false },
+                onPostpone = { postponeUpdate() },
+                onOpenGithub = { openGithub(info.githubUrl.ifBlank { PROJECT_GITHUB_URL }) },
+                onUpdateNow = { startUpdateDownload(info) }
+            )
+        }
+    }
+
+    if (showDownloadDialog) {
+        UpdateDownloadDialog(
+            info = latestUpdate,
+            state = downloadUi,
+            onDismiss = { showDownloadDialog = false },
+            onInstall = { installReadyApk() },
+            onOpenGithub = { openGithub(latestUpdate?.githubUrl ?: PROJECT_GITHUB_URL) }
+        )
+    }
+
+
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
         bottomBar = {
@@ -1027,6 +1335,9 @@ private fun NetSessionTesterApp() {
                     onSuccessLimitChange = { successLimit = it },
                     failureLimit = failureLimit,
                     onFailureLimitChange = { failureLimit = it },
+                    updateBadge = updateAvailable || downloadUi.active || downloadUi.finished,
+                    updateProgress = if (downloadUi.active) downloadUi.progress else null,
+                    onVersionClick = { showVersionDialog = true },
                     onSave = { scope.launch { snackbarHostState.showSnackbar("参数已保存") } },
                     onRestoreDefault = {
                         host = "www.baidu.com"; port = "80"; mode = TestMode.IPV4_THEN_IPV6
@@ -1055,6 +1366,9 @@ private fun NetSessionTesterApp() {
                     showIpv4 = mode != TestMode.IPV6_ONLY,
                     showIpv6 = mode != TestMode.IPV4_ONLY,
                     maskPrivacy = maskPrivacy,
+                    updateBadge = updateAvailable || downloadUi.active || downloadUi.finished,
+                    updateProgress = if (downloadUi.active) downloadUi.progress else null,
+                    onVersionClick = { showVersionDialog = true },
                     logs = state.logs,
                     onMoreLogs = { showRunLogDetail = true },
                     onMoreFailure = {
@@ -1412,6 +1726,9 @@ private fun SettingsPage(
     onSuccessLimitChange: (String) -> Unit,
     failureLimit: String,
     onFailureLimitChange: (String) -> Unit,
+    updateBadge: Boolean,
+    updateProgress: Int?,
+    onVersionClick: () -> Unit,
     onSave: () -> Unit,
     onRestoreDefault: () -> Unit
 ) {
@@ -1421,7 +1738,7 @@ private fun SettingsPage(
             .padding(horizontal = 14.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
-        item { PageTitle("宽带会话测试器", "TCP 会话保持 · IPv4 / IPv6 分别测试") }
+        item { PageTitle("宽带会话测试器", "TCP 会话保持 · IPv4 / IPv6 分别测试", updateBadge, updateProgress, onVersionClick) }
         item {
             SoftCard {
                 SectionTitle("◎", "目标设置", Blue)
@@ -1519,6 +1836,9 @@ private fun TestPage(
     showIpv4: Boolean,
     showIpv6: Boolean,
     maskPrivacy: Boolean,
+    updateBadge: Boolean,
+    updateProgress: Int?,
+    onVersionClick: () -> Unit,
     logs: List<LogLine>,
     onMoreLogs: () -> Unit,
     onMoreFailure: () -> Unit
@@ -1530,7 +1850,7 @@ private fun TestPage(
         verticalArrangement = Arrangement.spacedBy(7.dp)
     ) {
         item {
-            PageTitle("宽带会话测试器", null)
+            PageTitle("宽带会话测试器", null, updateBadge, updateProgress, onVersionClick)
             FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
                 StatusChip(mode.label, BlueSoft, Blue)
                 StatusChip(if (isAdding) "● 运行中" else status, GreenSoft, Green)
@@ -1695,7 +2015,10 @@ private fun LogsPage(
         if (history.isEmpty()) {
             item { SoftCard { Text("暂无历史记录", color = TextDark, fontSize = 13.sp) } }
         } else {
-            items(history.take(historyLimit.toIntOrNull()?.coerceIn(10, 100) ?: 30), key = { it.id }) { item ->
+            itemsIndexed(
+                history.take(historyLimit.toIntOrNull()?.coerceIn(10, 100) ?: 30),
+                key = { index, item -> "${item.id}_${item.startedAtEpochMs}_$index" }
+            ) { _, item ->
                 SwipeDeleteHistoryCard(
                     item = item,
                     maskPrivacy = maskPrivacy,
@@ -1726,33 +2049,41 @@ private fun PeriodCountChip(title: String, subtitle: String, bg: Color, fg: Colo
 
 
 @Composable
-private fun PageTitle(title: String, subtitle: String?) {
-    val context = LocalContext.current
-    var showVersionDialog by remember { mutableStateOf(false) }
-
-    if (showVersionDialog) {
-        VersionInfoDialog(
-            onDismiss = { showVersionDialog = false },
-            onOpenGithub = {
-                runCatching {
-                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/OnlyChallgener/NetSessionTester")))
-                }
-            }
-        )
-    }
-
+private fun PageTitle(
+    title: String,
+    subtitle: String?,
+    updateBadge: Boolean = false,
+    updateProgress: Int? = null,
+    onVersionClick: (() -> Unit)? = null
+) {
     Column(modifier = Modifier.padding(top = 4.dp, bottom = 2.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(title, fontSize = 22.sp, lineHeight = 25.sp, fontWeight = FontWeight.ExtraBold, color = TextDark)
             if (title == "宽带会话测试器") {
                 Spacer(Modifier.width(8.dp))
-                Box(
-                    modifier = Modifier
-                        .background(BlueSoft, RoundedCornerShape(10.dp))
-                        .clickable { showVersionDialog = true }
-                        .padding(horizontal = 7.dp, vertical = 3.dp)
-                ) {
-                    Text("v0.9.8", color = Blue, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                Box(modifier = Modifier.clickable { onVersionClick?.invoke() }) {
+                    Row(
+                        modifier = Modifier
+                            .background(BlueSoft, RoundedCornerShape(10.dp))
+                            .padding(horizontal = 7.dp, vertical = 3.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("v0.9.8", color = Blue, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        if (updateProgress != null) {
+                            Spacer(Modifier.width(4.dp))
+                            Text("${updateProgress}%", color = Purple, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                    if (updateBadge) {
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .offset(x = 3.dp, y = (-3).dp)
+                                .width(7.dp)
+                                .height(7.dp)
+                                .background(ErrorRed, RoundedCornerShape(50))
+                        )
+                    }
                 }
             }
         }
@@ -1763,7 +2094,13 @@ private fun PageTitle(title: String, subtitle: String?) {
 }
 
 @Composable
-private fun VersionInfoDialog(onDismiss: () -> Unit, onOpenGithub: () -> Unit) {
+private fun VersionInfoDialog(
+    checkingUpdate: Boolean,
+    updateAvailable: Boolean,
+    onCheckUpdate: () -> Unit,
+    onDismiss: () -> Unit,
+    onOpenGithub: () -> Unit
+) {
     AlertDialog(
         onDismissRequest = onDismiss,
         confirmButton = {
@@ -1772,15 +2109,149 @@ private fun VersionInfoDialog(onDismiss: () -> Unit, onOpenGithub: () -> Unit) {
         dismissButton = {
             TextButton(onClick = onOpenGithub) { Text("打开 GitHub", fontSize = 13.sp, fontWeight = FontWeight.Bold) }
         },
-        title = { Text("当前版本 v0.9.8", fontWeight = FontWeight.ExtraBold, color = TextDark) },
+        title = { Text("版本信息", fontWeight = FontWeight.ExtraBold, color = TextDark) },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("项目：NetSessionTester", color = Muted, fontSize = 12.sp)
-                VersionLine("v0.9.8", "当前稳定包：恢复检测详情卡片、版本弹窗、滑动删除、FD保护、通知跳转、图表坐标和流畅测试。")
+            Column(verticalArrangement = Arrangement.spacedBy(9.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("当前版本", color = Muted, fontSize = 12.sp, modifier = Modifier.weight(1f))
+                    StatusChip("v0.9.8", BlueSoft, Blue, compact = true)
+                }
+                VersionLine("v0.9.8", "当前稳定包：保留 0.9.7 高速测速核心，修复释放提示、Ping 轴和网络变化中断。")
                 VersionLine("v0.9.7", "修复 FD 上限附近闪退；触发FD上限时优先释放本机连接并保存历史。")
                 VersionLine("v0.9.6", "修复停止按钮、通知跳转、新增批次被200锁死的问题。")
                 VersionLine("v0.9.5", "优化运行日志、历史记录保存、详情展示与备注。")
-                Text("https://github.com/OnlyChallgener/NetSessionTester", color = Blue, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                HorizontalDivider(color = Border)
+                Button(
+                    onClick = onCheckUpdate,
+                    enabled = !checkingUpdate,
+                    modifier = Modifier.fillMaxWidth().height(40.dp),
+                    shape = ShapeM
+                ) {
+                    Icon(Icons.Filled.SystemUpdate, contentDescription = null, modifier = Modifier.width(16.dp).height(16.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text(if (checkingUpdate) "正在检测..." else if (updateAvailable) "检测更新（发现新版）" else "检测更新", fontSize = 13.sp)
+                }
+            }
+        },
+        shape = ShapeL
+    )
+}
+
+@Composable
+private fun UpdateAvailableDialog(
+    info: UpdateInfo,
+    onDismiss: () -> Unit,
+    onPostpone: () -> Unit,
+    onOpenGithub: () -> Unit,
+    onUpdateNow: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = {
+            Button(onClick = onUpdateNow, shape = ShapeM) { Text("一键更新", fontSize = 13.sp) }
+        },
+        dismissButton = {
+            Row {
+                TextButton(onClick = onPostpone) { Text("稍后更新", fontSize = 13.sp) }
+                TextButton(onClick = onOpenGithub) { Text("打开 GitHub", fontSize = 13.sp, fontWeight = FontWeight.Bold) }
+            }
+        },
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                MarkBox("download", BlueSoft, Blue)
+                Spacer(Modifier.width(10.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(info.title.ifBlank { "发现新版本 v${info.versionName}" }, fontWeight = FontWeight.ExtraBold, color = TextDark)
+                    Text("当前 v0.9.8 → 最新 v${info.versionName}", color = Muted, fontSize = 12.sp)
+                }
+                IconButton(onClick = onDismiss) { Icon(Icons.Filled.Close, contentDescription = "关闭", tint = Muted) }
+            }
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("更新内容：", color = TextDark, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                info.content.take(6).forEachIndexed { index, item ->
+                    Row(verticalAlignment = Alignment.Top) {
+                        Text("${index + 1}.", color = Blue, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.width(20.dp))
+                        Text(item, color = TextDark, fontSize = 12.sp, lineHeight = 16.sp, modifier = Modifier.weight(1f))
+                    }
+                }
+                Text("如果下载速度较慢，建议切换代理网络或打开 GitHub 手动下载。", color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
+            }
+        },
+        shape = ShapeL
+    )
+}
+
+@Composable
+private fun UpdateDownloadDialog(
+    info: UpdateInfo?,
+    state: UpdateDownloadUi,
+    onDismiss: () -> Unit,
+    onInstall: () -> Unit,
+    onOpenGithub: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = {
+            if (state.finished) {
+                Button(onClick = onInstall, shape = ShapeM) { Text("立即安装", fontSize = 13.sp) }
+            } else {
+                TextButton(onClick = onDismiss) { Text("后台下载", fontSize = 13.sp) }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onOpenGithub) { Text(if (state.failed) "打开 GitHub" else "稍后处理", fontSize = 13.sp) }
+        },
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    if (state.finished) Icons.Filled.CheckCircle else Icons.Filled.Download,
+                    contentDescription = null,
+                    tint = if (state.finished) Green else Blue,
+                    modifier = Modifier.width(28.dp).height(28.dp)
+                )
+                Spacer(Modifier.width(10.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        when {
+                            state.finished -> "下载完成"
+                            state.failed -> "下载失败"
+                            else -> "正在下载新版本"
+                        },
+                        fontWeight = FontWeight.ExtraBold,
+                        color = TextDark
+                    )
+                    Text("v${info?.versionName ?: ""}", color = Muted, fontSize = 12.sp)
+                }
+                IconButton(onClick = onDismiss) { Icon(Icons.Filled.Close, contentDescription = "关闭", tint = Muted) }
+            }
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("NetSessionTester-v${info?.versionName ?: ""}.apk", color = TextDark, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                LinearProgressIndicator(
+                    progress = { state.progress / 100f },
+                    modifier = Modifier.fillMaxWidth().height(8.dp),
+                    color = Blue,
+                    trackColor = BlueSoft
+                )
+                Text("${state.progress}%  ·  ${formatBytes(state.downloadedBytes)} / ${if (state.totalBytes > 0) formatBytes(state.totalBytes) else "未知大小"}", color = TextDark, fontSize = 12.sp)
+                if (state.active) Text("速度：${formatSpeed(state.speedBytesPerSecond)}", color = Blue, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                if (state.message.isNotBlank()) {
+                    val warn = state.message.contains("较慢") || state.failed
+                    Text(
+                        state.message,
+                        color = if (warn) ErrorRed else Muted,
+                        fontSize = 11.sp,
+                        lineHeight = 15.sp,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(if (warn) RedSoft else Color.Transparent, ShapeM)
+                            .padding(if (warn) 8.dp else 0.dp)
+                    )
+                }
+                if (state.active) Text("关闭卡片后会继续在后台下载，完成后会再次提示安装。", color = Muted, fontSize = 11.sp)
             }
         },
         shape = ShapeL

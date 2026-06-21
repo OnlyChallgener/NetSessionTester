@@ -1,0 +1,14 @@
+{
+  "versionCode": 60,
+  "versionName": "0.9.8",
+  "title": "发现新版本 v0.9.8",
+  "content": [
+    "新增 GitHub 更新检测与一键更新",
+    "支持后台下载更新包并显示进度和速度",
+    "修复历史页面上下滑动可能闪退的问题",
+    "保留 0.9.7 高速测速核心和精准失败值逻辑"
+  ],
+  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v0.9.8/NetSessionTester-v0.9.8-signed.apk",
+  "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/latest",
+  "force": false
+}
