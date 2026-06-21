@@ -415,10 +415,21 @@ private data class StunProbeResult(
 private data class DnsProbeResult(
     val systemHasA: Boolean,
     val systemHasAaaa: Boolean,
-    val backupHasAaaa: Boolean,
+    val domesticHasAaaa: Boolean,
+    val globalHasAaaa: Boolean,
     val fakeIpDetected: Boolean,
     val error: String? = null
-)
+) {
+    val backupHasAaaa: Boolean
+        get() = domesticHasAaaa || globalHasAaaa
+
+    val backupSource: String
+        get() = when {
+            domesticHasAaaa -> "国内备用"
+            globalHasAaaa -> "国外备用"
+            else -> "备用"
+        }
+}
 
 private fun detectNetworkEnvironment(context: Context): NetworkEnvironment {
     val connectivity = context.getSystemService(ConnectivityManager::class.java)
@@ -502,7 +513,16 @@ private fun buildNetworkProbeInfo(
     val localIpv6 = localIpv6Addresses().firstOrNull()
     val publicV4 = publicIpResult.ipv4.takeIf { isUsableIpv4(it) }
     val hasPublicV6 = publicIpResult.ipv6.isUsableIpText()
-    val dns = runCatching { dnsProbe(targetHost) }.getOrElse { DnsProbeResult(false, false, false, false, it.message ?: it.javaClass.simpleName) }
+    val dns = runCatching { dnsProbe(targetHost) }.getOrElse {
+        DnsProbeResult(
+            systemHasA = false,
+            systemHasAaaa = false,
+            domesticHasAaaa = false,
+            globalHasAaaa = false,
+            fakeIpDetected = false,
+            error = it.message ?: it.javaClass.simpleName
+        )
+    }
     val stun = if (full && !env.hasVpn) runCatching { stunBindingProbe() }.getOrNull() else null
     val latencyMs = if (full) runCatching { tcpConnectLatencyMs(targetHost, targetPort.coerceIn(1, 65535), 1500) }.getOrNull() else null
     val tcpPort = if (full) runCatching { detectTcpLocalPort(targetHost, targetPort.coerceIn(1, 65535), 1500) }.getOrNull() else null
@@ -561,7 +581,8 @@ private fun buildNetworkProbeInfo(
     val dnsStatus = when {
         dns.fakeIpDetected -> "疑似Fake-IP"
         dns.systemHasAaaa -> "系统AAAA正常"
-        dns.backupHasAaaa -> "备用AAAA可用"
+        dns.domesticHasAaaa -> "国内备用AAAA可用"
+        dns.globalHasAaaa -> "国外备用AAAA可用"
         dns.error != null -> "DNS异常"
         else -> "无AAAA"
     }
@@ -569,7 +590,8 @@ private fun buildNetworkProbeInfo(
     val diagnosis = when {
         env.hasVpn -> "检测到VPN/代理，NAT、出口和IPv6结果仅供参考。"
         dns.fakeIpDetected -> "检测到Fake-IP，DNS可能被代理工具接管。"
-        !dns.systemHasAaaa && dns.backupHasAaaa -> "系统DNS未返回IPv6，可能被AdGuard/代理/路由器策略过滤。"
+        !dns.systemHasAaaa && dns.domesticHasAaaa -> "系统DNS未返回IPv6，国内备用DNS可解析，可能被AdGuard/代理/路由器策略过滤。"
+        !dns.systemHasAaaa && dns.globalHasAaaa -> "系统和国内备用DNS未返回IPv6，国外备用DNS可解析，可能存在地区DNS差异或本地DNS策略影响。"
         natType.startsWith("NAT3") -> "疑似CGNAT或严格NAT，P2P/游戏联机可能受影响。"
         natType.startsWith("UDP") -> "STUN请求失败，可能是UDP被防火墙、代理或运营商限制。"
         natType.startsWith("NAT2") -> "UDP映射较稳定，普通联机能力中等。"
@@ -704,12 +726,30 @@ private fun dnsProbe(host: String): DnsProbeResult {
     val systemHasA = system.any { it is Inet4Address }
     val systemHasAaaa = system.any { it is Inet6Address }
     val fakeIp = system.filterIsInstance<Inet4Address>().any { isFakeIpAddress(it.hostAddress.orEmpty()) }
-    val backupHasAaaa = if (!systemHasAaaa) {
-        listOf("223.5.5.5", "119.29.29.29").any { server -> runCatching { dnsQueryHasAaaa(cleanHost, server) }.getOrDefault(false) }
+
+    val domesticHasAaaa = if (!systemHasAaaa) {
+        listOf("223.5.5.5", "119.29.29.29").any { server ->
+            runCatching { dnsQueryHasAaaa(cleanHost, server) }.getOrDefault(false)
+        }
     } else {
         false
     }
-    return DnsProbeResult(systemHasA, systemHasAaaa, backupHasAaaa, fakeIp)
+
+    val globalHasAaaa = if (!systemHasAaaa && !domesticHasAaaa) {
+        listOf("1.1.1.1", "8.8.8.8").any { server ->
+            runCatching { dnsQueryHasAaaa(cleanHost, server) }.getOrDefault(false)
+        }
+    } else {
+        false
+    }
+
+    return DnsProbeResult(
+        systemHasA = systemHasA,
+        systemHasAaaa = systemHasAaaa,
+        domesticHasAaaa = domesticHasAaaa,
+        globalHasAaaa = globalHasAaaa,
+        fakeIpDetected = fakeIp
+    )
 }
 
 private fun isFakeIpAddress(ip: String): Boolean {
@@ -1194,13 +1234,24 @@ private fun NetSessionTesterApp() {
         }
     }
 
+    fun autoPingIntervalMs(startedAt: Long): Long {
+        val now = System.currentTimeMillis()
+        val activeSessions = state.ipv4Stats.activeSessions + state.ipv6Stats.activeSessions
+        return when {
+            finishInProgress -> 1_000L
+            now - startedAt <= 5_000L -> 200L
+            activeSessions >= 5_000 -> 1_000L
+            else -> 500L
+        }
+    }
+
     fun startPingMonitor(config: SessionConfig, startedAt: Long) {
         pingJob?.cancel()
         pingPoints = emptyList()
         pingJob = scope.launch {
             var bucketSec = -1
             val bucketSamples = mutableListOf<Int?>()
-            while (currentStartedAt == startedAt) {
+            while (currentStartedAt == startedAt && !finishInProgress) {
                 val loopStart = System.currentTimeMillis()
                 val elapsed = ((loopStart - startedAt) / 1_000L).toInt().coerceAtLeast(0)
                 if (bucketSec < 0) bucketSec = elapsed
@@ -1211,7 +1262,8 @@ private fun NetSessionTesterApp() {
                 }
                 bucketSamples.add(tcpPingMs(config.host, config.port))
                 val cost = System.currentTimeMillis() - loopStart
-                delay((500L - cost).coerceAtLeast(0L))
+                val interval = autoPingIntervalMs(startedAt)
+                delay((interval - cost).coerceAtLeast(0L))
             }
             if (bucketSec >= 0 && bucketSamples.isNotEmpty()) {
                 appendPingSecond(bucketSec, bucketSamples.toList())
@@ -2875,14 +2927,15 @@ private fun chartXAxisStep(durationSec: Int): Int = when {
 }
 
 private fun sessionYAxisMax(peak: Int): Int = when {
-    peak <= 200 -> 200
-    peak <= 500 -> 500
+    peak <= 300 -> 300
     peak <= 1000 -> 1000
-    peak <= 2500 -> 2500
+    peak <= 2000 -> 2000
     peak <= 5000 -> 5000
     peak <= 10000 -> 10000
+    peak <= 20000 -> 20000
+    peak <= 30000 -> 30000
     peak <= 35000 -> 35000
-    else -> 65535
+    else -> (((peak + 4_999) / 5_000) * 5_000).coerceAtMost(65_535)
 }
 
 private fun pingYAxisMax(peak: Int): Int = when {
@@ -3099,7 +3152,7 @@ private fun PingCompactChartCard(pingPoints: List<PingPoint>) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             SectionTitle("∿", "Ping 测试", Blue)
             Spacer(Modifier.width(8.dp))
-            StatusChip("500ms/次", BlueSoft, Blue, compact = true)
+            StatusChip("AUTO", BlueSoft, Blue, compact = true)
             Spacer(Modifier.weight(1f))
             StatusChip(if (loss == 0) "● 正常" else "丢包 $loss%", if (loss == 0) GreenSoft else RedSoft, if (loss == 0) Green else ErrorRed, compact = true)
         }
