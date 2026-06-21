@@ -12,34 +12,33 @@ android {
         applicationId = "com.demonv.netsessiontester"
         minSdk = 26
         targetSdk = 35
-        versionCode = 55
-        versionName = "0.9.8"
+        versionCode = 56
+        versionName = "0.9.8-097-speed-core"
         vectorDrawables { useSupportLibrary = true }
     }
 
-signingConfigs {
-    create("release") {
-        val path = System.getenv("ANDROID_KEYSTORE_PATH")
-        if (!path.isNullOrBlank()) {
-            storeFile = file(path)
-            storePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
-            keyAlias = System.getenv("ANDROID_KEY_ALIAS")
-            keyPassword = System.getenv("ANDROID_KEY_PASSWORD")
+    signingConfigs {
+        create("release") {
+            val path = System.getenv("ANDROID_KEYSTORE_PATH")
+            if (!path.isNullOrBlank()) {
+                storeFile = file(path)
+                storePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("ANDROID_KEY_ALIAS")
+                keyPassword = System.getenv("ANDROID_KEY_PASSWORD")
+            }
         }
     }
-}
 
-buildTypes {
-    release {
-        isMinifyEnabled = false
-        isShrinkResources = false
-        signingConfig = signingConfigs.getByName("release")
+    buildTypes {
+        release {
+            isMinifyEnabled = false
+            isShrinkResources = false
+            signingConfig = signingConfigs.getByName("release")
+        }
+        debug {
+            isDebuggable = true
+        }
     }
-
-    debug {
-        isDebuggable = true
-    }
-}
 
     buildFeatures { compose = true }
 }

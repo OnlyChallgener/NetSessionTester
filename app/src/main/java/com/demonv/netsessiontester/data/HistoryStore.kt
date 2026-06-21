@@ -62,8 +62,8 @@ class HistoryStore(private val context: Context) {
     }
 
     suspend fun delete(id: String) = withContext(Dispatchers.IO) {
-        val updated = loadAllInternal().filterNot { it.id == id }
-        writeAll(updated)
+        val kept = loadAllInternal().filterNot { it.id == id }
+        writeAll(kept)
     }
 
     suspend fun counts(): HistoryCounts = withContext(Dispatchers.IO) {
