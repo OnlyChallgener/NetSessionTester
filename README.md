@@ -265,3 +265,11 @@ Artifact：NetSessionTester-v0.9.8-final-axis-detail-fix-debug-apk
 - Ping 改为 500ms 探测，图表按 1s 汇总。
 - 保留 X/Y 轴动态数字标注、会话卡与图表融合、网络环境设置页、运营商前缀后台判定。
 - 版本号保持 v0.9.8。
+
+
+## v0.9.8 Failure Cap Adaptive Throttle
+
+- 修复失败上限严重超跑：失败停=200 时，失败计数作为硬上限处理，不再因为 pending 批量完成冲到 900+。
+- 一旦失败开始出现，动态降低新提交连接数，并限制 pending + 新增不超过剩余失败额度。
+- 达到失败上限或 FD 上限会立即取消未完成连接，保留已成功连接统计。
+- 版本号保持 v0.9.8。

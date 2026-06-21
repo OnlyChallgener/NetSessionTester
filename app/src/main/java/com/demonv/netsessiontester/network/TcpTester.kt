@@ -116,11 +116,26 @@ class TcpTester {
                 iterator.remove()
                 completed++
                 val result = runCatching { job.await() }.getOrNull() ?: continue
-                result.socket?.let { sockets += it }
+                result.socket?.let { socket ->
+                    // 成功连接继续保留；失败达到上限时只停止后续建连，不强行丢弃已成功的连接。
+                    sockets += socket
+                }
                 result.error?.let { key ->
-                    errors[key] = (errors[key] ?: 0) + 1
-                    totalFailure++
-                    if (key == "FD上限") stopReason = "FD上限"
+                    if (key == "FD上限") {
+                        stopReason = "FD上限"
+                    }
+                    // 失败上限作为硬上限处理，避免一批 pending 同时失败后从 200 冲到 900+。
+                    if (totalFailure < config.failureLimit) {
+                        errors[key] = (errors[key] ?: 0) + 1
+                        totalFailure++
+                    }
+                    if (totalFailure >= config.failureLimit && stopReason == null) {
+                        stopReason = "失败上限"
+                    }
+                }
+                if (stopReason == "FD上限") {
+                    // FD 上限必须立即停止，避免继续触发系统资源错误。
+                    break
                 }
             }
             if (sockets.isNotEmpty()) {
@@ -128,6 +143,10 @@ class TcpTester {
                 totalSuccess += sockets.size
             }
             totalAttempts = totalSuccess + totalFailure
+            if (stopReason == "失败上限" || stopReason == "FD上限") {
+                pending.forEach { it.cancel() }
+                pending.clear()
+            }
             return completed
         }
 
@@ -169,12 +188,24 @@ class TcpTester {
             val remainingFailure = (config.failureLimit - totalFailure).coerceAtLeast(0)
             val pendingLimit = maxOf(config.batchSize * 6, 300).coerceAtMost(6000)
             val canLaunchByPending = (pendingLimit - pending.size).coerceAtLeast(0)
-            val baseBatch = when {
+            val failureAwareBatch = when {
+                remainingFailure <= 0 -> 0
                 !cleanProbePassed -> minOf(config.batchSize, config.failureLimit, 100)
-                totalFailure > 0 -> minOf(config.batchSize, (remainingFailure - pending.size).coerceAtLeast(0))
+                totalFailure <= 0 -> config.batchSize
+                remainingFailure <= 10 -> 1
+                remainingFailure <= 50 -> minOf(config.batchSize, 10)
+                remainingFailure <= config.batchSize -> minOf(config.batchSize, (remainingFailure / 2).coerceAtLeast(1))
+                remainingFailure <= config.batchSize * 2 -> minOf(config.batchSize, remainingFailure / 2)
                 else -> config.batchSize
             }
-            val launchCount = minOf(baseBatch, remainingSuccess, canLaunchByPending)
+            // 一旦出现失败，就把“未完成连接 + 新提交连接”限制在剩余失败额度内。
+            // 这样既保留前期高 CPS，又能在接近失败上限时自动降速，避免失败数严重超跑。
+            val canLaunchByFailure = if (totalFailure > 0 || !cleanProbePassed) {
+                (remainingFailure - pending.size).coerceAtLeast(0)
+            } else {
+                failureAwareBatch
+            }
+            val launchCount = minOf(failureAwareBatch, remainingSuccess, canLaunchByPending, canLaunchByFailure)
 
             if (launchCount > 0) {
                 repeat(launchCount) { index ->
@@ -197,8 +228,9 @@ class TcpTester {
 
             emitStats()
 
-            if (totalFailure >= config.failureLimit) {
-                onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 达到失败上限：${config.failureLimit}"))
+            if (totalFailure >= config.failureLimit || stopReason == "失败上限") {
+                stopReason = "失败上限"
+                onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 达到失败上限：${config.failureLimit}，已取消未完成连接"))
                 break
             }
             if (stopReason == "FD上限") {
@@ -212,7 +244,11 @@ class TcpTester {
         pending.clear()
 
         val finalActive = activeCount(protocol)
-        val finalPhase = if (stopReason == "FD上限") "FD上限" else "测试完成"
+        val finalPhase = when (stopReason) {
+            "FD上限" -> "FD上限"
+            "失败上限" -> "失败上限"
+            else -> "测试完成"
+        }
         val finalStats = stats.copy(
             phase = finalPhase,
             activeSessions = finalActive,
