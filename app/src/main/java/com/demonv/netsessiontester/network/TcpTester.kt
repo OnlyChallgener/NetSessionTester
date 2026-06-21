@@ -38,6 +38,8 @@ class TcpTester {
     private companion object {
         // 高并发会话测试不能被长连接超时拖慢；用户设置更低时尊重用户设置。
         const val MAX_EFFECTIVE_CONNECT_TIMEOUT_MS = 800
+        // 活动会话超过这个值后，失败上限不再提前结束，继续追 FD 上限。
+        const val FD_CHASE_THRESHOLD = 5000
     }
 
     private val socketLock = Mutex()
@@ -47,32 +49,32 @@ class TcpTester {
     )
 
     /**
-     * 高并发失败熔断门：
-     * - 失败数用 CAS 精准封顶，避免并发下 200 跑成 275/900+
-     * - reachedLimit 只触发一次，用于关闭 pending socket，避免等长 timeout
-     * - 不做 pending 预限速，保证速度接近 0.9.7
+     * 高并发失败计数门：
+     * - 用 CAS 精准封顶，失败停=200 时 UI/历史最多显示 200。
+     * - 失败上限只是“是否停止新增”的判断信号，不提前限速、不提前关闭 pending。
+     * - 当活动会话已经很高时继续冲 FD 上限；活动很低时按失败上限停止。
      */
     private class FailureGate(private val limit: Int) {
         private val count = AtomicInteger(0)
-        private val stopped = AtomicBoolean(false)
+        private val reachedLimit = AtomicBoolean(false)
 
         fun value(): Int = count.get().coerceAtMost(limit)
-        fun isStopped(): Boolean = stopped.get()
-        fun forceStop(): Boolean = stopped.compareAndSet(false, true)
+        fun isLimitReached(): Boolean = reachedLimit.get()
 
         /**
-         * @return true 表示这一次失败刚好触发失败上限。
+         * @return true 表示这一次失败被计入；超过上限后的失败不再计数。
          */
         fun recordFailure(): Boolean {
             while (true) {
                 val current = count.get()
                 if (current >= limit) {
-                    stopped.set(true)
+                    reachedLimit.set(true)
                     return false
                 }
                 val next = current + 1
                 if (count.compareAndSet(current, next)) {
-                    return next >= limit && stopped.compareAndSet(false, true)
+                    if (next >= limit) reachedLimit.set(true)
+                    return true
                 }
             }
         }
@@ -147,7 +149,7 @@ class TcpTester {
             onLog(LogLine(level = LogLevel.WARN, text = "${protocol.label} 高并发连接超时已限制为 ${effectiveTimeoutMs}ms，避免长超时拖慢批次"))
         }
 
-        while (currentCoroutineContext().isActive && totalSuccess < config.successLimit && !failureGate.isStopped()) {
+        while (currentCoroutineContext().isActive && totalSuccess < config.successLimit) {
             val remainingSuccess = config.successLimit - totalSuccess
             val targetBatch = minOf(config.batchSize, remainingSuccess)
             if (targetBatch <= 0) break
@@ -199,7 +201,10 @@ class TcpTester {
                 break
             }
 
-            if (failureGate.isStopped() || totalFailure >= config.failureLimit) {
+            // 失败上限策略：
+            // - 活动会话较低时，失败停用于判定网络/目标已经失败，立即结束。
+            // - 活动会话已经较高时，不因失败上限提前刹车，继续冲 Android FD/Socket 上限。
+            if (failureGate.isLimitReached() && active < FD_CHASE_THRESHOLD) {
                 onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 达到失败上限：${config.failureLimit}"))
                 break
             }
@@ -257,12 +262,11 @@ class TcpTester {
 
         val jobs = (0 until count).map { index ->
             async(Dispatchers.IO) {
-                if (failureGate.isStopped()) return@async
                 val address = addresses[index % addresses.size]
                 val result = openOneTracked(address, port, timeoutMs, pendingSockets)
 
                 result.socket?.let { socket ->
-                    if (!failureGate.isStopped() && !fdLimitDetected.get()) {
+                    if (!fdLimitDetected.get()) {
                         successSockets.add(socket)
                     } else {
                         runCatching { socket.close() }
@@ -272,23 +276,14 @@ class TcpTester {
 
                 val error = result.error ?: return@async
                 if (error == "FD上限") {
-                    if (failureGate.recordFailure()) {
-                        addError(error)
-                    } else if (!failureGate.isStopped()) {
-                        addError(error)
-                    }
+                    addError(error)
                     fdLimitDetected.set(true)
-                    failureGate.forceStop()
                     closePendingSockets()
                     return@async
                 }
 
-                val hitLimit = failureGate.recordFailure()
-                if (!failureGate.isStopped() || hitLimit) {
+                if (failureGate.recordFailure()) {
                     addError(error)
-                }
-                if (hitLimit) {
-                    closePendingSockets()
                 }
             }
         }

@@ -301,3 +301,22 @@ Artifact：NetSessionTester-v0.9.8-final-axis-detail-fix-debug-apk
 - 达到失败上限时立即关闭 pending socket，避免等待长 timeout。
 - FD / Socket 上限优先触发熔断，保留已建立会话并避免闪退。
 - 保留 release 签名配置和 GitHub Actions signed APK 输出。
+
+
+## v0.9.8 OneUI9 UI Refresh
+
+- 仅刷新界面风格，不改 TCP 测试核心。
+- 保留 0.9.7 高速核心与 CAS 精准失败数逻辑。
+- 卡片、指标块、分段按钮、底部导航、弹窗统一为 OneUI9 风格的大圆角、浅色层级和柔和阴影。
+- 保留签名发布配置，GitHub Actions 继续输出 signed release APK。
+- 回归保护：通知跳转、FD保护、版本弹窗、历史详情卡片、滑动删除、图表坐标、Ping 500ms 均未删除。
+
+
+## v0.9.8 OneUI9 FD200 UI Tune
+
+- 保持 0.9.7 高速测试核心，不做 pending 预限速。
+- 失败数使用 CAS 精准封顶，失败停=200 时 UI/历史最多显示 200。
+- 活动会话超过 5000 后，失败上限不再提前结束，继续追 Android FD/Socket 上限。
+- FD 上限优先停止并释放，避免闪退。
+- 圈出的测试控制、会话标题、指标卡、诊断建议、最近日志等字号整体小一号。
+- 保留 GitHub Release 签名配置。
