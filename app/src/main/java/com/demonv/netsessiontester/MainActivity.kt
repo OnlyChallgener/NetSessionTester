@@ -544,12 +544,12 @@ private fun buildNetworkProbeInfo(
 
     val natType = when {
         env.hasVpn -> "代理环境"
-        publicV4 == null -> "UDP受限"
+        publicV4 == null -> "NAT4 / UDP受限"
         localIpv4 != null && !isPrivateIpv4(localIpv4) && localIpv4 == publicV4 -> "NAT1 / 开放"
         stun != null && stun.mappedPort == stun.localPort -> "NAT2 / 中等"
         stun != null -> "NAT3 / 严格"
-        full -> "UDP受限"
-        else -> "待手动检测"
+        full -> "NAT4 / UDP受限"
+        else -> "待检测"
     }
 
     val mapping = when {
@@ -593,7 +593,7 @@ private fun buildNetworkProbeInfo(
         !dns.systemHasAaaa && dns.domesticHasAaaa -> "系统DNS未返回IPv6，国内备用DNS可解析，可能被AdGuard/代理/路由器策略过滤。"
         !dns.systemHasAaaa && dns.globalHasAaaa -> "系统和国内备用DNS未返回IPv6，国外备用DNS可解析，可能存在地区DNS差异或本地DNS策略影响。"
         natType.startsWith("NAT3") -> "疑似CGNAT或严格NAT，P2P/游戏联机可能受影响。"
-        natType.startsWith("UDP") -> "STUN请求失败，可能是UDP被防火墙、代理或运营商限制。"
+        natType.startsWith("NAT4") || natType.startsWith("UDP") -> "STUN请求失败，当前可按NAT4/UDP受限理解，可能是UDP被防火墙、代理或运营商限制。"
         natType.startsWith("NAT2") -> "UDP映射较稳定，普通联机能力中等。"
         natType.startsWith("NAT1") -> "IPv4可能具备公网直连能力。"
         else -> "网络信息已更新。"
@@ -919,6 +919,7 @@ private fun NetSessionTesterApp() {
     var lastChartSampleAt by remember { mutableStateOf<Map<IpProtocol, Long>>(emptyMap()) }
     var pingPoints by remember { mutableStateOf<List<PingPoint>>(emptyList()) }
     var pingJob by remember { mutableStateOf<Job?>(null) }
+    var pingIntervalLabel by remember { mutableStateOf("AUTO") }
     var networkWatchJob by remember { mutableStateOf<Job?>(null) }
     var testNetworkSignature by remember { mutableStateOf("") }
     var lastNetworkInfoSignature by remember { mutableStateOf("") }
@@ -1248,6 +1249,7 @@ private fun NetSessionTesterApp() {
     fun startPingMonitor(config: SessionConfig, startedAt: Long) {
         pingJob?.cancel()
         pingPoints = emptyList()
+        pingIntervalLabel = "AUTO · 500ms"
         pingJob = scope.launch {
             var bucketSec = -1
             val bucketSamples = mutableListOf<Int?>()
@@ -1263,6 +1265,7 @@ private fun NetSessionTesterApp() {
                 bucketSamples.add(tcpPingMs(config.host, config.port))
                 val cost = System.currentTimeMillis() - loopStart
                 val interval = autoPingIntervalMs(startedAt)
+                pingIntervalLabel = "AUTO · ${interval}ms"
                 delay((interval - cost).coerceAtLeast(0L))
             }
             if (bucketSec >= 0 && bucketSamples.isNotEmpty()) {
@@ -1425,6 +1428,7 @@ private fun NetSessionTesterApp() {
         alignPingWithSessionEnd()
         if (pingJob != currentJob) pingJob?.cancel()
         pingJob = null
+        pingIntervalLabel = "AUTO"
         if (networkWatchJob != currentJob) networkWatchJob?.cancel()
         networkWatchJob = null
         activeRunId = 0L
@@ -1576,6 +1580,7 @@ private fun NetSessionTesterApp() {
                 alignPingWithSessionEnd()
                 pingJob?.cancel()
                 pingJob = null
+                pingIntervalLabel = "AUTO"
                 networkWatchJob?.cancel()
                 networkWatchJob = null
                 if (!manualStopRequested) {
@@ -1836,6 +1841,7 @@ private fun NetSessionTesterApp() {
                     onChartModeChange = { chartMode = it },
                     chartPoints = chartPoints,
                     pingPoints = pingPoints,
+                    pingIntervalLabel = pingIntervalLabel,
                     isAdding = state.isAdding,
                     onStart = { startTest() },
                     onStopAdding = { stopAdding() },
@@ -2308,6 +2314,7 @@ private fun TestPage(
     onChartModeChange: (ChartMode) -> Unit,
     chartPoints: List<ChartPoint>,
     pingPoints: List<PingPoint>,
+    pingIntervalLabel: String,
     isAdding: Boolean,
     onStart: () -> Unit,
     onStopAdding: () -> Unit,
@@ -2361,7 +2368,7 @@ private fun TestPage(
                 }
             }
         }
-        item { PingCompactChartCard(pingPoints = pingPoints) }
+        item { PingCompactChartCard(pingPoints = pingPoints, intervalLabel = pingIntervalLabel) }
         if (showIpv4) item { SessionStatsCard("IPv4 会话", ipv4Stats, maskPrivacy, chartPoints.filter { it.protocol == IpProtocol.IPV4 }, chartMode, onChartModeChange) }
         if (showIpv6) item { SessionStatsCard("IPv6 会话", ipv6Stats, maskPrivacy, chartPoints.filter { it.protocol == IpProtocol.IPV6 }, chartMode, onChartModeChange) }
         item { DiagnosisAdviceInlineCard(mode, ipv4Stats, ipv6Stats) }
@@ -2978,7 +2985,7 @@ private fun SessionGrowthChart(points: List<ChartPoint>) {
     val minX = sorted.firstOrNull()?.elapsedSec ?: 0
     val maxXRaw = sorted.lastOrNull()?.elapsedSec ?: (minX + 1)
     val maxX = maxOf(minX + 1, maxXRaw)
-    val maxY = sessionYAxisMax(sorted.maxOfOrNull { maxOf(it.active, it.failure, it.total) } ?: 0)
+    val maxY = sessionYAxisMax(sorted.maxOfOrNull { maxOf(it.active, it.failure) } ?: 0)
     val step = chartXAxisStep(maxX - minX)
     val last = sorted.lastOrNull()
     Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
@@ -3141,7 +3148,7 @@ private fun InfoMetricTile(
 }
 
 @Composable
-private fun PingCompactChartCard(pingPoints: List<PingPoint>) {
+private fun PingCompactChartCard(pingPoints: List<PingPoint>, intervalLabel: String = "AUTO") {
     val successes = pingPoints.mapNotNull { it.latencyMs }
     val current = successes.lastOrNull()
     val avg = successes.takeIf { it.isNotEmpty() }?.average()?.roundToInt()
@@ -3152,7 +3159,7 @@ private fun PingCompactChartCard(pingPoints: List<PingPoint>) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             SectionTitle("∿", "Ping 测试", Blue)
             Spacer(Modifier.width(8.dp))
-            StatusChip("AUTO", BlueSoft, Blue, compact = true)
+            StatusChip(intervalLabel, BlueSoft, Blue, compact = true)
             Spacer(Modifier.weight(1f))
             StatusChip(if (loss == 0) "● 正常" else "丢包 $loss%", if (loss == 0) GreenSoft else RedSoft, if (loss == 0) Green else ErrorRed, compact = true)
         }
