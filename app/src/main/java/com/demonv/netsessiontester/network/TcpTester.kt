@@ -123,27 +123,10 @@ class TcpTester {
         var stats = ProtocolStats(protocol = protocol, phase = "建连中", resolvedAddresses = addressText)
         var fdSeen = false
 
-        // CPS 自适应调速：10 CPS 只作为短时保护，不作为长期巡航速度。
-        // 普通情况下按用户设置的 batch/interval 运行；连续无成功才短暂降速，
-        // 只要仍有成功连接，就会阶梯恢复，避免长时间卡在 10 CPS。
-        val normalCps = ((config.batchSize * 1000L) / config.intervalMs).toInt().coerceIn(1, 2_000)
-        var cpsCap = normalCps
-        var consecutiveNoSuccessBatches = 0
-        var lowCpsStartedAt = 0L
-        var lastCpsRecoverAt = 0L
-
-        fun cpsCapLaunchLimit(): Int {
-            return ((cpsCap.toLong() * config.intervalMs + 999L) / 1000L).toInt().coerceAtLeast(1)
-        }
-
-        fun nextRecoveryCps(current: Int): Int = when {
-            current <= 10 -> 30
-            current < 60 -> 60
-            current < 100 -> 100
-            current < 150 -> 150
-            else -> (current * 2).coerceAtMost(normalCps)
-        }.coerceAtMost(normalCps).coerceAtLeast(1)
-
+        // CPS 策略：不再做失败率/无成功自适应降速。
+        // 增长测试必须按用户设置的 batch/interval 持续新增；
+        // 危险情况（失败上限、FD保护、资源保护、网络切换）直接硬终止并统一释放，
+        // 避免失败数 199 时被剩余失败值或低 CPS 卡住很久。
         onStats(stats)
 
         fun recordFailure(key: String) {
@@ -193,15 +176,10 @@ class TcpTester {
                 break
             }
 
-            // 速度优先：没有接近失败上限时按用户设定批量并发。
-            // 接近失败上限时按剩余失败值收缩，避免一次批量把失败数冲过头。
-            val nearFailureCap = totalFailure >= (config.failureLimit * 8 / 10)
-            val baseLaunchCount = if (nearFailureCap) {
-                minOf(config.batchSize, remainingSuccess, remainingFailure)
-            } else {
-                minOf(config.batchSize, remainingSuccess)
-            }
-            val requestedLaunchCount = minOf(baseLaunchCount, cpsCapLaunchLimit())
+            // 增长测试按用户设置的批量持续新增，不按“剩余失败数”收缩。
+            // 失败上限由 recordFailure + 批次后检查硬终止处理；
+            // 这样 failure=199 / limit=200 时不会只发 1 个连接导致 CPS 卡死。
+            val requestedLaunchCount = minOf(config.batchSize, remainingSuccess)
             if (requestedLaunchCount <= 0) break
 
             // FD / heap hard guard. Do not wait for EMFILE/OOM. Stop while the
@@ -241,32 +219,9 @@ class TcpTester {
             }
             totalAttempts = totalSuccess + totalFailure
 
-            // CPS 调速：连续无成功才短暂降到 10 CPS；10 CPS 最多保护约 5 秒，
-            // 如果仍有成功连接则 10 → 30 → 60 → 100 → 150 → 正常速度阶梯恢复。
-            val nowForCps = System.currentTimeMillis()
-            if (batchSuccess <= 0 && batchFailure > 0) {
-                consecutiveNoSuccessBatches++
-            } else if (batchSuccess > 0) {
-                consecutiveNoSuccessBatches = 0
-            }
-
-            if (consecutiveNoSuccessBatches >= 2 && cpsCap > 10) {
-                cpsCap = minOf(10, normalCps)
-                lowCpsStartedAt = nowForCps
-                lastCpsRecoverAt = nowForCps
-                onLog(LogLine(level = LogLevel.WARN, text = "${protocol.label} 连续批次无成功，短时降速到 ${cpsCap} CPS"))
-            } else if (cpsCap < normalCps) {
-                val lowCpsTooLong = lowCpsStartedAt > 0L && nowForCps - lowCpsStartedAt >= 5_000L
-                val hasSuccessAgain = batchSuccess > 0
-                if ((hasSuccessAgain || lowCpsTooLong) && nowForCps - lastCpsRecoverAt >= 3_000L) {
-                    val oldCps = cpsCap
-                    cpsCap = nextRecoveryCps(cpsCap)
-                    lastCpsRecoverAt = nowForCps
-                    if (cpsCap != oldCps) {
-                        onLog(LogLine(level = LogLevel.WARN, text = "${protocol.label} CPS 恢复：$oldCps → $cpsCap"))
-                    }
-                }
-            }
+            // 不再根据失败率/连续无成功降速。
+            // 如果达到失败上限、FD保护或资源保护，下面的硬条件会立刻结束；
+            // 否则保持用户设置的增长节奏。
 
             emitStats()
 

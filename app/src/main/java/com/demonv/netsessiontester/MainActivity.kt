@@ -991,7 +991,7 @@ private fun NetSessionTesterApp() {
     var host by remember { mutableStateOf("www.baidu.com") }
     var port by remember { mutableStateOf("80") }
     var mode by remember { mutableStateOf(TestMode.IPV4_THEN_IPV6) }
-    var batchSize by remember { mutableStateOf("100") }
+    var batchSize by remember { mutableStateOf("120") }
     var intervalMs by remember { mutableStateOf("500") }
     var timeoutMs by remember { mutableStateOf("3000") }
     var successLimit by remember { mutableStateOf("65535") }
@@ -1922,7 +1922,7 @@ private fun NetSessionTesterApp() {
                     onSave = { scope.launch { snackbarHostState.showSnackbar("参数已保存") } },
                     onRestoreDefault = {
                         host = "www.baidu.com"; port = "80"; mode = TestMode.IPV4_THEN_IPV6
-                        batchSize = "100"; intervalMs = "500"; timeoutMs = "3000"
+                        batchSize = "120"; intervalMs = "500"; timeoutMs = "3000"
                         successLimit = "65535"; failureLimit = "200"; keepConnections = true; maskPrivacy = false; historyLimit = "30"
                     }
                 )
