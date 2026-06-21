@@ -44,7 +44,11 @@ class TcpTester {
         // 若高位连续几轮没有任何新增成功，很多 Android 机型不会明确抛 EMFILE，
         // 这里按“接近 FD 上限并停滞”归类为 FD 上限，避免误判为普通失败。
         const val FD_NEAR_ACTIVE_THRESHOLD = 28000
+        // 这台机型实测 App 进程 FD 上限约 32768，活动会话到 3.24w 后应继续追 FD，不能按普通失败提前停止。
+        const val FD_HARD_ACTIVE_THRESHOLD = 32400
+        const val FD_USED_LIMIT_THRESHOLD = 32600
         const val FD_STAGNANT_ROUNDS = 3
+        const val MID_FAILURE_STAGNANT_ROUNDS = 6
         const val LOW_FAILURE_STOP_ACTIVE_THRESHOLD = 1200
     }
 
@@ -175,6 +179,7 @@ class TcpTester {
             socketLock.withLock { heldSockets.getValue(protocol).addAll(batchResult.successSockets) }
 
             val active = activeCount(protocol)
+            val fdUsed = readOpenFdCount()
             maxStable = maxOf(maxStable, active)
             val added = totalAttempts - lastTotalAttempts
             lastTotalAttempts = totalAttempts
@@ -204,12 +209,16 @@ class TcpTester {
             onLog(LogLine(level = LogLevel.STAT, text = "${protocol.label} 统计 - 成功：$totalSuccess$successDeltaText | 失败：$totalFailure$failureDeltaText | 活动：$active | 总计：$totalAttempts | 新增：$added | CPS：${cps}/秒"))
 
             if (batchResult.fdLimitDetected) {
+                ensureFdErrorVisible(errors, config.failureLimit)
+                totalFailure = failureGate.value().coerceAtLeast(minOf(config.failureLimit, errors.values.sum()))
                 stats = stats.copy(
                     phase = "FD上限",
+                    totalFailure = totalFailure,
+                    totalAttempts = totalSuccess + totalFailure,
                     errorSummary = errors.toMap()
                 )
                 onStats(stats)
-                onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 检测到 Android FD上限，已停止新增并保存历史"))
+                onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 检测到 Android FD上限，活动 $active / FD ${fdUsed}，已停止新增"))
                 break
             }
 
@@ -220,20 +229,26 @@ class TcpTester {
             //   高位且连续无新增成功时，按 FD 上限处理，避免误判为普通失败。
             if (failureGate.isLimitReached()) {
                 val shouldStopAsLowFailure = active < LOW_FAILURE_STOP_ACTIVE_THRESHOLD && totalSuccess < FD_CHASE_THRESHOLD
-                val shouldTreatAsFdLimit = active >= FD_NEAR_ACTIVE_THRESHOLD && stagnantAfterFailureLimitRounds >= FD_STAGNANT_ROUNDS
+                val shouldTreatAsFdLimit = active >= FD_HARD_ACTIVE_THRESHOLD ||
+                    fdUsed >= FD_USED_LIMIT_THRESHOLD ||
+                    (active >= FD_NEAR_ACTIVE_THRESHOLD && stagnantAfterFailureLimitRounds >= FD_STAGNANT_ROUNDS)
+                val shouldStopAsMidFailure = active < FD_NEAR_ACTIVE_THRESHOLD && stagnantAfterFailureLimitRounds >= MID_FAILURE_STAGNANT_ROUNDS
 
                 if (shouldTreatAsFdLimit) {
-                    errors["FD上限"] = (errors["FD上限"] ?: 0) + 1
+                    ensureFdErrorVisible(errors, config.failureLimit)
+                    totalFailure = failureGate.value().coerceAtLeast(minOf(config.failureLimit, errors.values.sum()))
                     stats = stats.copy(
                         phase = "FD上限",
+                        totalFailure = totalFailure,
+                        totalAttempts = totalSuccess + totalFailure,
                         errorSummary = errors.toMap()
                     )
                     onStats(stats)
-                    onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 接近 Android FD上限并连续无新增，按FD上限停止：活动 $active 失败 ${failureGate.value()}"))
+                    onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 接近 Android FD上限，活动 $active / FD $fdUsed，按FD上限停止"))
                     break
                 }
 
-                if (shouldStopAsLowFailure) {
+                if (shouldStopAsLowFailure || shouldStopAsMidFailure) {
                     onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 达到失败上限：${config.failureLimit}"))
                     break
                 }
@@ -242,13 +257,21 @@ class TcpTester {
         }
 
         val finalActive = activeCount(protocol)
+        if (finalActive >= FD_HARD_ACTIVE_THRESHOLD && failureGate.isLimitReached()) {
+            ensureFdErrorVisible(errors, config.failureLimit)
+            stats = stats.copy(errorSummary = errors.toMap())
+        }
         val finalPhase = when {
-            stats.errorSummary.containsKey("FD上限") || stats.phase == "FD上限" -> "FD上限"
+            stats.errorSummary.containsKey("FD上限") || stats.phase == "FD上限" || (finalActive >= FD_HARD_ACTIVE_THRESHOLD && failureGate.isLimitReached()) -> "FD上限"
             else -> "测试完成"
         }
+        val finalFailure = stats.totalFailure.coerceAtMost(config.failureLimit)
         val finalStats = stats.copy(
             phase = finalPhase,
             activeSessions = finalActive,
+            totalFailure = finalFailure,
+            totalAttempts = finalActive + finalFailure,
+            totalSuccess = maxOf(stats.totalSuccess, finalActive),
             maxStableSessions = maxOf(maxStable, finalActive)
         )
         onStats(finalStats)
@@ -259,6 +282,25 @@ class TcpTester {
             onLog(LogLine(level = LogLevel.WARN, text = "${protocol.label} 已按设置释放连接。"))
         }
         return finalStats
+    }
+
+    private fun readOpenFdCount(): Int {
+        return runCatching { java.io.File("/proc/self/fd").list()?.size ?: -1 }.getOrDefault(-1)
+    }
+
+    private fun ensureFdErrorVisible(target: MutableMap<String, Int>, failureLimit: Int) {
+        if ((target["FD上限"] ?: 0) > 0) return
+        val currentTotal = target.values.sum()
+        if (currentTotal >= failureLimit) {
+            val keyToReduce = target
+                .filterKeys { it != "FD上限" }
+                .maxByOrNull { it.value }
+                ?.key
+            if (keyToReduce != null && (target[keyToReduce] ?: 0) > 0) {
+                target[keyToReduce] = (target[keyToReduce] ?: 0) - 1
+            }
+        }
+        target["FD上限"] = (target["FD上限"] ?: 0) + 1
     }
 
     private fun mergeErrors(
@@ -306,7 +348,7 @@ class TcpTester {
 
                 val error = result.error ?: return@async
                 if (error == "FD上限") {
-                    addError(error)
+                    if (failureGate.recordFailure()) addError(error)
                     fdLimitDetected.set(true)
                     closePendingSockets()
                     return@async

@@ -51,6 +51,7 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -353,10 +354,22 @@ private fun NetSessionTesterApp() {
 
     fun refreshHistory() {
         scope.launch {
-            state = state.copy(history = historyStore.load(historyPeriod, safeHistoryLimit()))
-            historySizeKb = historyStore.sizeKb()
-            historySavedCount = historyStore.count()
-            historyCounts = historyStore.counts()
+            runCatching {
+                val loaded = historyStore.load(historyPeriod, safeHistoryLimit())
+                val size = historyStore.sizeKb()
+                val count = historyStore.count()
+                val counts = historyStore.counts()
+                state = state.copy(history = loaded)
+                historySizeKb = size
+                historySavedCount = count
+                historyCounts = counts
+            }.onFailure { error ->
+                appendLog(LogLine(level = LogLevel.ERROR, text = "读取历史失败：${error.message ?: error.javaClass.simpleName}"))
+                state = state.copy(history = emptyList())
+                historySizeKb = 0
+                historySavedCount = 0
+                historyCounts = HistoryCounts()
+            }
         }
     }
 
@@ -369,11 +382,13 @@ private fun NetSessionTesterApp() {
     }
 
     LaunchedEffect(Unit) {
-        state = state.copy(history = historyStore.load(historyPeriod, 30), logs = logStore.load())
-        logSizeKb = logStore.sizeKb()
-        historySizeKb = historyStore.sizeKb()
-        historySavedCount = historyStore.count()
-        historyCounts = historyStore.counts()
+        val initialLogs = runCatching { logStore.load() }.getOrDefault(emptyList())
+        val initialHistory = runCatching { historyStore.load(historyPeriod, 30) }.getOrDefault(emptyList())
+        state = state.copy(history = initialHistory, logs = initialLogs)
+        logSizeKb = runCatching { logStore.sizeKb() }.getOrDefault(0)
+        historySizeKb = runCatching { historyStore.sizeKb() }.getOrDefault(0)
+        historySavedCount = runCatching { historyStore.count() }.getOrDefault(0)
+        historyCounts = runCatching { historyStore.counts() }.getOrDefault(HistoryCounts())
         val saved = settingsStore.load()
         host = saved.host.ifBlank { "www.baidu.com" }
         port = saved.port
@@ -386,9 +401,16 @@ private fun NetSessionTesterApp() {
         keepConnections = saved.keepConnections
         maskPrivacy = saved.maskPrivacy
         historyLimit = if (saved.historyLimit in listOf("10", "30", "100")) saved.historyLimit else "30"
-        state = state.copy(history = historyStore.load(historyPeriod, historyLimit.toIntOrNull()?.coerceIn(10, 100) ?: 30))
-        historySavedCount = historyStore.count()
-        historyCounts = historyStore.counts()
+        runCatching {
+            state = state.copy(history = historyStore.load(historyPeriod, historyLimit.toIntOrNull()?.coerceIn(10, 100) ?: 30))
+            historySavedCount = historyStore.count()
+            historyCounts = historyStore.counts()
+        }.onFailure { error ->
+            appendLog(LogLine(level = LogLevel.ERROR, text = "读取历史失败：${error.message ?: error.javaClass.simpleName}"))
+            state = state.copy(history = emptyList())
+            historySavedCount = 0
+            historyCounts = HistoryCounts()
+        }
         settingsLoaded = true
         refreshPublicIp()
     }
@@ -1582,7 +1604,10 @@ private fun LogsPage(
         if (history.isEmpty()) {
             item { SoftCard { Text("暂无历史记录", color = TextDark, fontSize = 13.sp) } }
         } else {
-            items(history.take(historyLimit.toIntOrNull()?.coerceIn(10, 100) ?: 30), key = { it.id }) { item ->
+            itemsIndexed(
+                history.take(historyLimit.toIntOrNull()?.coerceIn(10, 100) ?: 30),
+                key = { index, item -> "${item.id}-${item.startedAtEpochMs}-$index" }
+            ) { _, item ->
                 SwipeDeleteHistoryCard(
                     item = item,
                     maskPrivacy = maskPrivacy,
