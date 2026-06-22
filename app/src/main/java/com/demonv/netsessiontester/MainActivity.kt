@@ -1843,7 +1843,7 @@ private fun NetSessionTesterApp() {
             summary = null,
             error = null
         )
-        appendLog(LogLine(level = LogLevel.INFO, text = "目标：${config.host}:${config.port} | 模式：${config.mode.label} | 新增值：${config.batchSize} | 采样：1s | 默认动态，手动严格 CPS"))
+        appendLog(LogLine(level = LogLevel.INFO, text = "目标：${config.host}:${config.port} | 模式：${config.mode.label} | 新增值：${config.batchSize}/批 | 间隔：${config.intervalMs}ms | v0.9.7高速核心"))
         startPingMonitor(config, startedAt)
         startNetworkWatch(startedAt, testNetworkSignature)
 
@@ -2600,7 +2600,7 @@ private fun SettingsPage(
             SoftCard {
                 SectionTitle("≡", "会话参数", Green)
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    ParamField("新增值(CPS)", batchSize, onBatchSizeChange, Modifier.weight(1f))
+                    ParamField("新增值/批", batchSize, onBatchSizeChange, Modifier.weight(1f))
                     ParamField("调度间隔ms", intervalMs, onIntervalMsChange, Modifier.weight(1f))
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -2608,7 +2608,7 @@ private fun SettingsPage(
                     ParamField("失败兜底", failureLimit, onFailureLimitChange, Modifier.weight(1f))
                 }
                 ParamField("目标会话（条）", successLimit, onSuccessLimitChange, Modifier.fillMaxWidth())
-                Text("默认 128 为智能调速；修改后严格按用户 CPS 发起，FD / pending / 网络异常只暂停或停止。", color = Muted, fontSize = 12.sp, lineHeight = 16.sp)
+                Text("默认 128 使用高速自适应；修改后按每批新增值执行。间隔默认 500ms，命中失败/FD 上限即收尾。", color = Muted, fontSize = 12.sp, lineHeight = 16.sp)
             }
         }
         item {
