@@ -55,6 +55,9 @@ class TcpTester {
     private val fdGuardRemaining = 500
     private val fdHardRemaining = 300
 
+    /** 用户要求失败阈值硬卡 300：达到后立即停止新增，后续 pending 失败不再累计到 UI。 */
+    private val maxFailureLimit = 300
+
     /** Low memory reserve. If free heap is lower than this, stop before OOM. */
     private val memoryReserveBytes = 48L * 1024L * 1024L
 
@@ -166,7 +169,8 @@ class TcpTester {
         var stopPhase: String? = null
         var addressCursor = 0
         val startedAt = System.currentTimeMillis()
-        val timeoutMs = config.timeoutMs.coerceIn(1_200, 5_000)
+        // build78：连接超时固定 3000ms，不再按阶段动态调整，也不再受 UI 输入影响。
+        val timeoutMs = 3_000
         val errors = linkedMapOf<String, Int>()
         val samples = ArrayDeque<WindowSample>()
         val activeHistory = ArrayDeque<Pair<Long, Int>>()
@@ -205,11 +209,13 @@ class TcpTester {
             return (currentActive - base).coerceAtLeast(0)
         }
 
-        fun recordFailure(key: String) {
+        fun recordFailure(key: String): Boolean {
+            if (key == "FD上限" || key == "资源保护") fdSeen = true
+            if (totalFailure >= maxFailureLimit) return false
             totalFailure++
             consecutiveFailure++
             errors[key] = (errors[key] ?: 0) + 1
-            if (key == "FD上限" || key == "资源保护") fdSeen = true
+            return true
         }
 
         fun meaningfulGrowthStep(peak: Int): Int = when {
@@ -220,10 +226,19 @@ class TcpTester {
         }
 
         fun pendingMax(targetCps: Int, pressure: ResourcePressure): Int {
-            val byTimeout = (targetCps * (timeoutMs / 1000.0) * 1.35).roundToInt().coerceAtLeast(300)
-            val general = byTimeout.coerceAtMost(if (protocol == IpProtocol.IPV6 || maxStable >= 10_000 || manualCpsMode) 5_000 else 3_000)
-            val byFd = if (pressure.fdRemaining > 0) (pressure.fdRemaining - 700).coerceAtLeast(120) else general
-            return minOf(general, byFd).coerceAtLeast(80)
+            return if (manualCpsMode) {
+                // 手动 CPS 严格模式：pending 必须给足，否则会出现 CPS 锯齿和反复掉到 0。
+                val byTimeout = (targetCps * (timeoutMs / 1000.0) * 2.2).roundToInt()
+                // build79：手动 CPS 要尽量贴近用户设定。pending 余量放大，避免 800/1000 CPS 周期性掉到 0。
+                val general = maxOf(7_000, byTimeout).coerceAtMost(12_000)
+                val byFd = if (pressure.fdRemaining > 0) (pressure.fdRemaining - 800).coerceAtLeast(500) else general
+                minOf(general, byFd).coerceAtLeast(500)
+            } else {
+                val byTimeout = (targetCps * (timeoutMs / 1000.0) * 1.35).roundToInt().coerceAtLeast(300)
+                val general = byTimeout.coerceAtMost(if (protocol == IpProtocol.IPV6 || maxStable >= 10_000) 5_000 else 3_000)
+                val byFd = if (pressure.fdRemaining > 0) (pressure.fdRemaining - 700).coerceAtLeast(120) else general
+                minOf(general, byFd).coerceAtLeast(80)
+            }
         }
 
         fun smartTargetCps(active: Int, failRate: Float): Int {
@@ -310,9 +325,17 @@ class TcpTester {
 
         suspend fun reapCompleted() {
             if (pending.isEmpty()) return
-            val done = pending.filter { it.isCompleted }
+            // build79：避免每 100ms filter + removeAll + toSet 扫大量 pending，减少高 CPS 下卡顿。
+            val done = ArrayList<Deferred<OpenResult>>()
+            val iterator = pending.iterator()
+            while (iterator.hasNext()) {
+                val job = iterator.next()
+                if (job.isCompleted) {
+                    iterator.remove()
+                    done += job
+                }
+            }
             if (done.isEmpty()) return
-            pending.removeAll(done.toSet())
             val sockets = mutableListOf<Socket>()
             var success = 0
             var failure = 0
@@ -323,8 +346,7 @@ class TcpTester {
                     success++
                 }
                 result.error?.let { key ->
-                    failure++
-                    recordFailure(key)
+                    if (recordFailure(key)) failure++
                 }
             }
             if (sockets.isNotEmpty()) {
@@ -339,6 +361,27 @@ class TcpTester {
             if (success > 0) consecutiveFailure = 0
             totalSuccess += success
             addSample(success, failure)
+        }
+
+        var lastPressureReadAt = 0L
+        var cachedPressure: ResourcePressure? = null
+        fun pressureFor(requestedLaunch: Int, active: Int, now: Long): ResourcePressure {
+            val intervalMs = when {
+                active >= 31_000 -> 300L
+                active >= 25_000 -> 500L
+                manualCpsMode -> 1_500L
+                else -> 1_000L
+            }
+            val cached = cachedPressure
+            return if (cached == null || now - lastPressureReadAt >= intervalMs) {
+                resourcePressure(requestedLaunch).also {
+                    cachedPressure = it
+                    lastPressureReadAt = now
+                }
+            } else {
+                // 缓存 FD 读数，避免高 FD 数量下频繁扫描 /proc/self/fd 造成 UI 卡顿。
+                cached.copy(allowedLaunch = requestedLaunch)
+            }
         }
 
         while (currentCoroutineContext().isActive && releaseEpoch.get() == protocolEpoch && totalSuccess < config.successLimit) {
@@ -365,6 +408,12 @@ class TcpTester {
                 break
             }
 
+            if (totalFailure >= maxFailureLimit) {
+                stopPhase = "失败上限"
+                onLog(LogLine(level = LogLevel.WARN, text = "${protocol.label} 失败数达到上限 $maxFailureLimit，停止新增，避免失败堆积"))
+                break
+            }
+
             val desiredTarget = smartTargetCps(active, failRate4)
             currentCps = if (manualCpsMode && topConfirmStartedAt == 0L) {
                 // 手动 CPS 模式要严格遵守用户目标值：不做平滑爬升、不因普通失败率悄悄降速。
@@ -374,7 +423,7 @@ class TcpTester {
                 approachTarget(currentCps, desiredTarget)
             }
 
-            val pressure = resourcePressure(currentCps)
+            val pressure = pressureFor(currentCps, active, now)
             if (pressure.stopNow) {
                 recordFailure(pressure.reason)
                 stopPhase = pressure.reason
@@ -468,7 +517,13 @@ class TcpTester {
             launchCarry += targetForPending * (tickMs / 1000.0)
             var launchCount = launchCarry.toInt()
             if (launchCount > 0) launchCarry -= launchCount.toDouble()
-            launchCount = minOf(launchCount, canLaunchByPending, remainingBySuccessLimit, pressure.allowedLaunch.coerceAtLeast(0))
+            val allowedByPressure = if (manualCpsMode) {
+                // 手动 CPS 不接受 FD 预警区限速；只有 pending 满或 FD/失败硬停才会停止发射。
+                targetForPending
+            } else {
+                pressure.allowedLaunch.coerceAtLeast(0)
+            }
+            launchCount = minOf(launchCount, canLaunchByPending, remainingBySuccessLimit, allowedByPressure)
 
             if (launchCount > 0) {
                 repeat(launchCount) {
@@ -604,8 +659,12 @@ class TcpTester {
         return runCatching { File("/proc/self/fd").list()?.size ?: -1 }.getOrDefault(-1)
     }
 
+    @Volatile private var cachedMaxOpenFilesValue: Int = 0
+
     private fun maxOpenFiles(): Int {
-        return runCatching {
+        val cached = cachedMaxOpenFilesValue
+        if (cached > 0) return cached
+        val parsed = runCatching {
             File("/proc/self/limits").readLines()
                 .firstOrNull { it.startsWith("Max open files") }
                 ?.trim()
@@ -613,6 +672,8 @@ class TcpTester {
                 ?.getOrNull(3)
                 ?.toIntOrNull()
         }.getOrNull() ?: 32768
+        cachedMaxOpenFilesValue = parsed
+        return parsed
     }
 
     private fun availableHeapBytes(): Long {
@@ -750,9 +811,9 @@ class TcpTester {
 
     suspend fun activeCount(protocol: IpProtocol): Int = withContext(Dispatchers.IO) {
         socketLock.withLock {
-            val list = heldSockets.getValue(protocol)
-            list.removeAll { it.isClosed }
-            list.size
+            // build79：连接池里的 socket 只在统一释放时关闭。这里不再每次 removeAll 扫描 3 万条，
+            // 避免 UI 快照刷新时造成测试收尾、IPv4/IPv6 切换卡顿。
+            heldSockets.getValue(protocol).size
         }
     }
 

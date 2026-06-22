@@ -1,8 +1,15 @@
 # Changelog
 
-## v0.9.9 build77 local
+## v0.9.9 build79 local
 
-- Fix manual CPS priority so user-set CPS is not silently throttled by ordinary protection logic.
-- Stop low-capacity tests earlier instead of dragging through low CPS confirmation.
-- Stop near FD limit directly in manual CPS mode to avoid long tails.
-- Throttle UI stats snapshots to reduce release and IPv4/IPv6 transition jank.
+- Optimize manual CPS execution and pending handling.
+- Keep failure count capped at 300.
+- Keep TCP timeout fixed at 3000ms.
+- Reduce high-FD UI and cleanup stutter.
+- Cache max open files and avoid heavy socket-list cleanup during active-count snapshots.
+
+## v0.9.9 build78 local
+
+- Cap failure count at 300.
+- Fix TCP timeout at 3000ms.
+- Keep manual CPS priority and dynamic FD protection.
