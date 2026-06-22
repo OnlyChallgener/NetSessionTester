@@ -253,6 +253,19 @@ private fun currentAppVersionCode(context: Context): Long = runCatching {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) info.longVersionCode else info.versionCode.toLong()
 }.getOrDefault(0L)
 
+private fun currentAppVersionName(context: Context): String = runCatching {
+    context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "v0.9.9"
+}.getOrDefault("v0.9.9")
+
+private fun displayVersionName(raw: String): String {
+    var clean = raw.trim()
+    while (clean.startsWith("v", ignoreCase = true)) clean = clean.drop(1)
+    return if (clean.isBlank()) "未知版本" else "v$clean"
+}
+
+private fun formatVersionBuild(versionName: String, versionCode: Long): String =
+    "${displayVersionName(versionName)} build $versionCode"
+
 private fun formatBytes(bytes: Long): String = when {
     bytes <= 0L -> "0 KB"
     bytes < 1024L * 1024L -> "${(bytes / 1024L).coerceAtLeast(1L)} KB"
@@ -1159,7 +1172,7 @@ private fun NetSessionTesterApp() {
     var intervalMs by remember { mutableStateOf("100") }
     var timeoutMs by remember { mutableStateOf("1200") }
     var successLimit by remember { mutableStateOf("65535") }
-    var failureLimit by remember { mutableStateOf("1200") }
+    var failureLimit by remember { mutableStateOf("600") }
     var keepConnections by remember { mutableStateOf(true) }
     var maskPrivacy by remember { mutableStateOf(false) }
     var historyLimit by remember { mutableStateOf("30") }
@@ -1592,7 +1605,7 @@ private fun NetSessionTesterApp() {
                 intervalMs = intervalMs.toLongOrNull() ?: 100L,
                 timeoutMs = timeoutMs.toIntOrNull() ?: 1200,
                 successLimit = successLimit.toIntOrNull() ?: 65535,
-                failureLimit = failureLimit.toIntOrNull() ?: 1200,
+                failureLimit = failureLimit.toIntOrNull() ?: 600,
                 keepConnectionsAfterStop = true
             ).normalized()
         }.getOrElse { error ->
@@ -2099,7 +2112,6 @@ private fun NetSessionTesterApp() {
             UpdateAvailableDialog(
                 info = info,
                 onDismiss = { showUpdateDialog = false },
-                onPostpone = { postponeUpdate() },
                 onIgnore = { ignoreUpdate(info) },
                 onOpenGithub = { openGithub(info.githubUrl.ifBlank { PROJECT_GITHUB_URL }) },
                 onUpdateNow = { startUpdateDownload(info) }
@@ -2189,7 +2201,7 @@ private fun NetSessionTesterApp() {
                     onRestoreDefault = {
                         host = "www.baidu.com"; port = "80"; mode = TestMode.IPV4_THEN_IPV6
                         batchSize = "200"; intervalMs = "100"; timeoutMs = "1200"
-                        successLimit = "65535"; failureLimit = "1200"; keepConnections = true; maskPrivacy = false; historyLimit = "30"
+                        successLimit = "65535"; failureLimit = "600"; keepConnections = true; maskPrivacy = false; historyLimit = "30"
                     }
                 )
 
@@ -2262,6 +2274,15 @@ private fun NetSessionTesterApp() {
                     onHistoryDetail = { summary ->
                         detailSummary = summary
                     }
+                )
+            }
+
+            if (downloadUi.active || downloadUi.finished || downloadUi.failed) {
+                UpdateDownloadBanner(
+                    state = downloadUi,
+                    modifier = Modifier.align(Alignment.TopCenter).padding(horizontal = 12.dp, vertical = 8.dp),
+                    onOpen = { showDownloadDialog = true },
+                    onInstall = { installReadyApk() }
                 )
             }
         }
@@ -2649,7 +2670,7 @@ private fun SettingsPage(
                     ParamField("失败兜底", failureLimit, onFailureLimitChange, Modifier.weight(1f))
                     ParamField("目标会话（条）", successLimit, onSuccessLimitChange, Modifier.weight(1f))
                 }
-                Text("性能发布版：默认目标CPS 200/s，固定执行；取消128动态调速和CPS曲线；保留Ping图表刷新。有失败按会话区间上限收尾，0失败时约32360会话触发FD保护释放。", color = Muted, fontSize = 12.sp, lineHeight = 16.sp)
+                Text("性能发布版：默认目标CPS 200/s，失败兜底默认600；固定执行，取消128动态调速和CPS曲线；6000以下失败时显示失败小曲线，6000以上仅显示失败区间文字。", color = Muted, fontSize = 12.sp, lineHeight = 16.sp)
             }
         }
         item {
@@ -3066,9 +3087,9 @@ private fun VersionInfoDialog(
             Column(verticalArrangement = Arrangement.spacedBy(9.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("当前版本", color = Muted, fontSize = 12.sp, modifier = Modifier.weight(1f))
-                    StatusChip("v0.9.9", BlueSoft, Blue, compact = true)
+                    StatusChip("v0.9.9 build86", BlueSoft, Blue, compact = true)
                 }
-                VersionLine("v0.9.9", "修复释放状态同步；新增 NAT类型、延迟、端口、优先级网络信息卡。")
+                VersionLine("v0.9.9 build86", "修复更新重复提醒、vv版本显示、后台下载横幅；失败兜底默认600。")
                 VersionLine("v0.9.8", "保留 0.9.7 高速测速核心，新增更新检测与后台下载。")
                 VersionLine("v0.9.7", "修复 FD 上限附近闪退；触发FD上限时优先释放本机连接并保存历史。")
                 VersionLine("v0.9.6", "修复停止按钮、通知跳转、新增批次被200锁死的问题。")
@@ -3094,7 +3115,6 @@ private fun VersionInfoDialog(
 private fun UpdateAvailableDialog(
     info: UpdateInfo,
     onDismiss: () -> Unit,
-    onPostpone: () -> Unit,
     onIgnore: () -> Unit,
     onOpenGithub: () -> Unit,
     onUpdateNow: () -> Unit
@@ -3110,7 +3130,6 @@ private fun UpdateAvailableDialog(
                 verticalArrangement = Arrangement.Center,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                TextButton(onClick = onPostpone) { Text("稍后更新", fontSize = 13.sp) }
                 TextButton(onClick = onIgnore) { Text("忽略本版", fontSize = 13.sp) }
                 TextButton(onClick = onOpenGithub) { Text("打开 GitHub", fontSize = 13.sp, fontWeight = FontWeight.Bold) }
             }
@@ -3120,8 +3139,13 @@ private fun UpdateAvailableDialog(
                 MarkBox("download", BlueSoft, Blue)
                 Spacer(Modifier.width(10.dp))
                 Column(Modifier.weight(1f)) {
-                    Text(info.title.ifBlank { "发现新版本 v${info.versionName}" }, fontWeight = FontWeight.ExtraBold, color = TextDark)
-                    Text("当前 v0.9.9 → 最新 v${info.versionName}", color = Muted, fontSize = 12.sp)
+                    val context = LocalContext.current
+                    Text(info.title.ifBlank { "发现新版本 ${formatVersionBuild(info.versionName, info.versionCode)}" }, fontWeight = FontWeight.ExtraBold, color = TextDark)
+                    Text(
+                        "当前 ${formatVersionBuild(currentAppVersionName(context), currentAppVersionCode(context))} → 最新 ${formatVersionBuild(info.versionName, info.versionCode)}",
+                        color = Muted,
+                        fontSize = 12.sp
+                    )
                 }
                 IconButton(onClick = onDismiss) { Icon(Icons.Filled.Close, contentDescription = "关闭", tint = Muted) }
             }
@@ -3136,7 +3160,7 @@ private fun UpdateAvailableDialog(
                     }
                 }
                 Text("忽略本版后不会自动弹出当前版本；手动检测更新仍可再次打开，直到下一个版本会重新自动提醒。", color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
-                Text("如果下载速度较慢，建议切换代理网络或打开 GitHub 手动下载。", color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
+                Text("后台下载时顶部会显示下载横幅；如果速度较慢，可打开 GitHub 手动下载。", color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
             }
         },
         shape = ShapeL
@@ -3204,14 +3228,14 @@ private fun UpdateDownloadDialog(
                 Spacer(Modifier.width(10.dp))
                 Column(Modifier.weight(1f)) {
                     Text(titleText, fontWeight = FontWeight.ExtraBold, color = TextDark)
-                    Text("v${info?.versionName ?: ""}", color = Muted, fontSize = 12.sp)
+                    Text(info?.let { formatVersionBuild(it.versionName, it.versionCode) } ?: "", color = Muted, fontSize = 12.sp)
                 }
                 IconButton(onClick = onDismiss) { Icon(Icons.Filled.Close, contentDescription = "关闭", tint = Muted) }
             }
         },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text("NetSessionTester-v${info?.versionName ?: ""}.apk", color = TextDark, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text("NetSessionTester-${info?.let { formatVersionBuild(it.versionName, it.versionCode).replace(" ", "-") } ?: "update"}.apk", color = TextDark, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 LinearProgressIndicator(
                     progress = { state.progress / 100f },
                     modifier = Modifier.fillMaxWidth().height(8.dp),
@@ -3247,9 +3271,68 @@ private fun UpdateDownloadDialog(
 }
 
 @Composable
+private fun UpdateDownloadBanner(
+    state: UpdateDownloadUi,
+    modifier: Modifier = Modifier,
+    onOpen: () -> Unit,
+    onInstall: () -> Unit
+) {
+    val title = when {
+        state.finished -> "更新包已下载"
+        state.failed -> if (state.message.contains("取消")) "下载已取消" else "更新下载失败"
+        state.active -> "正在后台下载更新"
+        else -> "更新下载"
+    }
+    val color = when {
+        state.finished -> Green
+        state.failed -> ErrorRed
+        else -> Blue
+    }
+    Card(
+        modifier = modifier
+            .fillMaxWidth()
+            .clickable { if (state.finished) onInstall() else onOpen() },
+        shape = ShapeM,
+        colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.98f)),
+        elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
+    ) {
+        Column(Modifier.padding(horizontal = 12.dp, vertical = 9.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    if (state.finished) Icons.Filled.CheckCircle else if (state.failed) Icons.Filled.WarningAmber else Icons.Filled.Download,
+                    contentDescription = null,
+                    tint = color,
+                    modifier = Modifier.width(18.dp).height(18.dp)
+                )
+                Spacer(Modifier.width(8.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(title, color = TextDark, fontSize = 12.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                    val detail = when {
+                        state.finished -> "点击安装"
+                        state.failed -> state.message.ifBlank { "点击查看" }
+                        state.active -> "${state.progress}% · ${formatBytes(state.downloadedBytes)} / ${if (state.totalBytes > 0) formatBytes(state.totalBytes) else "未知大小"} · ${formatSpeed(state.speedBytesPerSecond)}"
+                        else -> "点击查看"
+                    }
+                    Text(detail, color = Muted, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                Text(if (state.finished) "安装" else "查看", color = color, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            }
+            if (state.active || state.finished) {
+                LinearProgressIndicator(
+                    progress = { if (state.finished) 1f else state.progress / 100f },
+                    modifier = Modifier.fillMaxWidth().height(5.dp),
+                    color = color,
+                    trackColor = BlueSoft
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun VersionLine(version: String, text: String) {
     Row(verticalAlignment = Alignment.Top) {
-        Text(version, color = Blue, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.width(58.dp))
+        Text(version, color = Blue, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.width(92.dp))
         Text(text, color = TextDark, fontSize = 12.sp, lineHeight = 16.sp, modifier = Modifier.weight(1f))
     }
 }
@@ -3501,9 +3584,60 @@ private fun failureIntervalSummary(points: List<ChartPoint>, bucketSeconds: Int 
     return "失败区间：" + top.joinToString("，") { (start, count) -> "${start}-${start + bucketSeconds}s +$count" }
 }
 
+private fun shouldShowFailureMiniCurve(points: List<ChartPoint>): Boolean {
+    if (points.isEmpty()) return false
+    val sorted = points.sortedBy { it.elapsedSec }
+    val last = sorted.lastOrNull() ?: return false
+    val maxTotal = sorted.maxOfOrNull { it.total } ?: 0
+    val maxFailure = sorted.maxOfOrNull { it.failure } ?: 0
+    // 失败曲线只在低/中低会话显示。6000以上会话数和失败数比例差太大，继续用失败区间文字更清晰。
+    return maxFailure > 0 && maxTotal in 1..6_000 && last.total <= 6_000
+}
+
+@Composable
+private fun FailureMiniChart(points: List<ChartPoint>) {
+    val sorted = points.sortedBy { it.elapsedSec }
+    val minX = sorted.firstOrNull()?.elapsedSec ?: 0
+    val maxXRaw = sorted.lastOrNull()?.elapsedSec ?: (minX + 1)
+    val maxX = maxOf(minX + 1, maxXRaw)
+    val maxFailure = (sorted.maxOfOrNull { it.failure } ?: 1).coerceAtLeast(1)
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("失败数", color = Muted, fontSize = 10.sp)
+            Spacer(Modifier.width(8.dp))
+            Text("● 失败", color = ErrorRed, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.weight(1f))
+            Text("最高 $maxFailure", color = Muted, fontSize = 10.sp, maxLines = 1)
+        }
+        Canvas(modifier = Modifier.fillMaxWidth().height(48.dp).background(Color(0xFFF8FAFC), ShapeS).padding(6.dp)) {
+            val w = size.width
+            val h = size.height
+            repeat(2) { idx ->
+                val y = h * (idx + 1) / 3f
+                drawLine(Border.copy(alpha = 0.45f), Offset(0f, y), Offset(w, y), strokeWidth = 1f)
+            }
+            fun xOf(p: ChartPoint) = w * ((p.elapsedSec - minX).toFloat() / (maxX - minX).toFloat())
+            fun yFail(v: Int) = h - h * (v.coerceIn(0, maxFailure).toFloat() / maxFailure.toFloat())
+            if (sorted.size > 1) {
+                val path = Path()
+                sorted.forEachIndexed { index, p ->
+                    val x = xOf(p)
+                    val y = yFail(p.failure)
+                    if (index == 0) path.moveTo(x, y) else path.lineTo(x, y)
+                }
+                drawPath(path, color = ErrorRed, style = Stroke(width = 3f, cap = StrokeCap.Round))
+            }
+            sorted.forEach { p ->
+                drawCircle(ErrorRed, radius = 2.2f, center = Offset(xOf(p), yFail(p.failure)))
+            }
+        }
+    }
+}
+
 @Composable
 private fun SessionGrowthChart(points: List<ChartPoint>) {
     val sorted = points.sortedBy { it.elapsedSec }
+    val showFailureMiniCurve = shouldShowFailureMiniCurve(sorted)
     val minX = sorted.firstOrNull()?.elapsedSec ?: 0
     val maxXRaw = sorted.lastOrNull()?.elapsedSec ?: (minX + 1)
     val maxX = maxOf(minX + 1, maxXRaw)
@@ -3515,6 +3649,10 @@ private fun SessionGrowthChart(points: List<ChartPoint>) {
             Text("会话数", color = Muted, fontSize = 10.sp)
             Spacer(Modifier.width(8.dp))
             Text("● 会话数", color = Blue, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+            if (showFailureMiniCurve) {
+                Spacer(Modifier.width(8.dp))
+                Text("● 失败", color = ErrorRed, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+            }
             Spacer(Modifier.weight(1f))
             Text(last?.let { "${it.elapsedSec}s 活动 ${it.active}｜失败 ${it.failure}" } ?: "", color = Muted, fontSize = 10.sp, maxLines = 1)
         }
@@ -3548,11 +3686,14 @@ private fun SessionGrowthChart(points: List<ChartPoint>) {
         Row(modifier = Modifier.fillMaxWidth().padding(start = 34.dp), horizontalArrangement = Arrangement.SpaceBetween) {
             timeLabels(minX, maxX, step).forEach { Text("${it}s", color = Muted, fontSize = 10.sp) }
         }
+        if (showFailureMiniCurve) {
+            FailureMiniChart(sorted)
+        }
         val failSummary = failureIntervalSummary(sorted)
         if (failSummary.isNotBlank()) {
             Text(failSummary, color = ErrorRed, fontSize = 10.sp, lineHeight = 13.sp, fontWeight = FontWeight.Bold)
         }
-        Text("说明：性能版只绘制会话数蓝线，CPS仅在上方文字显示，不参与图表重绘。", color = Muted, fontSize = 10.sp, lineHeight = 13.sp)
+        Text("说明：CPS仅在上方文字显示；6000会话以下显示失败小曲线，6000以上仅显示失败区间。", color = Muted, fontSize = 10.sp, lineHeight = 13.sp)
     }
 }
 

@@ -1,6 +1,17 @@
 {
-  "versionCode": 85,
+  "versionCode": 86,
   "versionName": "v0.9.9",
-  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v0.9.9-85/NetSessionTester-v0.9.9-build85-signed.apk",
-  "changelog": "v0.9.9 build85 release-final"
+  "title": "发现新版本 v0.9.9 build 86",
+  "content": [
+    "修复更新后反复提醒的问题；本次 versionCode 升至 86，检测逻辑以 versionCode 为准",
+    "修复版本显示出现 vv0.9.9 的问题，更新弹窗显示版本名和 build 号",
+    "去掉更新弹窗中的稍后更新选项，减少误触和重复提醒",
+    "后台下载时在 APP 顶部显示浮动下载横幅，可随时点开查看、安装或处理失败",
+    "会话参数失败兜底默认改为 600，并迁移旧版 1200 默认值",
+    "6000 会话以下且存在失败时显示失败数小曲线；6000 以上仅保留失败区间文字，避免比例差距过大影响观感",
+    "保留 v0.9.9 性能核心：固定目标CPS、FD 32360 保护、Ping 图表刷新、取消 CPS 曲线"
+  ],
+  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v0.9.9-86/NetSessionTester-v0.9.9-build86-signed.apk",
+  "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/latest",
+  "force": false
 }
