@@ -12,6 +12,37 @@ enum class TestMode(val label: String) {
     IPV4_THEN_IPV6("分别测试")
 }
 
+enum class RunPhase(val label: String) {
+    Idle("待测试"),
+    Preparing("准备中"),
+    NatChecking("NAT检测中"),
+    Running("测试中"),
+    TopConfirm("顶部确认"),
+    Stopping("停止新增"),
+    Releasing("释放中"),
+    Finished("已完成"),
+    Failed("异常结束")
+}
+
+data class ReleaseUiState(
+    val visible: Boolean = false,
+    val total: Int = 0,
+    val closed: Int = 0,
+    val speedPerSecond: Int = 0,
+    val elapsedMs: Long = 0L,
+    val message: String = "",
+    val finished: Boolean = false
+) {
+    val progress: Float
+        get() = if (total <= 0) 1f else (closed.toFloat() / total.toFloat()).coerceIn(0f, 1f)
+
+    val percent: Int
+        get() = (progress * 100f).toInt().coerceIn(0, 100)
+
+    val etaSeconds: Int
+        get() = if (finished || speedPerSecond <= 0 || total <= closed) 0 else ((total - closed) + speedPerSecond - 1) / speedPerSecond
+}
+
 data class SessionConfig(
     val host: String,
     val port: Int,
@@ -28,8 +59,9 @@ data class SessionConfig(
         return copy(
             host = cleanHost,
             port = port.coerceIn(1, 65535),
-            batchSize = batchSize.coerceIn(1, 1000),
-            intervalMs = intervalMs.coerceIn(100L, 60_000L),
+            // batchSize 在新版里作为“起始 CPS”使用，保留原字段以兼容旧设置。
+            batchSize = batchSize.coerceIn(20, 1500),
+            intervalMs = intervalMs.coerceIn(300L, 2_000L),
             timeoutMs = timeoutMs.coerceIn(300, 30_000),
             successLimit = successLimit.coerceIn(1, 70_000),
             failureLimit = failureLimit.coerceIn(1, 100_000)
@@ -89,7 +121,9 @@ data class SessionSummary(
 
 data class AppUiState(
     val isAdding: Boolean = false,
+    val runPhase: RunPhase = RunPhase.Idle,
     val status: String = "待测试",
+    val releaseUi: ReleaseUiState = ReleaseUiState(),
     val resolveResult: ResolveResult = ResolveResult(),
     val ipv4Stats: ProtocolStats = ProtocolStats(IpProtocol.IPV4),
     val ipv6Stats: ProtocolStats = ProtocolStats(IpProtocol.IPV6),

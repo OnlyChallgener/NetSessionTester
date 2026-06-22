@@ -18,6 +18,8 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.yield
+import java.io.File
 import java.net.ConnectException
 import java.net.Inet4Address
 import java.net.Inet6Address
@@ -29,20 +31,19 @@ import java.net.Socket
 import java.net.SocketException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
-import java.io.File
 import java.util.Collections
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.math.roundToInt
 
 class TcpTester {
     private val socketLock = Mutex()
 
     /**
-     * Keep a small FD reserve so Android / ART / Compose / logging still have room
-     * to open files, Binder fds and sockets while the test is near the device limit.
-     * Without this reserve the process may crash before Java throws a clean
-     * "Too many open files" SocketException.
+     * Android 常见 FD 上限约 32760/32768。这里强制在 32500 附近保护停止，
+     * 给 Compose、日志、DNS、通知和释放流程预留 FD，避免 UI 不同步或闪退。
      */
-    private val fdReserve = 192
+    private val fdHardStop = 32_500
+    private val fdReserve = 268
 
     /** Low memory reserve. If free heap is lower than this, stop before OOM. */
     private val memoryReserveBytes = 48L * 1024L * 1024L
@@ -112,43 +113,80 @@ class TcpTester {
 
         val addressText = addresses.mapNotNull { it.hostAddress }.distinct()
         onLog(LogLine(level = LogLevel.SUCCESS, text = "${protocol.label} 解析成功：${addressText.joinToString(" / ")}"))
+        onLog(LogLine(level = LogLevel.INFO, text = "${protocol.label} 智能策略：起始CPS ${config.batchSize}，动态调速，无增长确认，FD 32500 保护"))
 
         var totalSuccess = 0
         var totalFailure = 0
         var totalAttempts = 0
         var maxStable = 0
+        var consecutiveFailure = 0
         var lastTotalAttempts = 0
         var lastStatsAt = System.currentTimeMillis()
-        val errors = linkedMapOf<String, Int>()
-        var stats = ProtocolStats(protocol = protocol, phase = "建连中", resolvedAddresses = addressText)
+        var lastLogAt = 0L
+        var lastGrowthAt = System.currentTimeMillis()
+        var currentCps = config.batchSize.coerceIn(40, 1200)
         var fdSeen = false
-
-        // CPS 策略：不再做失败率/无成功自适应降速。
-        // 增长测试必须按用户设置的 batch/interval 持续新增；
-        // 危险情况（失败上限、FD保护、资源保护、网络切换）直接硬终止并统一释放，
-        // 避免失败数 199 时被剩余失败值或低 CPS 卡住很久。
+        var stopPhase: String? = null
+        val errors = linkedMapOf<String, Int>()
+        val samples = ArrayDeque<WindowSample>()
+        var stats = ProtocolStats(protocol = protocol, phase = "建连中", resolvedAddresses = addressText)
         onStats(stats)
 
+        fun dynamicConsecutiveLimit(peak: Int): Int = ((peak * 0.025f).roundToInt()).coerceIn(40, 250)
+        fun dynamicTotalLimit(peak: Int): Int = ((peak * 0.06f).roundToInt()).coerceIn(100, 1200)
+        fun cpsCap(peak: Int): Int = when {
+            peak < 2_000 -> 200
+            peak < 6_000 -> 400
+            peak < 10_000 -> 700
+            else -> 1000
+        }
+        fun noGrowthWindowMs(peak: Int): Long = when {
+            peak < 3_000 -> 5_000L
+            peak < 10_000 -> 8_000L
+            else -> 12_000L
+        }
+        fun noGrowthFailThreshold(peak: Int): Float = when {
+            peak < 3_000 -> 0.70f
+            peak < 10_000 -> 0.75f
+            else -> 0.80f
+        }
+        fun addSample(success: Int, failure: Int) {
+            val now = System.currentTimeMillis()
+            samples.addLast(WindowSample(now, success, failure))
+            while (samples.isNotEmpty() && now - samples.first().timeMs > 12_500L) samples.removeFirst()
+        }
+        fun windowStats(ms: Long): Pair<Int, Int> {
+            val now = System.currentTimeMillis()
+            var s = 0
+            var f = 0
+            samples.forEach { sample ->
+                if (now - sample.timeMs <= ms) {
+                    s += sample.success
+                    f += sample.failure
+                }
+            }
+            return s to f
+        }
         fun recordFailure(key: String) {
-            if (key == "FD上限" || key == "资源保护") fdSeen = true
-            if (totalFailure >= config.failureLimit) return
             totalFailure++
+            consecutiveFailure++
             errors[key] = (errors[key] ?: 0) + 1
+            if (key == "FD上限" || key == "资源保护") fdSeen = true
         }
 
-        suspend fun emitStats(forcePhase: String? = null) {
+        suspend fun emitStats(forcePhase: String? = null, forceLog: Boolean = false) {
             val now = System.currentTimeMillis()
             val active = activeCount(protocol)
             maxStable = maxOf(maxStable, active)
             totalAttempts = totalSuccess + totalFailure
             val added = totalAttempts - lastTotalAttempts
             val elapsedMs = (now - lastStatsAt).coerceAtLeast(1L)
+            val cps = if (added <= 0) 0 else (added * 1000L / elapsedMs).toInt()
             lastTotalAttempts = totalAttempts
             lastStatsAt = now
-            val cps = if (added <= 0) 0 else (added * 1000L / elapsedMs).toInt()
             stats = ProtocolStats(
                 protocol = protocol,
-                phase = forcePhase ?: "建连中",
+                phase = forcePhase ?: stopPhase ?: "建连中",
                 resolvedAddresses = addressText,
                 activeSessions = active,
                 totalFailure = totalFailure,
@@ -160,46 +198,77 @@ class TcpTester {
                 maxStableSessions = maxStable
             )
             onStats(stats)
-            if (added > 0 || forcePhase != null) {
-                onLog(LogLine(level = LogLevel.STAT, text = "${protocol.label} 统计 - 成功：$totalSuccess | 失败：$totalFailure | 活动：$active | 总计：$totalAttempts | 新增：$added | CPS：${cps}/秒"))
+            if (forceLog || now - lastLogAt >= 1_000L) {
+                lastLogAt = now
+                onLog(
+                    LogLine(
+                        level = LogLevel.STAT,
+                        text = "${protocol.label} 统计 - 成功：$totalSuccess | 失败：$totalFailure | 活动：$active | 峰值：$maxStable | 新增：$added | CPS：${cps}/秒 | 策略CPS：$currentCps"
+                    )
+                )
             }
         }
 
-        while (currentCoroutineContext().isActive && releaseEpoch.get() == protocolEpoch && totalSuccess < config.successLimit && totalFailure < config.failureLimit) {
-            val remainingSuccess = config.successLimit - totalSuccess
-            val remainingFailure = config.failureLimit - totalFailure
-            if (remainingSuccess <= 0 || remainingFailure <= 0) break
+        while (currentCoroutineContext().isActive && releaseEpoch.get() == protocolEpoch && totalSuccess < config.successLimit) {
+            val now = System.currentTimeMillis()
+            val activeBefore = activeCount(protocol)
+            val peak = maxOf(maxStable, activeBefore)
+            val consecutiveLimit = dynamicConsecutiveLimit(peak)
+            val totalLimit = dynamicTotalLimit(peak).coerceAtLeast(config.failureLimit.coerceAtMost(1200))
+            val (windowSuccess, windowFailure) = windowStats(noGrowthWindowMs(peak))
+            val windowTotal = windowSuccess + windowFailure
+            val failRate = if (windowTotal <= 0) 0f else windowFailure.toFloat() / windowTotal.toFloat()
 
-            // 失败上限是硬终止；调速只负责保护速度，不能替代失败上限停止。
-            if (totalFailure >= config.failureLimit) {
-                onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 达到失败上限：${config.failureLimit}，已停止新增"))
-                break
+            when {
+                activeBefore >= fdHardStop -> {
+                    fdSeen = true
+                    stopPhase = "FD上限"
+                    onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 接近 Android FD 上限，活动连接 $activeBefore，已保护停止"))
+                    break
+                }
+                consecutiveFailure >= consecutiveLimit -> {
+                    stopPhase = "连续失败"
+                    onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 连续失败达到动态上限：$consecutiveFailure/$consecutiveLimit，已停止新增"))
+                    break
+                }
+                totalFailure >= totalLimit -> {
+                    stopPhase = "失败上限"
+                    onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 累计失败达到动态上限：$totalFailure/$totalLimit，已停止新增"))
+                    break
+                }
+                peak > 0 && now - lastGrowthAt >= noGrowthWindowMs(peak) && failRate >= noGrowthFailThreshold(peak) && activeBefore >= (peak * 0.95f).roundToInt() -> {
+                    stopPhase = "无增长确认"
+                    onLog(LogLine(level = LogLevel.WARN, text = "${protocol.label} ${noGrowthWindowMs(peak) / 1000}秒无有效增长，失败率 ${(failRate * 100).roundToInt()}%，已确认到顶"))
+                    break
+                }
             }
 
-            // 增长测试按用户设置的批量持续新增，不按“剩余失败数”收缩。
-            // 失败上限由 recordFailure + 批次后检查硬终止处理；
-            // 这样 failure=199 / limit=200 时不会只发 1 个连接导致 CPS 卡死。
-            val requestedLaunchCount = minOf(config.batchSize, remainingSuccess)
-            if (requestedLaunchCount <= 0) break
+            if (now - lastGrowthAt >= noGrowthWindowMs(peak) / 2) {
+                currentCps = currentCps.coerceAtMost(20).coerceAtLeast(5)
+            }
 
-            // FD / heap hard guard. Do not wait for EMFILE/OOM. Stop while the
-            // process still has enough reserve to update UI, save history and close sockets.
+            val remainingSuccess = config.successLimit - totalSuccess
+            if (remainingSuccess <= 0) break
+            val tickMs = config.intervalMs.coerceIn(300L, 1_000L)
+            val requestedLaunchCount = ((currentCps * tickMs) / 1000L).toInt().coerceIn(1, 512).coerceAtMost(remainingSuccess)
+
             val pressure = resourcePressure(requestedLaunchCount)
             if (pressure.stopNow) {
-                repeat(minOf(remainingFailure, 1)) { recordFailure(pressure.reason) }
+                recordFailure(pressure.reason)
+                stopPhase = pressure.reason
+                fdSeen = pressure.reason == "FD上限"
                 onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} ${pressure.reason}，已触发保护停止：${pressure.detail}"))
-                fdSeen = true
                 break
             }
             val launchCount = minOf(requestedLaunchCount, pressure.allowedLaunch.coerceAtLeast(1))
-
             val batch = openBatch(addresses, config.port, config.timeoutMs.coerceIn(300, 800), launchCount, protocolEpoch)
             if (!currentCoroutineContext().isActive || releaseEpoch.get() != protocolEpoch) {
                 batch.successSockets.forEach { socket -> runCatching { socket.close() } }
                 break
             }
-            val batchSuccess = batch.successSockets.size
+
             val failureBeforeBatch = totalFailure
+            val batchSuccess = batch.successSockets.size
             totalSuccess += batchSuccess
             socketLock.withLock {
                 if (releaseEpoch.get() == protocolEpoch) {
@@ -208,38 +277,42 @@ class TcpTester {
                     batch.successSockets.forEach { socket -> runCatching { socket.close() } }
                 }
             }
-            batch.errors.forEach { (key, value) ->
-                repeat(value) {
-                    if (totalFailure < config.failureLimit) recordFailure(key)
-                }
-            }
+            batch.errors.forEach { (key, value) -> repeat(value) { recordFailure(key) } }
             val batchFailure = totalFailure - failureBeforeBatch
-            if (batch.errors.keys.any { it == "FD上限" || it == "资源保护" }) {
-                fdSeen = true
-            }
-            totalAttempts = totalSuccess + totalFailure
+            if (batchSuccess > 0) consecutiveFailure = 0
+            addSample(batchSuccess, batchFailure)
 
-            // 不再根据失败率/连续无成功降速。
-            // 如果达到失败上限、FD保护或资源保护，下面的硬条件会立刻结束；
-            // 否则保持用户设置的增长节奏。
+            val activeAfter = activeCount(protocol)
+            if (activeAfter > maxStable) lastGrowthAt = System.currentTimeMillis()
+            maxStable = maxOf(maxStable, activeAfter)
+            if (batch.errors.keys.any { it == "FD上限" || it == "资源保护" }) fdSeen = true
+
+            val (recentS, recentF) = windowStats(3_000L)
+            val recentTotal = recentS + recentF
+            val recentFailRate = if (recentTotal <= 0) 0f else recentF.toFloat() / recentTotal.toFloat()
+            val recentSuccessRate = if (recentTotal <= 0) 1f else recentS.toFloat() / recentTotal.toFloat()
+            currentCps = when {
+                recentFailRate > 0.50f -> (currentCps * 0.30f).roundToInt().coerceAtLeast(20)
+                recentFailRate > 0.20f -> (currentCps * 0.50f).roundToInt().coerceAtLeast(30)
+                recentSuccessRate >= 0.95f && batchFailure <= 1 && activeAfter >= activeBefore -> (currentCps * 1.50f).roundToInt()
+                else -> currentCps
+            }.coerceIn(5, cpsCap(maxOf(maxStable, activeAfter)))
 
             emitStats()
 
             if (fdSeen) {
-                onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 检测到 Android FD上限，已停止新增并保存历史"))
+                stopPhase = "FD上限"
+                onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 检测到 Android FD上限，已停止新增并进入统一释放"))
                 break
             }
-            if (totalFailure >= config.failureLimit) {
-                onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 达到失败上限：${config.failureLimit}，硬终止并进入统一释放"))
-                break
-            }
-            delay(config.intervalMs)
+            delay(tickMs)
         }
 
         val finalActive = activeCount(protocol)
         val finalPhase = when {
             fdSeen -> "FD上限"
-            totalFailure >= config.failureLimit -> "失败上限"
+            stopPhase != null -> stopPhase!!
+            totalSuccess >= config.successLimit -> "测试完成"
             else -> "测试完成"
         }
         val finalStats = stats.copy(
@@ -247,8 +320,8 @@ class TcpTester {
             activeSessions = finalActive,
             maxStableSessions = maxOf(maxStable, finalActive),
             totalSuccess = totalSuccess,
-            totalFailure = totalFailure.coerceAtMost(config.failureLimit),
-            totalAttempts = totalSuccess + totalFailure.coerceAtMost(config.failureLimit),
+            totalFailure = totalFailure,
+            totalAttempts = totalSuccess + totalFailure,
             errorSummary = errors.toMap()
         )
         onStats(finalStats)
@@ -292,7 +365,6 @@ class TcpTester {
         } catch (e: CancellationException) {
             throw e
         } catch (t: Throwable) {
-            // Last-chance guard for rare native/ART pressure around FD limit.
             BatchOpenResult(emptyList(), mapOf(classifyError(t) to 1))
         }
     }
@@ -368,7 +440,7 @@ class TcpTester {
         val fdNow = currentFdCount()
         val fdMax = maxOpenFiles()
         val heapFree = availableHeapBytes()
-        val fdSafeMax = (fdMax - fdReserve).coerceAtLeast(128)
+        val fdSafeMax = minOf(fdHardStop, (fdMax - fdReserve).coerceAtLeast(128))
 
         if (heapFree in 1 until memoryReserveBytes) {
             return ResourcePressure(
@@ -386,7 +458,7 @@ class TcpTester {
                     stopNow = true,
                     allowedLaunch = 0,
                     reason = "FD上限",
-                    detail = "当前FD=$fdNow，上限=$fdMax，预留=$fdReserve"
+                    detail = "当前FD=$fdNow，保护线=$fdSafeMax，系统上限=$fdMax"
                 )
             }
             val allowed = remaining.coerceAtMost(requestedLaunch)
@@ -395,14 +467,14 @@ class TcpTester {
                     stopNow = true,
                     allowedLaunch = 0,
                     reason = "FD上限",
-                    detail = "当前FD=$fdNow，上限=$fdMax，预留=$fdReserve"
+                    detail = "当前FD=$fdNow，保护线=$fdSafeMax，系统上限=$fdMax"
                 )
             }
             return ResourcePressure(
                 stopNow = false,
                 allowedLaunch = allowed,
                 reason = "",
-                detail = "当前FD=$fdNow，上限=$fdMax，预留=$fdReserve"
+                detail = "当前FD=$fdNow，保护线=$fdSafeMax，系统上限=$fdMax"
             )
         }
 
@@ -420,10 +492,7 @@ class TcpTester {
     }
 
     /**
-     * Snapshot and clear held sockets immediately.
-     *
-     * Callers can update UI to "已释放" right after this returns, then close the
-     * returned snapshot in the background. releaseEpoch is incremented first so
+     * Snapshot and clear held sockets immediately. releaseEpoch is incremented first so
      * late sockets opened by an old batch are closed and never added back.
      */
     suspend fun detachForRelease(protocol: IpProtocol? = null): List<Socket> = withContext(Dispatchers.IO) {
@@ -440,20 +509,34 @@ class TcpTester {
         socketsToClose
     }
 
-    suspend fun closeDetachedSockets(socketsToClose: List<Socket>): Int = withContext(Dispatchers.IO) {
-        if (socketsToClose.isEmpty()) return@withContext 0
-        coroutineScope {
-            socketsToClose.chunked(256).map { chunk ->
-                async(Dispatchers.IO) {
-                    var closed = 0
-                    chunk.forEach { socket ->
-                        runCatching { socket.close() }
-                        closed++
-                    }
-                    closed
-                }
-            }.awaitAll().sum()
+    suspend fun closeDetachedSockets(
+        socketsToClose: List<Socket>,
+        batchSize: Int = 500,
+        onProgress: suspend (closed: Int, total: Int, elapsedMs: Long) -> Unit = { _, _, _ -> }
+    ): Int = withContext(Dispatchers.IO) {
+        if (socketsToClose.isEmpty()) {
+            withContext(Dispatchers.Main) { onProgress(0, 0, 0L) }
+            return@withContext 0
         }
+        val total = socketsToClose.size
+        val safeBatch = batchSize.coerceIn(100, 1000)
+        val startedAt = System.currentTimeMillis()
+        var closed = 0
+        var lastProgressAt = 0L
+        socketsToClose.chunked(safeBatch).forEach { chunk ->
+            chunk.forEach { socket ->
+                runCatching { socket.close() }
+                closed++
+            }
+            val now = System.currentTimeMillis()
+            if (now - lastProgressAt >= 300L || closed >= total) {
+                val elapsed = now - startedAt
+                withContext(Dispatchers.Main) { onProgress(closed, total, elapsed) }
+                lastProgressAt = now
+            }
+            yield()
+        }
+        closed
     }
 
     suspend fun release(protocol: IpProtocol? = null): Int {
@@ -476,6 +559,7 @@ class TcpTester {
         val detail: String
     )
 
+    private data class WindowSample(val timeMs: Long, val success: Int, val failure: Int)
     private data class OpenResult(val socket: Socket? = null, val error: String? = null, val discarded: Boolean = false)
     private data class BatchOpenResult(val successSockets: List<Socket>, val errors: Map<String, Int>)
 }

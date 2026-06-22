@@ -114,6 +114,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
@@ -140,6 +141,8 @@ import com.demonv.netsessiontester.model.IpProtocol
 import com.demonv.netsessiontester.model.LogLevel
 import com.demonv.netsessiontester.model.LogLine
 import com.demonv.netsessiontester.model.ProtocolStats
+import com.demonv.netsessiontester.model.ReleaseUiState
+import com.demonv.netsessiontester.model.RunPhase
 import com.demonv.netsessiontester.model.SessionConfig
 import com.demonv.netsessiontester.model.SessionSummary
 import com.demonv.netsessiontester.model.TestMode
@@ -169,6 +172,10 @@ import java.net.InetSocketAddress
 import java.net.NetworkInterface
 import java.net.Socket
 import java.net.URL
+import java.util.concurrent.Callable
+import java.util.concurrent.ExecutorCompletionService
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import kotlin.math.roundToInt
 
 private enum class MainTab(val label: String, val mark: String) {
@@ -185,6 +192,8 @@ private enum class ChartMode(val label: String) {
 private enum class FinishReason(val label: String, val saveHistory: Boolean) {
     Completed("测试完成", true),
     FailureLimit("失败上限", true),
+    NoGrowth("无增长确认", true),
+    ConsecutiveFailure("连续失败", true),
     FdLimit("FD上限", true),
     ManualStop("手动停止", true),
     ForceRelease("强制释放", false),
@@ -603,9 +612,11 @@ private fun buildNetworkProbeInfo(
     val confidence = when {
         env.hasVpn -> "低"
         !full -> "低"
-        strongSymmetric && stun!!.ipStable -> "高"
-        stun != null && multiStun >= 3 && stun.ipStable -> "高"
-        stun != null && multiStun >= 2 -> "中"
+        strongSymmetric && stun!!.ipStable && multiStun >= 5 -> "高"
+        strongSymmetric && stun!!.ipStable -> "中高"
+        stun != null && multiStun >= 5 && stun.ipStable -> "高"
+        stun != null && multiStun >= 4 -> "中高"
+        stun != null && multiStun >= 3 -> "中"
         stun != null -> "低"
         publicV4 != null -> "低"
         else -> "低"
@@ -714,54 +725,86 @@ private fun detectTcpLocalPort(host: String, port: Int, timeoutMs: Int): Int {
 }
 
 private fun stunBindingProbe(): StunProbeResult {
-    // 先做基础 Binding 探测。只有多个基础 STUN 全部失败，才认为 UDP 受限。
-    // 使用 8 个基础 STUN 节点；已移除部分网络明确不可用的 hot-chilli。
-    val endpoints = listOf(
+    // 6 主 + 2 备：首轮只跑 6 个主节点，主节点不足才启用备用，避免单个失败节点拖慢 NAT 解析。
+    val primary = listOf(
+        StunEndpoint("stun.cloudflare.com", 3478),
         StunEndpoint("stun.miwifi.com", 3478),
         StunEndpoint("stun.voipstunt.com", 3478),
         StunEndpoint("stun.voipbuster.com", 3478),
         StunEndpoint("stun.internetcalls.com", 3478),
-        StunEndpoint("stun.voip.aebc.com", 3478),
-        StunEndpoint("stun.fitauto.ru", 3478),
-        StunEndpoint("stun.cloudflare.com", 3478),
-        StunEndpoint("stun.syncthing.net", 3478)
+        StunEndpoint("stun.voip.aebc.com", 3478)
     )
-    val results = mutableListOf<StunProbeResult>()
-    var attempted = 0
-    DatagramSocket().use { socket ->
-        socket.soTimeout = 1800
-        val localPort = socket.localPort
+    val backup = listOf(
+        StunEndpoint("stun.fitauto.ru", 3478),
+        StunEndpoint("stun.qq.com", 3478)
+    )
+
+    val primaryResults = probeStunGroup(primary, minSuccess = 5, perNodeTimeoutMs = 900, overallTimeoutMs = 1800)
+    val allResults = primaryResults.toMutableList()
+    var totalCount = primary.size
+
+    if (allResults.size < 4) {
+        val backupResults = probeStunGroup(backup, minSuccess = 1, perNodeTimeoutMs = 800, overallTimeoutMs = 1100)
+        allResults += backupResults
+        totalCount += backup.size
+    }
+
+    if (allResults.isEmpty()) error("STUN基础探测无响应")
+    val representative = allResults.first()
+    return representative.copy(
+        successCount = allResults.size,
+        totalCount = totalCount,
+        mappedPorts = allResults.map { it.mappedPort }.toSet(),
+        mappedIps = allResults.map { it.mappedIp }.toSet()
+    )
+}
+
+private fun probeStunGroup(
+    endpoints: List<StunEndpoint>,
+    minSuccess: Int,
+    perNodeTimeoutMs: Int,
+    overallTimeoutMs: Long
+): List<StunProbeResult> {
+    if (endpoints.isEmpty()) return emptyList()
+    val executor = Executors.newFixedThreadPool(endpoints.size)
+    val completion = ExecutorCompletionService<StunProbeResult?>(executor)
+    return try {
         endpoints.forEach { endpoint ->
-            val server = runCatching { resolveFirstIpv4(endpoint.host) }.getOrNull() ?: return@forEach
-            attempted++
-            var successForEndpoint = false
-            repeat(2) { retryIndex ->
-                if (successForEndpoint) return@repeat
-                val request = buildStunBindingRequest()
-                runCatching {
-                    socket.send(DatagramPacket(request.bytes, request.bytes.size, server, endpoint.port))
-                    val deadline = System.currentTimeMillis() + if (retryIndex == 0) 1800 else 1200
-                    while (System.currentTimeMillis() < deadline && !successForEndpoint) {
-                        val buf = ByteArray(768)
-                        val packet = DatagramPacket(buf, buf.size)
-                        socket.receive(packet)
-                        parseStunMappedAddress(packet.data, packet.length, localPort, request.transactionId)?.let { result ->
-                            results += result
-                            successForEndpoint = true
-                        }
-                    }
-                }
+            completion.submit(Callable { probeSingleStun(endpoint, perNodeTimeoutMs) })
+        }
+        val results = mutableListOf<StunProbeResult>()
+        val deadline = System.currentTimeMillis() + overallTimeoutMs
+        var completed = 0
+        while (completed < endpoints.size && System.currentTimeMillis() < deadline) {
+            val left = (deadline - System.currentTimeMillis()).coerceAtLeast(1L)
+            val future = completion.poll(left, TimeUnit.MILLISECONDS) ?: break
+            completed++
+            runCatching { future.get() }.getOrNull()?.let { results += it }
+            if (results.size >= minSuccess) break
+        }
+        results
+    } finally {
+        executor.shutdownNow()
+    }
+}
+
+private fun probeSingleStun(endpoint: StunEndpoint, perNodeTimeoutMs: Int): StunProbeResult? {
+    val server = runCatching { resolveFirstIpv4(endpoint.host) }.getOrNull() ?: return null
+    DatagramSocket().use { socket ->
+        socket.soTimeout = perNodeTimeoutMs.coerceIn(500, 1200)
+        val localPort = socket.localPort
+        repeat(2) {
+            val request = buildStunBindingRequest()
+            runCatching {
+                socket.send(DatagramPacket(request.bytes, request.bytes.size, server, endpoint.port))
+                val buf = ByteArray(768)
+                val packet = DatagramPacket(buf, buf.size)
+                socket.receive(packet)
+                parseStunMappedAddress(packet.data, packet.length, localPort, request.transactionId)?.let { return it }
             }
         }
     }
-    if (results.isEmpty()) error("STUN基础探测无响应")
-    val representative = results.first()
-    return representative.copy(
-        successCount = results.size,
-        totalCount = attempted.coerceAtLeast(results.size),
-        mappedPorts = results.map { it.mappedPort }.toSet(),
-        mappedIps = results.map { it.mappedIp }.toSet()
-    )
+    return null
 }
 
 private fun resolveFirstIpv4(host: String): InetAddress {
@@ -995,7 +1038,7 @@ private fun NetSessionTesterApp() {
     var intervalMs by remember { mutableStateOf("500") }
     var timeoutMs by remember { mutableStateOf("3000") }
     var successLimit by remember { mutableStateOf("65535") }
-    var failureLimit by remember { mutableStateOf("200") }
+    var failureLimit by remember { mutableStateOf("1200") }
     var keepConnections by remember { mutableStateOf(true) }
     var maskPrivacy by remember { mutableStateOf(false) }
     var historyLimit by remember { mutableStateOf("30") }
@@ -1309,7 +1352,7 @@ private fun NetSessionTesterApp() {
         )
         chartPoints = (chartPoints.filterNot { it.protocol == point.protocol && it.elapsedSec == point.elapsedSec } + point)
             .sortedWith(compareBy<ChartPoint> { it.protocol.ordinal }.thenBy { it.elapsedSec })
-            .takeLast(240)
+            .takeLast(180)
         lastChartSampleAt = lastChartSampleAt + (stats.protocol to now)
     }
 
@@ -1500,8 +1543,9 @@ private fun NetSessionTesterApp() {
         if (stats.isNotEmpty() && stats.all { it.phase == "解析失败" || it.errorSummary.keys.any { key -> key.contains("DNS") } }) {
             return FinishReason.DnsFail
         }
-        val failureLimitValue = config?.failureLimit ?: failureLimit.toIntOrNull() ?: Int.MAX_VALUE
-        if (stats.any { it.totalFailure >= failureLimitValue }) return FinishReason.FailureLimit
+        if (stats.any { it.phase.contains("无增长") }) return FinishReason.NoGrowth
+        if (stats.any { it.phase.contains("连续失败") }) return FinishReason.ConsecutiveFailure
+        if (stats.any { it.phase.contains("失败上限") }) return FinishReason.FailureLimit
         return FinishReason.Completed
     }
 
@@ -1532,38 +1576,89 @@ private fun NetSessionTesterApp() {
 
         val snapshot = tester.detachForRelease()
         val finalStatus = if (reason == FinishReason.ForceRelease) "已释放" else "${reason.label} · 已释放"
+        val releaseStatus = if (reason == FinishReason.ForceRelease) "正在释放" else "${reason.label} · 正在释放"
         val baseIpv4 = summary?.ipv4Stats ?: state.ipv4Stats
         val baseIpv6 = summary?.ipv6Stats ?: state.ipv6Stats
+        val releaseStart = System.currentTimeMillis()
+        var lastReleaseLogAt = 0L
 
         state = state.copy(
             isAdding = false,
-            status = finalStatus,
+            runPhase = RunPhase.Releasing,
+            status = releaseStatus,
             summary = summary ?: state.summary,
-            error = if (reason == FinishReason.Completed || reason == FinishReason.ForceRelease) null else reason.label,
-            ipv4Stats = baseIpv4.copy(activeSessions = 0, phase = if (baseIpv4.totalAttempts > 0) "已释放" else baseIpv4.phase),
-            ipv6Stats = baseIpv6.copy(activeSessions = 0, phase = if (baseIpv6.totalAttempts > 0) "已释放" else baseIpv6.phase)
+            error = null,
+            releaseUi = ReleaseUiState(
+                visible = true,
+                total = snapshot.size,
+                closed = 0,
+                speedPerSecond = 0,
+                elapsedMs = 0L,
+                message = if (snapshot.isEmpty()) "没有需要释放的连接" else "正在关闭 Socket 连接，请勿退出页面"
+            )
         )
 
-        appendLog(LogLine(level = LogLevel.WARN, text = "${reason.label}：已停止新增，已清空活动连接，后台释放 ${snapshot.size} 条 socket"))
-        notifyLocalReleased(if (reason == FinishReason.ForceRelease) "本机已释放" else "${reason.label}，本机已释放")
-        if (toast) {
-            runCatching { Toast.makeText(context, finalStatus, Toast.LENGTH_SHORT).show() }
-        }
-        stopForegroundNotice(context)
+        appendLog(LogLine(level = LogLevel.WARN, text = "${reason.label}：已停止新增，开始释放 ${snapshot.size} 条 socket"))
+        updateForegroundNotice(context, "正在释放连接 0/${snapshot.size}")
 
+        var closed = 0
         try {
-            val closed = runCatching { withContext(Dispatchers.IO) { tester.closeDetachedSockets(snapshot) } }
-                .getOrElse { error ->
-                    appendLog(LogLine(level = LogLevel.ERROR, text = "${reason.label}：后台 close 异常：${error.message ?: error.javaClass.simpleName}"))
-                    0
+            closed = runCatching {
+                tester.closeDetachedSockets(snapshot, batchSize = 500) { done, total, elapsedMs ->
+                    val elapsed = elapsedMs.coerceAtLeast(1L)
+                    val speed = if (done <= 0) 0 else (done * 1000L / elapsed).toInt().coerceAtLeast(1)
+                    state = state.copy(
+                        releaseUi = ReleaseUiState(
+                            visible = true,
+                            total = total,
+                            closed = done,
+                            speedPerSecond = speed,
+                            elapsedMs = elapsedMs,
+                            message = if (done >= total) "释放完成，正在更新界面状态" else "正在关闭 Socket 连接，请勿退出页面",
+                            finished = done >= total
+                        )
+                    )
+                    val now = System.currentTimeMillis()
+                    if (now - lastReleaseLogAt >= 1_000L || done >= total) {
+                        lastReleaseLogAt = now
+                        val percent = if (total <= 0) 100 else (done * 100 / total).coerceIn(0, 100)
+                        appendLog(LogLine(level = LogLevel.STAT, text = "释放进度：$done/$total，$percent%，速度约 ${speed}/秒"))
+                        updateForegroundNotice(context, "正在释放连接 $done/$total｜$percent%")
+                    }
                 }
-            appendLog(LogLine(level = LogLevel.WARN, text = "${reason.label}：后台 close 完成：$closed 条"))
+            }.getOrElse { error ->
+                appendLog(LogLine(level = LogLevel.ERROR, text = "${reason.label}：close 异常：${error.message ?: error.javaClass.simpleName}"))
+                0
+            }
+
+            appendLog(LogLine(level = LogLevel.WARN, text = "${reason.label}：close 完成：$closed 条，耗时 ${((System.currentTimeMillis() - releaseStart) / 1000f).let { String.format("%.1f", it) }} 秒"))
 
             if (saveHistory && summary != null) {
                 appendHistorySafely(summary)
                 refreshHistory()
             }
         } finally {
+            val failed = reason != FinishReason.Completed && reason != FinishReason.ForceRelease
+            state = state.copy(
+                isAdding = false,
+                runPhase = if (failed) RunPhase.Failed else RunPhase.Finished,
+                status = finalStatus,
+                summary = summary ?: state.summary,
+                error = if (failed) reason.label else null,
+                releaseUi = state.releaseUi.copy(
+                    visible = true,
+                    closed = state.releaseUi.total.takeIf { it > 0 } ?: closed,
+                    finished = true,
+                    message = "释放完成"
+                ),
+                ipv4Stats = baseIpv4.copy(activeSessions = 0, phase = if (baseIpv4.totalAttempts > 0) "已释放" else baseIpv4.phase),
+                ipv6Stats = baseIpv6.copy(activeSessions = 0, phase = if (baseIpv6.totalAttempts > 0) "已释放" else baseIpv6.phase)
+            )
+            notifyLocalReleased(if (reason == FinishReason.ForceRelease) "本机已释放" else "${reason.label}，本机已释放")
+            if (toast) {
+                runCatching { Toast.makeText(context, finalStatus, Toast.LENGTH_SHORT).show() }
+            }
+            stopForegroundNotice(context)
             finishInProgress = false
         }
     }
@@ -1617,95 +1712,87 @@ private fun NetSessionTesterApp() {
         manualStopRequested = false
         state = state.copy(
             isAdding = true,
+            runPhase = RunPhase.Running,
             status = "建连中",
+            releaseUi = ReleaseUiState(),
             ipv4Stats = ProtocolStats(IpProtocol.IPV4),
             ipv6Stats = ProtocolStats(IpProtocol.IPV6),
             summary = null,
             error = null
         )
-        appendLog(LogLine(level = LogLevel.INFO, text = "目标：${config.host}:${config.port} | 模式：${config.mode.label} | 新增：${config.batchSize} | 间隔：${config.intervalMs}ms"))
+        appendLog(LogLine(level = LogLevel.INFO, text = "目标：${config.host}:${config.port} | 模式：${config.mode.label} | 起始CPS：${config.batchSize} | 采样：1s | 动态调速"))
         startPingMonitor(config, startedAt)
         startNetworkWatch(startedAt, testNetworkSignature)
 
-        runningJob = AppTestRuntime.scope.launch {
+        runningJob = scope.launch {
             var summary: SessionSummary? = null
             var completedNormally = false
             var failureMsg: String? = null
             try {
                 val oldClosed = tester.release()
                 if (oldClosed > 0) {
-                    AppTestRuntime.mainScope.launch {
-                        appendLog(LogLine(level = LogLevel.WARN, text = "开始新测试前释放旧连接：$oldClosed 条"))
-                    }
+                    appendLog(LogLine(level = LogLevel.WARN, text = "开始新测试前释放旧连接：$oldClosed 条"))
                 }
                 val pair = tester.runSessionHoldTest(
                     rawConfig = config,
                     onStats = statsHandler@ { stats ->
-                        AppTestRuntime.mainScope.launch {
-                            if (activeRunId != startedAt || !state.isAdding) return@launch
-                            recordChartPoint(stats)
-                            state = when (stats.protocol) {
-                                IpProtocol.IPV4 -> state.copy(ipv4Stats = stats, status = "${stats.protocol.label} ${stats.phase}")
-                                IpProtocol.IPV6 -> state.copy(ipv6Stats = stats, status = "${stats.protocol.label} ${stats.phase}")
-                            }
-                            updateForegroundNotice(context, "${stats.protocol.label} ${stats.phase}｜活动 ${stats.activeSessions}｜失败 ${stats.totalFailure}")
+                        if (activeRunId != startedAt || !state.isAdding) return@statsHandler
+                        recordChartPoint(stats)
+                        val nextPhase = if (stats.phase.contains("无增长") || stats.phase.contains("确认")) RunPhase.TopConfirm else RunPhase.Running
+                        state = when (stats.protocol) {
+                            IpProtocol.IPV4 -> state.copy(ipv4Stats = stats, status = "${stats.protocol.label} ${stats.phase}", runPhase = nextPhase)
+                            IpProtocol.IPV6 -> state.copy(ipv6Stats = stats, status = "${stats.protocol.label} ${stats.phase}", runPhase = nextPhase)
                         }
+                        updateForegroundNotice(context, "${stats.protocol.label} ${stats.phase}｜活动 ${stats.activeSessions}｜失败 ${stats.totalFailure}")
                     },
-                    onLog = { line ->
-                        AppTestRuntime.mainScope.launch { appendLog(line) }
-                    }
+                    onLog = { line -> appendLog(line) }
                 )
-                val uiStats = withContext(Dispatchers.Main.immediate) { state.ipv4Stats to state.ipv6Stats }
                 summary = SessionSummary(
                     startedAtEpochMs = startedAt,
                     host = config.host,
                     port = config.port,
                     mode = config.mode,
                     ipv4Stats = when (config.mode) {
-                        TestMode.IPV4_ONLY -> pair.first ?: uiStats.first
-                        TestMode.IPV4_THEN_IPV6 -> pair.first ?: uiStats.first
+                        TestMode.IPV4_ONLY -> pair.first ?: state.ipv4Stats
+                        TestMode.IPV4_THEN_IPV6 -> pair.first ?: state.ipv4Stats
                         TestMode.IPV6_ONLY -> null
                     },
                     ipv6Stats = when (config.mode) {
-                        TestMode.IPV6_ONLY -> pair.second ?: uiStats.second
-                        TestMode.IPV4_THEN_IPV6 -> pair.second ?: uiStats.second
+                        TestMode.IPV6_ONLY -> pair.second ?: state.ipv6Stats
+                        TestMode.IPV4_THEN_IPV6 -> pair.second ?: state.ipv6Stats
                         TestMode.IPV4_ONLY -> null
                     }
                 )
                 completedNormally = true
             } catch (error: Throwable) {
                 if (error is kotlinx.coroutines.CancellationException) throw error
-                AppTestRuntime.mainScope.launch {
-                    if (!manualStopRequested) {
-                        failureMsg = error.message ?: error.javaClass.simpleName
-                        appendLog(LogLine(level = LogLevel.ERROR, text = "测试中断：$failureMsg"))
-                    }
+                if (!manualStopRequested) {
+                    failureMsg = error.message ?: error.javaClass.simpleName
+                    appendLog(LogLine(level = LogLevel.ERROR, text = "测试中断：$failureMsg"))
                 }
             } finally {
-                withContext(Dispatchers.Main.immediate) {
-                    alignPingWithSessionEnd()
-                    pingJob?.cancel()
-                    pingJob = null
-                    pingIntervalLabel = "AUTO"
-                    networkWatchJob?.cancel()
-                    networkWatchJob = null
-                    if (!manualStopRequested) {
-                        val finalSummary = summary
-                        val finalReason = finishReasonFor(finalSummary, config).let { reason ->
-                            if (!completedNormally && reason == FinishReason.Completed) FinishReason.Interrupted else reason
-                        }
-                        scope.launch {
-                            releaseAndFinalize(
-                                reason = finalReason,
-                                summary = finalSummary,
-                                saveHistory = finalReason.saveHistory,
-                                cancelRunningJob = false,
-                                toast = true
-                            )
-                        }
+                alignPingWithSessionEnd()
+                pingJob?.cancel()
+                pingJob = null
+                pingIntervalLabel = "AUTO"
+                networkWatchJob?.cancel()
+                networkWatchJob = null
+                if (!manualStopRequested) {
+                    val finalSummary = summary
+                    val finalReason = finishReasonFor(finalSummary, config).let { reason ->
+                        if (!completedNormally && reason == FinishReason.Completed) FinishReason.Interrupted else reason
                     }
-                    runningJob = null
+                    scope.launch {
+                        releaseAndFinalize(
+                            reason = finalReason,
+                            summary = finalSummary,
+                            saveHistory = finalReason.saveHistory,
+                            cancelRunningJob = false,
+                            toast = true
+                        )
+                    }
                 }
+                runningJob = null
             }
         }
     }
@@ -1934,7 +2021,7 @@ private fun NetSessionTesterApp() {
                     onRestoreDefault = {
                         host = "www.baidu.com"; port = "80"; mode = TestMode.IPV4_THEN_IPV6
                         batchSize = "120"; intervalMs = "500"; timeoutMs = "3000"
-                        successLimit = "65535"; failureLimit = "200"; keepConnections = true; maskPrivacy = false; historyLimit = "30"
+                        successLimit = "65535"; failureLimit = "1200"; keepConnections = true; maskPrivacy = false; historyLimit = "30"
                     }
                 )
 
@@ -1950,6 +2037,8 @@ private fun NetSessionTesterApp() {
                     pingPoints = pingPoints,
                     pingIntervalLabel = pingIntervalLabel,
                     isAdding = state.isAdding,
+                    runPhase = state.runPhase,
+                    releaseUi = state.releaseUi,
                     onStart = { startTest() },
                     onStopAdding = { stopAdding() },
                     onRelease = { releaseAll() },
@@ -2385,15 +2474,15 @@ private fun SettingsPage(
             SoftCard {
                 SectionTitle("≡", "会话参数", Green)
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    ParamField("新增（条）", batchSize, onBatchSizeChange, Modifier.weight(1f))
-                    ParamField("间隔（ms）", intervalMs, onIntervalMsChange, Modifier.weight(1f))
+                    ParamField("起始CPS", batchSize, onBatchSizeChange, Modifier.weight(1f))
+                    ParamField("调度间隔ms", intervalMs, onIntervalMsChange, Modifier.weight(1f))
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     ParamField("超时（ms）", timeoutMs, onTimeoutMsChange, Modifier.weight(1f))
-                    ParamField("失败停（次）", failureLimit, onFailureLimitChange, Modifier.weight(1f))
+                    ParamField("失败兜底", failureLimit, onFailureLimitChange, Modifier.weight(1f))
                 }
                 ParamField("目标会话（条）", successLimit, onSuccessLimitChange, Modifier.fillMaxWidth())
-                Text("参数将用于后续测试，可随时修改并保存。", color = Muted, fontSize = 12.sp)
+                Text("起始CPS会自动加速/降速；日志与曲线固定 1 秒采样，释放阶段显示进度。", color = Muted, fontSize = 12.sp, lineHeight = 16.sp)
             }
         }
         item {
@@ -2423,6 +2512,8 @@ private fun TestPage(
     pingPoints: List<PingPoint>,
     pingIntervalLabel: String,
     isAdding: Boolean,
+    runPhase: RunPhase,
+    releaseUi: ReleaseUiState,
     onStart: () -> Unit,
     onStopAdding: () -> Unit,
     onRelease: () -> Unit,
@@ -2439,6 +2530,16 @@ private fun TestPage(
     onMoreLogs: () -> Unit,
     onMoreFailure: () -> Unit
 ) {
+    val startEnabled = runPhase == RunPhase.Idle || runPhase == RunPhase.Finished || runPhase == RunPhase.Failed
+    val stopEnabled = isAdding && (runPhase == RunPhase.Running || runPhase == RunPhase.TopConfirm)
+    val releaseBusy = runPhase == RunPhase.Stopping || runPhase == RunPhase.Releasing
+    val phaseLabel = when {
+        releaseBusy -> "● 释放中"
+        isAdding && runPhase == RunPhase.TopConfirm -> "● 顶部确认"
+        isAdding -> "● 运行中"
+        else -> status
+    }
+
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -2449,32 +2550,42 @@ private fun TestPage(
             PageTitle("宽带会话测试器", null, updateBadge, updateProgress, onVersionClick)
             FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
                 StatusChip(mode.label, BlueSoft, Blue)
-                StatusChip(if (isAdding) "● 运行中" else status, GreenSoft, Green)
+                StatusChip(phaseLabel, if (releaseBusy) Color(0xFFFFF7ED) else GreenSoft, if (releaseBusy) Orange else Green)
                 StatusChip("◎ 目标 $target", Color.White, TextDark)
             }
         }
         item {
             SoftCard {
                 SectionTitle("∿", "测试控制", Blue)
-                Text(if (isAdding) "● 正在运行 · 已连接目标" else "状态：$status", color = if (isAdding) Green else Muted, fontWeight = FontWeight.Medium, fontSize = 12.sp)
+                Text(
+                    when {
+                        releaseBusy -> "正在释放连接，完成后会自动恢复开始按钮"
+                        isAdding -> "● 正在运行 · 智能调速 · 日志/曲线每秒采样"
+                        else -> "状态：$status"
+                    },
+                    color = if (isAdding) Green else if (releaseBusy) Orange else Muted,
+                    fontWeight = FontWeight.Medium,
+                    fontSize = 12.sp
+                )
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Button(onClick = onStart, enabled = !isAdding, modifier = Modifier.weight(1f).height(38.dp), shape = ShapeM) {
+                    Button(onClick = onStart, enabled = startEnabled, modifier = Modifier.weight(1f).height(40.dp), shape = ShapeM) {
                         Icon(Icons.Filled.PlayArrow, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("开始", fontSize = 13.sp)
                     }
                     Button(
                         onClick = onStopAdding,
-                        enabled = isAdding,
+                        enabled = stopEnabled,
                         colors = ButtonDefaults.buttonColors(containerColor = RedSoft, contentColor = ErrorRed),
                         modifier = Modifier.weight(1f).height(38.dp),
                         shape = ShapeM
                     ) { Icon(Icons.Filled.Stop, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("停止", fontSize = 13.sp) }
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    OutlinedButton(onClick = onRelease, modifier = Modifier.weight(1f).height(38.dp), shape = ShapeM) { Icon(Icons.Filled.DeleteOutline, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("强制释放", fontSize = 13.sp) }
+                    OutlinedButton(onClick = onRelease, enabled = !releaseBusy, modifier = Modifier.weight(1f).height(38.dp), shape = ShapeM) { Icon(Icons.Filled.DeleteOutline, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("强制释放", fontSize = 13.sp) }
                     OutlinedButton(onClick = onExport, modifier = Modifier.weight(1f).height(38.dp), shape = ShapeM) { Icon(Icons.Filled.Download, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("导出", fontSize = 13.sp) }
                 }
             }
         }
+        if (releaseUi.visible || releaseBusy) item { ReleaseProgressCard(releaseUi) }
         item { PingCompactChartCard(pingPoints = pingPoints, intervalLabel = pingIntervalLabel) }
         if (showIpv4) item { SessionStatsCard("IPv4 会话", ipv4Stats, maskPrivacy, chartPoints.filter { it.protocol == IpProtocol.IPV4 }, chartMode, onChartModeChange) }
         if (showIpv6) item { SessionStatsCard("IPv6 会话", ipv6Stats, maskPrivacy, chartPoints.filter { it.protocol == IpProtocol.IPV6 }, chartMode, onChartModeChange) }
@@ -2484,6 +2595,84 @@ private fun TestPage(
     }
 }
 
+
+
+@Composable
+private fun ReleaseProgressCard(releaseUi: ReleaseUiState) {
+    val total = releaseUi.total.coerceAtLeast(0)
+    val closed = releaseUi.closed.coerceIn(0, total.coerceAtLeast(releaseUi.closed))
+    val progress = releaseUi.progress
+    SoftCard {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            SectionTitle("↧", if (releaseUi.finished) "释放完成" else "正在释放连接", Purple)
+            Spacer(Modifier.weight(1f))
+            StatusChip(if (releaseUi.finished) "已完成" else "进行中", if (releaseUi.finished) GreenSoft else Color(0xFFFFF7ED), if (releaseUi.finished) Green else Orange, compact = true)
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            Box(
+                modifier = Modifier.width(122.dp).height(122.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Canvas(modifier = Modifier.fillMaxSize().padding(6.dp)) {
+                    drawArc(
+                        color = Color(0xFFE9D5FF),
+                        startAngle = -90f,
+                        sweepAngle = 360f,
+                        useCenter = false,
+                        style = Stroke(width = 14f, cap = StrokeCap.Round)
+                    )
+                    drawArc(
+                        color = Purple,
+                        startAngle = -90f,
+                        sweepAngle = 360f * progress,
+                        useCenter = false,
+                        style = Stroke(width = 14f, cap = StrokeCap.Round)
+                    )
+                }
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("${releaseUi.percent}%", color = TextDark, fontSize = 24.sp, fontWeight = FontWeight.ExtraBold)
+                    Text("释放进度", color = Muted, fontSize = 11.sp)
+                }
+            }
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("$closed / $total", color = TextDark, fontSize = 21.sp, fontWeight = FontWeight.ExtraBold)
+                Text(releaseUi.message.ifBlank { "正在关闭 Socket 连接，请勿退出页面" }, color = Muted, fontSize = 12.sp, lineHeight = 16.sp)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    MetricTile("释放速度", if (releaseUi.speedPerSecond > 0) "${releaseUi.speedPerSecond}/s" else "—", Blue, Modifier.weight(1f))
+                    MetricTile("预计剩余", if (releaseUi.finished) "0s" else "约 ${releaseUi.etaSeconds}s", Orange, Modifier.weight(1f))
+                }
+            }
+        }
+        Column(
+            modifier = Modifier.fillMaxWidth().background(Color(0xFFF8FAFC), ShapeM).padding(10.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            ReleaseStep("停止新增连接", true)
+            ReleaseStep("正在释放 Socket", releaseUi.closed > 0 || releaseUi.finished, !releaseUi.finished)
+            ReleaseStep("清理连接资源", releaseUi.finished)
+            ReleaseStep("更新界面状态", releaseUi.finished)
+        }
+        Text("释放期间会冻结曲线渲染，只保留进度刷新，避免 UI 卡顿和按钮状态不同步。", color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
+    }
+}
+
+@Composable
+private fun ReleaseStep(title: String, done: Boolean, active: Boolean = false) {
+    val color = when {
+        done -> Green
+        active -> Blue
+        else -> Muted
+    }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(if (done) "✓" else if (active) "●" else "○", color = color, fontWeight = FontWeight.Bold, fontSize = 13.sp, modifier = Modifier.width(22.dp))
+        Text(title, color = TextDark, fontSize = 12.sp, fontWeight = if (active) FontWeight.Bold else FontWeight.Medium, modifier = Modifier.weight(1f))
+        Text(if (done) "已完成" else if (active) "进行中" else "等待中", color = color, fontSize = 11.sp)
+    }
+}
 
 @Composable
 private fun FullRunLogPage(

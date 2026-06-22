@@ -8,12 +8,9 @@ import android.app.Service
 import android.content.Intent
 import android.os.Build
 import android.os.IBinder
-import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 
 class TestForegroundService : Service() {
-    private var wakeLock: PowerManager.WakeLock? = null
-
     override fun onCreate() {
         super.onCreate()
         ensureChannel()
@@ -24,42 +21,17 @@ class TestForegroundService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP -> {
-                releaseWakeLock()
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
                 return START_NOT_STICKY
             }
             ACTION_START, ACTION_UPDATE, null -> {
-                if (intent?.action == ACTION_START || wakeLock?.isHeld != true) acquireWakeLock()
                 val text = intent?.getStringExtra(EXTRA_TEXT) ?: "TCP 会话测试运行中"
                 startForeground(NOTIFICATION_ID, buildNotification(text))
                 return START_STICKY
             }
         }
         return START_STICKY
-    }
-
-    override fun onDestroy() {
-        releaseWakeLock()
-        super.onDestroy()
-    }
-
-    private fun acquireWakeLock() {
-        if (wakeLock?.isHeld == true) return
-        runCatching {
-            val pm = getSystemService(PowerManager::class.java)
-            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "NetSessionTester:SessionTest").apply {
-                setReferenceCounted(false)
-                acquire(6 * 60 * 60 * 1000L)
-            }
-        }
-    }
-
-    private fun releaseWakeLock() {
-        runCatching {
-            wakeLock?.takeIf { it.isHeld }?.release()
-        }
-        wakeLock = null
     }
 
     private fun ensureChannel() {

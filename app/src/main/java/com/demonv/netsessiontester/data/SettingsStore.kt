@@ -13,7 +13,7 @@ data class SavedSettings(
     val intervalMs: String = "500",
     val timeoutMs: String = "3000",
     val successLimit: String = "65535",
-    val failureLimit: String = "200",
+    val failureLimit: String = "1200",
     val keepConnections: Boolean = true,
     val maskPrivacy: Boolean = false,
     val historyLimit: String = "30"
@@ -32,7 +32,7 @@ class SettingsStore(context: Context) {
             intervalMs = prefs.getString(KEY_INTERVAL_MS, "500") ?: "500",
             timeoutMs = prefs.getString(KEY_TIMEOUT_MS, "3000") ?: "3000",
             successLimit = prefs.getString(KEY_SUCCESS_LIMIT, "65535") ?: "65535",
-            failureLimit = prefs.getString(KEY_FAILURE_LIMIT, "200") ?: "200",
+            failureLimit = prefs.getString(KEY_FAILURE_LIMIT, "1200") ?: "1200",
             keepConnections = prefs.getBoolean(KEY_KEEP_CONNECTIONS, true),
             maskPrivacy = prefs.getBoolean(KEY_MASK_PRIVACY, false),
             historyLimit = prefs.getString(KEY_HISTORY_LIMIT, "30") ?: "30"

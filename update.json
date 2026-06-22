@@ -1,18 +1,16 @@
 {
-  "versionCode": 62,
+  "versionCode": 63,
   "versionName": "0.9.9",
-  "title": "发现新版本 v0.9.9 build 62",
+  "title": "发现新版本 v0.9.9 build 63",
   "content": [
-    "保持 v0.9.9 主逻辑，基于上一版继续优化稳定性",
-    "Ping 默认保持 500ms，不引入复杂自动降频逻辑",
-    "继续保留 FD 安全保护，接近上限前主动停止并释放",
-    "继续保留统一释放流程，减少 UI 状态和真实连接不一致",
-    "网络信息卡新增 NAT 映射行为、过滤行为、DNS诊断、IPv6状态和置信度",
-    "检测 VPN/代理环境，NAT、IPv6、出口结果标记仅供参考",
-    "系统 DNS 无 AAAA 时使用阿里/腾讯 DNS 做轻量诊断",
-    "进入 App 自动完整检测一次，网络切换后自动重测，刷新按钮可手动重测"
+    "STUN 改为 6 主 + 2 备，移除 syncthing，加入 qq 备用，主节点够票即可出结果",
+    "连接测试改为智能 CPS：起始 120，成功率高自动加速，失败率升高自动降速",
+    "新增无增长确认、连续失败动态阈值和累计失败动态阈值，减少尾部拖延",
+    "FD 保护线调整到 32500，接近安卓 FD 上限时主动停止，降低闪退风险",
+    "释放阶段新增图形进度，分批关闭 Socket，释放完成后才恢复开始按钮",
+    "日志和曲线固定 1 秒采样，数字面板低频刷新，提升 Material3 / One UI 风格下的渲染流畅度"
   ],
-  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v0.9.9-62/NetSessionTester-v0.9.9-build62-signed.apk",
+  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v0.9.9-63/NetSessionTester-v0.9.9-build63-signed.apk",
   "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/latest",
   "force": false
 }
