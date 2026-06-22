@@ -1720,11 +1720,14 @@ private fun NetSessionTesterApp() {
 
         appendLog(LogLine(level = LogLevel.WARN, text = "${reason.label}：已停止新增，开始释放 ${snapshot.size} 条 socket"))
         updateForegroundNotice(context, "正在释放连接 0/${snapshot.size}")
+        // 先让 Releasing 状态和释放进度卡片完成一次渲染，再开始批量 close。
+        // 避免停止瞬间和 IPv4->IPv6 切换时出现 UI 短时卡顿/假死感。
+        delay(80L)
 
         var closed = 0
         try {
             closed = runCatching {
-                tester.closeDetachedSockets(snapshot, batchSize = 500) { done, total, elapsedMs ->
+                tester.closeDetachedSockets(snapshot, batchSize = 1000) { done, total, elapsedMs ->
                     val elapsed = elapsedMs.coerceAtLeast(1L)
                     val speed = if (done <= 0) 0 else (done * 1000L / elapsed).toInt().coerceAtLeast(1)
                     state = state.copy(
@@ -1840,7 +1843,7 @@ private fun NetSessionTesterApp() {
             summary = null,
             error = null
         )
-        appendLog(LogLine(level = LogLevel.INFO, text = "目标：${config.host}:${config.port} | 模式：${config.mode.label} | 新增值：${config.batchSize} | 采样：1s | 静默策略重分配"))
+        appendLog(LogLine(level = LogLevel.INFO, text = "目标：${config.host}:${config.port} | 模式：${config.mode.label} | 新增值：${config.batchSize} | 采样：1s | 静默高速策略"))
         startPingMonitor(config, startedAt)
         startNetworkWatch(startedAt, testNetworkSignature)
 
