@@ -1251,7 +1251,7 @@ private fun NetSessionTesterApp() {
     }
 
     fun isIgnoredUpdate(info: UpdateInfo): Boolean {
-        val ignoredCode = updatePrefs.getInt("ignored_version_code", -1)
+        val ignoredCode = (updatePrefs.all["ignored_version_code"] as? Number)?.toLong() ?: -1L
         return ignoredCode == info.versionCode
     }
 
@@ -1263,7 +1263,7 @@ private fun NetSessionTesterApp() {
 
     fun ignoreUpdate(info: UpdateInfo) {
         updatePrefs.edit()
-            .putInt("ignored_version_code", info.versionCode)
+            .putLong("ignored_version_code", info.versionCode)
             .putString("ignored_version_name", info.versionName)
             .putLong("ignored_at", System.currentTimeMillis())
             .remove("postpone_until")
