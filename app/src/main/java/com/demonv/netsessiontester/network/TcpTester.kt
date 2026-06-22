@@ -149,6 +149,7 @@ class TcpTester {
         var maxStable = 0
         var consecutiveFailure = 0
         var lastStatsAt = System.currentTimeMillis()
+        var lastUiStatsAt = 0L
         var lastLogAt = 0L
         var lastLaunchedForStats = 0
         var lastGrowthAt = System.currentTimeMillis()
@@ -260,7 +261,7 @@ class TcpTester {
                 topConfirmStartPeak = peak
                 topConfirmStartFailure = totalFailure
                 topConfirmReason = reason
-                currentCps = currentCps.coerceIn(16, 32)
+                if (!manualCpsMode) currentCps = currentCps.coerceIn(16, 32)
             }
         }
 
@@ -272,6 +273,9 @@ class TcpTester {
 
         suspend fun emitStats(forcePhase: String? = null, forceLog: Boolean = false) {
             val now = System.currentTimeMillis()
+            val minUiIntervalMs = 500L
+            if (!forceLog && forcePhase == null && now - lastUiStatsAt < minUiIntervalMs) return
+            lastUiStatsAt = now
             val active = activeCount(protocol)
             maxStable = maxOf(maxStable, active)
             val launchedDelta = totalLaunched - lastLaunchedForStats
@@ -384,27 +388,44 @@ class TcpTester {
                 onLog(LogLine(level = level, text = "${protocol.label} FD动态保护：${pressure.detail}"))
             }
 
-            if (pressure.fdRemaining in 1..fdGuardRemaining || active >= 32_200) {
-                enterTopConfirm(now, peak, "FD接近")
-            }
-
             val ipv4HighCapacity = protocol == IpProtocol.IPV4 && active >= 6_000
             if (ipv4HighCapacity && !ipv4HighCapacityAnnounced) {
                 ipv4HighCapacityAnnounced = true
-                onLog(LogLine(level = LogLevel.INFO, text = "IPv4 活动连接已超过 6000，切换为高容量/疑似公网策略，关闭低中容量平台期慢确认，优先继续冲刺至 FD 保护。"))
+                onLog(LogLine(level = LogLevel.INFO, text = "IPv4 活动连接已超过 6000，切换为高容量/疑似公网策略；手动 CPS 不降速，主要依靠 pending/FD 保护收尾。"))
             }
 
-            val lowCapacityLooksDone = elapsed >= 8_000L && active < 1_000 && win4Total >= 40 && failRate4 >= 0.35f && growth4 < 60
-            if (lowCapacityLooksDone) enterTopConfirm(now, peak, "低容量确认")
+            // 手动 CPS 模式：用户设 800/1000/1500 后，普通失败率/增长效率不能再把 CPS 压到个位数。
+            // 低容量场景直接快速停止；FD 接近直接短收尾；不进入 16~32 CPS 慢确认。
+            if (manualCpsMode) {
+                val manualLowCapacityDone = elapsed >= 6_000L && peak < 800 && growth4 < 30 && totalFailure >= maxOf(80, (peak * 0.55f).roundToInt())
+                if (manualLowCapacityDone) {
+                    stopPhase = "低容量确认"
+                    onLog(LogLine(level = LogLevel.WARN, text = "${protocol.label} 手动 CPS 低容量快速收尾：峰值 $peak，4秒增长 $growth4，失败 $totalFailure，停止新增"))
+                    break
+                }
+                if (pressure.fdRemaining in 1..fdGuardRemaining || active >= 32_200) {
+                    fdSeen = true
+                    stopPhase = "FD上限"
+                    onLog(LogLine(level = LogLevel.WARN, text = "${protocol.label} 手动 CPS 已接近 FD 上限：活动 $active，${pressure.detail}，停止新增并释放"))
+                    break
+                }
+            } else {
+                if (pressure.fdRemaining in 1..fdGuardRemaining || active >= 32_200) {
+                    enterTopConfirm(now, peak, "FD接近")
+                }
 
-            // IPv4 6000+ 在你的场景里基本属于公网/高容量 NAT，不再用低中容量平台期确认提前降速。
-            val allowPlateauForIpv4 = protocol == IpProtocol.IPV4 && active in 1_000 until 6_000
-            if (allowPlateauForIpv4 && elapsed >= 14_000L && win8Total >= 120 && growth8 < 150 && failRate8 >= 0.18f) {
-                enterTopConfirm(now, peak, "增长效率低")
+                val lowCapacityLooksDone = elapsed >= 8_000L && active < 1_000 && win4Total >= 40 && failRate4 >= 0.35f && growth4 < 60
+                if (lowCapacityLooksDone) enterTopConfirm(now, peak, "低容量确认")
+
+                // IPv4 6000+ 在你的场景里基本属于公网/高容量 NAT，不再用低中容量平台期确认提前降速。
+                val allowPlateauForIpv4 = protocol == IpProtocol.IPV4 && active in 1_000 until 6_000
+                if (allowPlateauForIpv4 && elapsed >= 14_000L && win8Total >= 120 && growth8 < 150 && failRate8 >= 0.18f) {
+                    enterTopConfirm(now, peak, "增长效率低")
+                }
             }
 
             if (topConfirmStartedAt > 0L) {
-                currentCps = currentCps.coerceIn(16, 32)
+                if (!manualCpsMode) currentCps = currentCps.coerceIn(16, 32)
                 val topElapsed = now - topConfirmStartedAt
                 val topGrowth = peak - topConfirmStartPeak
                 val topFailures = totalFailure - topConfirmStartFailure
@@ -439,7 +460,7 @@ class TcpTester {
                 }
             }
 
-            val targetForPending = if (topConfirmStartedAt > 0L) currentCps.coerceIn(16, 32) else currentCps
+            val targetForPending = if (!manualCpsMode && topConfirmStartedAt > 0L) currentCps.coerceIn(16, 32) else currentCps
             val maxPending = pendingMax(targetForPending, pressure)
             val canLaunchByPending = (maxPending - pending.size).coerceAtLeast(0)
             val remainingBySuccessLimit = (config.successLimit - totalSuccess - pending.size).coerceAtLeast(0)

@@ -1,10 +1,8 @@
-# NetSessionTester Changelog
+# Changelog
 
-## v0.9.9 build 76 - Local test
+## v0.9.9 build77 local
 
-- 默认新增值 128 继续走动态智能 CPS。
-- 用户修改新增值后进入手动 CPS 模式，严格按用户设定发起连接。
-- 手动模式下不再因普通失败率悄悄降速，FD / pending / 网络异常只暂停或停止。
-- IPv4 高容量分界从 8000 下压到 6000，6000+ 按高容量 / 疑似公网策略继续冲刺。
-- IPv4 6000 以下保留低中容量快速确认，避免蜂窝 / CGNAT 小容量长尾。
-- IPv6 默认高容量策略，继续快速冲刺至 FD 保护。
+- Fix manual CPS priority so user-set CPS is not silently throttled by ordinary protection logic.
+- Stop low-capacity tests earlier instead of dragging through low CPS confirmation.
+- Stop near FD limit directly in manual CPS mode to avoid long tails.
+- Throttle UI stats snapshots to reduce release and IPv4/IPv6 transition jank.
