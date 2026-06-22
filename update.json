@@ -1,16 +1,16 @@
 {
-  "versionCode": 87,
+  "versionCode": 88,
   "versionName": "v0.9.9",
-  "title": "发现新版本 v0.9.9 build87",
+  "title": "发现新版本 v0.9.9 build88",
   "content": [
-    "versionCode 升至 87，修复更新检测与版本显示逻辑",
-    "取消失败数小曲线，图表只保留会话数蓝线，失败仅显示区间文字",
-    "取消低会话 3s/5s 无增长终止，收尾只看失败分段阈值和 FD 保护",
-    "测试结束/已释放后 CPS 卡片显示平均CPS，避免最后一秒显示 0/s 造成误解",
-    "失败兜底默认 600，保留分段失败终止与 FD 32360 保护",
-    "保留固定目标CPS、Ping 图表刷新、顶部下载横幅和后台下载能力"
+    "versionCode 升至 88，build87 用户可检测到更新",
+    "TCP 发射核心改为流水线持续发射，避免整批 awaitAll 被慢连接拖住",
+    "6000 以上会话失败上限改为 360，减少 9000-10000 区间误杀",
+    "继续取消失败小曲线和低会话 3s/5s 无增长终止",
+    "测试结束/已释放后 CPS 卡片显示平均CPS，避免最后一秒显示 0/s",
+    "保留默认目标CPS 200/s、Ping 图表刷新、FD 32360 保护和顶部下载横幅"
   ],
-  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v0.9.9-87/NetSessionTester-v0.9.9-build87-signed.apk",
+  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v0.9.9-88/NetSessionTester-v0.9.9-build88-signed.apk",
   "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/latest",
   "force": false
 }

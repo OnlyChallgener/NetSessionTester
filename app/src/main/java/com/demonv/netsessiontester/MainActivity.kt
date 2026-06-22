@@ -3087,9 +3087,9 @@ private fun VersionInfoDialog(
             Column(verticalArrangement = Arrangement.spacedBy(9.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("当前版本", color = Muted, fontSize = 12.sp, modifier = Modifier.weight(1f))
-                    StatusChip("v0.9.9 build87", BlueSoft, Blue, compact = true)
+                    StatusChip("v0.9.9 build88", BlueSoft, Blue, compact = true)
                 }
-                VersionLine("v0.9.9 build87", "取消失败小曲线和无增长终止；释放后 CPS 显示平均值；失败兜底默认600。")
+                VersionLine("v0.9.9 build88", "流水线持续发射，6000以上失败上限360；释放后 CPS 显示平均值。")
                 VersionLine("v0.9.8", "保留 0.9.7 高速测速核心，新增更新检测与后台下载。")
                 VersionLine("v0.9.7", "修复 FD 上限附近闪退；触发FD上限时优先释放本机连接并保存历史。")
                 VersionLine("v0.9.6", "修复停止按钮、通知跳转、新增批次被200锁死的问题。")
