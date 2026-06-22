@@ -1,7 +1,5 @@
 # NetSessionTester
 
-Android TCP 会话测试工具。v0.9.9 build86 为发布修正版，重点修复更新提醒、后台下载可见性和失败兜底默认值。
+v0.9.9 build87 performance release.
 
-Release:
-- Tag: v0.9.9-86
-- APK: NetSessionTester-v0.9.9-build86-signed.apk
+核心：固定目标CPS、会话数蓝线、失败区间文字、失败兜底600、FD 32360保护、Ping图表保留。

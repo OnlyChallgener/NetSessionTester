@@ -1408,7 +1408,7 @@ private fun NetSessionTesterApp() {
         latestUpdate = null
         updateAvailable = false
         showUpdateDialog = false
-        scope.launch { snackbarHostState.showSnackbar("已忽略 v${info.versionName} build ${info.versionCode}，下个版本再自动提醒") }
+        scope.launch { snackbarHostState.showSnackbar("已忽略 ${formatVersionBuild(info.versionName, info.versionCode)}，下个版本再自动提醒") }
     }
 
     fun checkForUpdate(manual: Boolean = false) {
@@ -2465,7 +2465,7 @@ private fun HistoryProtocolCard(title: String, stats: ProtocolStats, maskPrivacy
         }
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             MetricTile("目标CPS", "${stats.lastAdded}/s", Blue, Modifier.weight(1f))
-            MetricTile("实际CPS", "${stats.cps}/s", Blue, Modifier.weight(1f))
+            MetricTile(if (stats.activeSessions == 0 && stats.totalAttempts > 0) "平均CPS" else "实际CPS", "${stats.cps}/s", Blue, Modifier.weight(1f))
             MetricTile("峰值", protocolPeak(stats).toString(), Green, Modifier.weight(1f))
         }
         if (stats.resolvedAddresses.isNotEmpty()) {
@@ -2670,7 +2670,7 @@ private fun SettingsPage(
                     ParamField("失败兜底", failureLimit, onFailureLimitChange, Modifier.weight(1f))
                     ParamField("目标会话（条）", successLimit, onSuccessLimitChange, Modifier.weight(1f))
                 }
-                Text("性能发布版：默认目标CPS 200/s，失败兜底默认600；固定执行，取消128动态调速和CPS曲线；6000以下失败时显示失败小曲线，6000以上仅显示失败区间文字。", color = Muted, fontSize = 12.sp, lineHeight = 16.sp)
+                Text("性能发布版：默认目标CPS 200/s，失败兜底默认600；固定执行，取消128动态调速和CPS曲线；失败只显示区间文字，不再绘制失败曲线。", color = Muted, fontSize = 12.sp, lineHeight = 16.sp)
             }
         }
         item {
@@ -3087,9 +3087,9 @@ private fun VersionInfoDialog(
             Column(verticalArrangement = Arrangement.spacedBy(9.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("当前版本", color = Muted, fontSize = 12.sp, modifier = Modifier.weight(1f))
-                    StatusChip("v0.9.9 build86", BlueSoft, Blue, compact = true)
+                    StatusChip("v0.9.9 build87", BlueSoft, Blue, compact = true)
                 }
-                VersionLine("v0.9.9 build86", "修复更新重复提醒、vv版本显示、后台下载横幅；失败兜底默认600。")
+                VersionLine("v0.9.9 build87", "取消失败小曲线和无增长终止；释放后 CPS 显示平均值；失败兜底默认600。")
                 VersionLine("v0.9.8", "保留 0.9.7 高速测速核心，新增更新检测与后台下载。")
                 VersionLine("v0.9.7", "修复 FD 上限附近闪退；触发FD上限时优先释放本机连接并保存历史。")
                 VersionLine("v0.9.6", "修复停止按钮、通知跳转、新增批次被200锁死的问题。")
@@ -3463,7 +3463,7 @@ private fun SessionStatsCard(
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             MetricTile("总计", stats.totalAttempts.toString(), Navy, Modifier.weight(1f))
             MetricTile("目标CPS", "${stats.lastAdded}/s", Blue, Modifier.weight(1f))
-            MetricTile("实际CPS", "${stats.cps}/s", Blue, Modifier.weight(1f))
+            MetricTile(if (stats.activeSessions == 0 && stats.totalAttempts > 0) "平均CPS" else "实际CPS", "${stats.cps}/s", Blue, Modifier.weight(1f))
         }
         if (stats.resolvedAddresses.isNotEmpty()) {
             Text(
@@ -3584,15 +3584,7 @@ private fun failureIntervalSummary(points: List<ChartPoint>, bucketSeconds: Int 
     return "失败区间：" + top.joinToString("，") { (start, count) -> "${start}-${start + bucketSeconds}s +$count" }
 }
 
-private fun shouldShowFailureMiniCurve(points: List<ChartPoint>): Boolean {
-    if (points.isEmpty()) return false
-    val sorted = points.sortedBy { it.elapsedSec }
-    val last = sorted.lastOrNull() ?: return false
-    val maxTotal = sorted.maxOfOrNull { it.total } ?: 0
-    val maxFailure = sorted.maxOfOrNull { it.failure } ?: 0
-    // 失败曲线只在低/中低会话显示。6000以上会话数和失败数比例差太大，继续用失败区间文字更清晰。
-    return maxFailure > 0 && maxTotal in 1..6_000 && last.total <= 6_000
-}
+private fun shouldShowFailureMiniCurve(points: List<ChartPoint>): Boolean = false
 
 @Composable
 private fun FailureMiniChart(points: List<ChartPoint>) {
@@ -3686,14 +3678,11 @@ private fun SessionGrowthChart(points: List<ChartPoint>) {
         Row(modifier = Modifier.fillMaxWidth().padding(start = 34.dp), horizontalArrangement = Arrangement.SpaceBetween) {
             timeLabels(minX, maxX, step).forEach { Text("${it}s", color = Muted, fontSize = 10.sp) }
         }
-        if (showFailureMiniCurve) {
-            FailureMiniChart(sorted)
-        }
         val failSummary = failureIntervalSummary(sorted)
         if (failSummary.isNotBlank()) {
             Text(failSummary, color = ErrorRed, fontSize = 10.sp, lineHeight = 13.sp, fontWeight = FontWeight.Bold)
         }
-        Text("说明：CPS仅在上方文字显示；6000会话以下显示失败小曲线，6000以上仅显示失败区间。", color = Muted, fontSize = 10.sp, lineHeight = 13.sp)
+        Text("说明：CPS仅在上方文字显示；图表只保留会话数蓝线，失败仅显示区间文字。", color = Muted, fontSize = 10.sp, lineHeight = 13.sp)
     }
 }
 

@@ -37,14 +37,14 @@ import java.util.concurrent.atomic.AtomicLong
  *
  * 前几版的 100ms 发射器 + pending/FD/增长效率多状态模型，在高容量 IPv6 下会出现
  * CPS 掉底和 10s+ 僵直。这里恢复 v0.9.7 的核心方式：按“新增批次”高速并发 open，
- * 一批结束就统计，一旦失败/FD/分段失败阈值命中就直接收尾，不做低 CPS 慢确认。
+ * 一批结束就统计，只看失败数/FD/成功上限收尾，不做无增长慢确认。
  *
  * 保留新版必要能力：
  * - releaseEpoch，防止释放后迟到 socket 回流；
  * - detachForRelease / closeDetachedSockets，配合释放进度 UI；
  * - 分段失败上限：<1000=120，<6000=200，<12000=300，>=12000=600；
  * - IPv4 6000+ / IPv6 默认高容量，不再顶部慢跑；
- * - 0失败时 active/maxStable >= 32360 直接按设备 FD 保护收尾；有失败时按当前会话区间失败上限收尾；
+ * - 0失败时 active/maxStable >= 32360 直接按设备 FD 保护收尾；有失败时只按当前会话区间失败上限收尾；
  * - active >= 32160 后进行批量裁剪，避免一次大批量超冲到 32500+ 导致闪退。
  */
 class TcpTester {
@@ -108,6 +108,7 @@ class TcpTester {
     ): ProtocolStats {
         release(protocol)
         val expectedEpoch = releaseEpoch.get()
+        val startedAt = System.currentTimeMillis()
         val addresses = resolveInetAddresses(config.host, protocol)
         if (addresses.isEmpty()) {
             val stats = ProtocolStats(protocol = protocol, phase = "解析失败")
@@ -130,8 +131,6 @@ class TcpTester {
         var lastEmitSuccess = 0
         var lastLogAt = 0L
         var lastCps = 0
-        var lastGrowthAt = System.currentTimeMillis()
-        var lastGrowthSuccess = 0
         var stats = ProtocolStats(protocol = protocol, phase = "建连中", resolvedAddresses = addressText, lastAdded = targetCps)
         val errors = linkedMapOf<String, Int>()
         onStats(stats)
@@ -209,11 +208,6 @@ class TcpTester {
                     remainingErrorBudget -= add
                 }
             }
-            if (totalSuccess > lastGrowthSuccess) {
-                lastGrowthSuccess = totalSuccess
-                lastGrowthAt = System.currentTimeMillis()
-            }
-
             if (batchResult.successSockets.isNotEmpty()) {
                 socketLock.withLock {
                     if (releaseEpoch.get() == expectedEpoch) {
@@ -233,17 +227,12 @@ class TcpTester {
                 failureLimitFor(maxOf(maxStable, active))
             )
             val failureLimitHit = totalFailure >= activeFailureLimit
-            val lowSessionNoGrowthHit = active < 1_000 && totalSuccess > 0 && (System.currentTimeMillis() - lastGrowthAt) >= lowNoGrowthStopMs(active)
-            if (lowSessionNoGrowthHit) {
-                errors["低会话无增长"] = (errors["低会话无增长"] ?: 0) + 1
-            }
             val terminal =
                 maxStable >= fdSafeStop ||
                     active >= fdSafeStop ||
                     maxStable >= fdEmergencyStop ||
                     active >= fdEmergencyStop ||
                     failureLimitHit ||
-                    lowSessionNoGrowthHit ||
                     totalSuccess >= config.successLimit ||
                     batchResult.errors.containsKey("FD上限")
 
@@ -290,11 +279,6 @@ class TcpTester {
                         onStats(stats)
                         onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 达到分段失败上限：$totalFailure/$activeFailureLimit，停止新增并释放"))
                     }
-                    lowSessionNoGrowthHit -> {
-                        stats = stats.copy(phase = "低会话无增长", errorSummary = errors.toMap(), maxStableSessions = maxStable)
-                        onStats(stats)
-                        onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 低会话阶段 ${lowNoGrowthStopMs(active) / 1000}s 无增长，停止新增并释放"))
-                    }
                 }
                 break
             }
@@ -305,12 +289,13 @@ class TcpTester {
         }
 
         val finalActive = activeCount(protocol)
+        val finalElapsedMs = (System.currentTimeMillis() - startedAt).coerceAtLeast(1L)
+        val averageCps = (totalSuccess * 1000L / finalElapsedMs).toInt().coerceAtLeast(0)
         val finalPeak = maxOf(maxStable, finalActive, totalSuccess)
         val finalTotal = totalSuccess + totalFailure
         val finalFailureLimit = minOf(config.failureLimit, failureLimitFor(finalPeak))
         val finalPhase = when {
             finalPeak >= fdSafeStop || stats.errorSummary.containsKey("FD上限") || stats.phase == "FD上限" -> "FD上限"
-            stats.phase == "低会话无增长" -> "低会话无增长"
             totalFailure >= finalFailureLimit -> "失败上限"
             totalFailure > 0 -> "出现失败"
             totalSuccess >= config.successLimit -> "测试完成"
@@ -322,7 +307,7 @@ class TcpTester {
             totalFailure = totalFailure,
             totalAttempts = finalTotal,
             lastAdded = targetCps,
-            cps = lastCps,
+            cps = averageCps,
             totalSuccess = totalSuccess,
             maxStableSessions = finalPeak
         )
@@ -355,11 +340,6 @@ class TcpTester {
         peak < 6_000 -> 200
         peak < 12_000 -> 300
         else -> 600
-    }
-
-    private fun lowNoGrowthStopMs(active: Int): Long = when {
-        active < 500 -> 3_000L
-        else -> 5_000L
     }
 
     private suspend fun openBatchWithFailureBudget(

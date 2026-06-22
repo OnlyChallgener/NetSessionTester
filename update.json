@@ -1,17 +1,16 @@
 {
-  "versionCode": 86,
+  "versionCode": 87,
   "versionName": "v0.9.9",
-  "title": "发现新版本 v0.9.9 build 86",
+  "title": "发现新版本 v0.9.9 build87",
   "content": [
-    "修复更新后反复提醒的问题；本次 versionCode 升至 86，检测逻辑以 versionCode 为准",
-    "修复版本显示出现 vv0.9.9 的问题，更新弹窗显示版本名和 build 号",
-    "去掉更新弹窗中的稍后更新选项，减少误触和重复提醒",
-    "后台下载时在 APP 顶部显示浮动下载横幅，可随时点开查看、安装或处理失败",
-    "会话参数失败兜底默认改为 600，并迁移旧版 1200 默认值",
-    "6000 会话以下且存在失败时显示失败数小曲线；6000 以上仅保留失败区间文字，避免比例差距过大影响观感",
-    "保留 v0.9.9 性能核心：固定目标CPS、FD 32360 保护、Ping 图表刷新、取消 CPS 曲线"
+    "versionCode 升至 87，修复更新检测与版本显示逻辑",
+    "取消失败数小曲线，图表只保留会话数蓝线，失败仅显示区间文字",
+    "取消低会话 3s/5s 无增长终止，收尾只看失败分段阈值和 FD 保护",
+    "测试结束/已释放后 CPS 卡片显示平均CPS，避免最后一秒显示 0/s 造成误解",
+    "失败兜底默认 600，保留分段失败终止与 FD 32360 保护",
+    "保留固定目标CPS、Ping 图表刷新、顶部下载横幅和后台下载能力"
   ],
-  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v0.9.9-86/NetSessionTester-v0.9.9-build86-signed.apk",
+  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v0.9.9-87/NetSessionTester-v0.9.9-build87-signed.apk",
   "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/latest",
   "force": false
 }
