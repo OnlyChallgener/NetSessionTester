@@ -1,5 +1,5 @@
 {
-  "versionCode": 84,
+  "versionCode": 67,
   "versionName": "v0.9.9",
   "title": "发现新版本 v0.9.9 build 84",
   "content": [
@@ -8,7 +8,7 @@
     "保持 v0.9.7 高速测速核心、失败上限硬终止和 FD 保护逻辑",
     "修复上一包 TcpTester.kt 插入位置错误导致 compileReleaseKotlin 失败的问题"
   ],
-  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v0.9.9/NetSessionTester-v0.9.9-build84-signed.apk",
+  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v0.9.9/NetSessionTester-v0.9.9-build67-signed.apk",
   "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/latest",
   "force": false
 }
