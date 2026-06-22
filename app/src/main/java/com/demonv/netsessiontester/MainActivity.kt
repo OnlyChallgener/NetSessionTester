@@ -404,6 +404,8 @@ private fun installDownloadedApk(context: Context, apkFile: File) {
 private data class NetworkEnvironment(
     val typeLabel: String = "未知网络",
     val carrierName: String = "未知",
+    val mccMnc: String = "",
+    val simMccMnc: String = "",
     val hasWifi: Boolean = false,
     val hasCellular: Boolean = false,
     val hasVpn: Boolean = false,
@@ -497,7 +499,16 @@ private fun detectNetworkEnvironment(context: Context): NetworkEnvironment {
     val hasVpn = caps?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true
     val hasInternet = caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
     val telephony = context.getSystemService(TelephonyManager::class.java)
-    val carrier = runCatching { telephony?.networkOperatorName?.takeIf { it.isNotBlank() } ?: "未知" }.getOrDefault("未知")
+    val networkOperator = runCatching { telephony?.networkOperator.orEmpty() }.getOrDefault("")
+    val simOperator = runCatching { telephony?.simOperator.orEmpty() }.getOrDefault("")
+    val rawCarrier = runCatching {
+        telephony?.networkOperatorName?.takeIf { it.isNotBlank() }
+            ?: telephony?.simOperatorName?.takeIf { it.isNotBlank() }
+            ?: "未知"
+    }.getOrDefault("未知")
+    val mccCarrier = carrierFromMccMnc(networkOperator).takeIf { it != "未知" }
+        ?: carrierFromMccMnc(simOperator).takeIf { it != "未知" }
+    val carrier = mccCarrier ?: normalizeCarrierName(rawCarrier)
     val typeLabel = when {
         hasVpn && hasWifi -> "WiFi + VPN"
         hasVpn && hasCellular -> "蜂窝 + VPN"
@@ -506,25 +517,51 @@ private fun detectNetworkEnvironment(context: Context): NetworkEnvironment {
         hasVpn -> "VPN"
         else -> "未知网络"
     }
-    return NetworkEnvironment(typeLabel, carrier, hasWifi, hasCellular, hasVpn, hasInternet)
+    return NetworkEnvironment(typeLabel, carrier, networkOperator, simOperator, hasWifi, hasCellular, hasVpn, hasInternet)
 }
 
-private fun inferCarrierFromIpv6Prefix(ipv6: String): String {
-    val value = ipv6.trim().lowercase()
-    return when {
-        value.startsWith("2408:") -> "中国联通"
-        value.startsWith("2409:") -> "中国移动"
-        value.startsWith("240e:") -> "中国电信"
+private fun carrierFromMccMnc(code: String): String {
+    return when (code.take(5)) {
+        "46000", "46002", "46004", "46007", "46008" -> "中国移动"
+        "46001", "46006", "46009" -> "中国联通"
+        "46003", "46005", "46011" -> "中国电信"
+        "46015" -> "中国广电"
         else -> "未知"
     }
 }
 
-private fun displayCarrierFromEnv(env: NetworkEnvironment, ipv6: String): String {
+private fun normalizeCarrierName(name: String): String {
+    val value = name.trim().lowercase()
+    return when {
+        value.isBlank() || value == "unknown" -> "未知"
+        "广电" in value || "cbn" in value || "broadcast" in value -> "中国广电"
+        "移动" in value || "china mobile" in value || "cmcc" in value -> "中国移动"
+        "联通" in value || "china unicom" in value || "unicom" in value -> "中国联通"
+        "电信" in value || "chinanet" in value || "china telecom" in value || "telecom" in value -> "中国电信"
+        else -> name.trim().takeIf { it.isNotBlank() } ?: "未知"
+    }
+}
+
+private fun inferCarrierFromIpv6Prefix(ipv6: String): String {
+    val value = ipv6.trim().lowercase()
+    val secondHextet = value.split(":").getOrNull(1)?.toIntOrNull(16)
+    return when {
+        value.startsWith("240e:") -> "中国电信"
+        value.startsWith("2409:") -> "中国移动"
+        value.startsWith("2408:") -> "中国联通"
+        value.startsWith("240a:") && secondHextet != null && secondHextet in 0x4000..0x47ff -> "中国广电"
+        else -> "未知"
+    }
+}
+
+private fun displayCarrierFromEnv(env: NetworkEnvironment, ipv4: String, ipv6: String): String {
     val prefixCarrier = inferCarrierFromIpv6Prefix(ipv6)
     return when {
         env.hasCellular && env.carrierName.isNotBlank() && env.carrierName != "未知" -> env.carrierName
         prefixCarrier != "未知" -> prefixCarrier
-        env.hasWifi -> "WiFi"
+        env.hasVpn -> "VPN/代理"
+        env.hasWifi -> "WiFi出口未知"
+        ipv4.isUsableIpText() || ipv6.isUsableIpText() -> "出口未知"
         else -> "未知"
     }
 }
@@ -3576,7 +3613,7 @@ private fun NetworkEnvironmentSettingsCard(
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
             InfoMetricTile("D", "DNS诊断", probeInfo.dnsStatus, Color(0xFFF3E8FF), Purple, Modifier.weight(1f))
-            InfoMetricTile("C", "置信度", probeInfo.confidence, Color(0xFFF8FAFC), Muted, Modifier.weight(1f))
+            InfoMetricTile("O", "运营商", displayCarrierFromEnv(env, publicIpResult.ipv4, publicIpResult.ipv6), Color(0xFFF8FAFC), Muted, Modifier.weight(1f))
         }
         Text(
             probeInfo.diagnosis,
@@ -3588,7 +3625,7 @@ private fun NetworkEnvironmentSettingsCard(
         FlowRow(horizontalArrangement = Arrangement.spacedBy(7.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             StatusChip(if (env.hasInternet) "可访问互联网" else "无互联网能力", if (env.hasInternet) GreenSoft else RedSoft, if (env.hasInternet) Green else ErrorRed, compact = true)
             StatusChip("网络 ${env.typeLabel}", Color(0xFFF3E8FF), Purple, compact = true)
-            StatusChip("运营商 ${displayCarrierFromEnv(env, publicIpResult.ipv6)}", Color(0xFFF3E8FF), Purple, compact = true)
+            StatusChip("运营商 ${displayCarrierFromEnv(env, publicIpResult.ipv4, publicIpResult.ipv6)}", Color(0xFFF3E8FF), Purple, compact = true)
             if (env.hasVpn) StatusChip("VPN/代理仅供参考", Color(0xFFF3E8FF), Purple, compact = true)
         }
     }

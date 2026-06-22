@@ -1,7 +1,9 @@
 # Changelog
 
-## v0.9.9 build82 local
+## v0.9.9 build84 local
 
-- Restore v0.9.7-style high-speed TCP session core.
-- Remove emitter/pending/top-confirm slow path from the test core.
-- Keep segmented failure limits and release progress UI.
+- FD / Socket 上限保护提前到 32000 附近。
+- 31800 以后对新增批次做安全裁剪，避免冲到 32500+ 触发闪退。
+- 修复接近失败上限时 chunk 被缩到 1 个连接，导致 CPS 掉底和 10s+ 僵直的问题。
+- CPS 改成真实墙钟统计，不再用固定 intervalMs 估算。
+- 增加极低容量快速收尾规则。
