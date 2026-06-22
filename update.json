@@ -1,14 +1,14 @@
 {
   "versionCode": 84,
-  "versionName": "0.9.9",
+  "versionName": "v0.9.9",
   "title": "发现新版本 v0.9.9 build 84",
   "content": [
-    "版本号更新为 v0.9.9，versionCode 更新为 84",
-    "保留上一版修复：UI 200ms 节流、Socket 并发限制、FD 临界保护与释放状态同步",
-    "保留 v0.9.7 高速测速核心，并继续优化 FD 临界附近卡顿僵直问题",
-    "建议使用 clean 后重新编译，覆盖安装前确认卸载旧包或签名一致"
+    "修复 UI 高频刷新导致的数值延迟和卡顿：统计刷新改为 200ms 节流",
+    "修复 Socket 瞬时并发过高导致 FD 临界卡死：新增建连并发信号量限制",
+    "保持 v0.9.7 高速测速核心、失败上限硬终止和 FD 保护逻辑",
+    "修复上一包 TcpTester.kt 插入位置错误导致 compileReleaseKotlin 失败的问题"
   ],
-  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v0.9.9-84/NetSessionTester-v0.9.9-build84-signed.apk",
+  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v0.9.9/NetSessionTester-v0.9.9-build84-signed.apk",
   "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/latest",
   "force": false
 }

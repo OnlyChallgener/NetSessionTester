@@ -16,6 +16,7 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.net.ConnectException
@@ -31,7 +32,6 @@ import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 import java.util.Collections
 import java.util.concurrent.atomic.AtomicLong
-import kotlinx.coroutines.sync.Semaphore
 
 /**
  * build82：回归 v0.9.7 高速测速核心。
@@ -370,9 +370,6 @@ class TcpTester {
                 } finally {
                     openPermits.release()
                 }
-            }
-                val address = addresses[index % addresses.size]
-                openOne(address, port, timeoutMs, expectedEpoch)
             }
         }
         val results = jobs.awaitAll()
