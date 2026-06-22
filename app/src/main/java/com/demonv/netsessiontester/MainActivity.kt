@@ -1843,7 +1843,7 @@ private fun NetSessionTesterApp() {
             summary = null,
             error = null
         )
-        appendLog(LogLine(level = LogLevel.INFO, text = "目标：${config.host}:${config.port} | 模式：${config.mode.label} | 新增值：${config.batchSize} | 采样：1s | 静默高速策略"))
+        appendLog(LogLine(level = LogLevel.INFO, text = "目标：${config.host}:${config.port} | 模式：${config.mode.label} | 新增值：${config.batchSize} | 采样：1s | 默认动态，手动严格 CPS"))
         startPingMonitor(config, startedAt)
         startNetworkWatch(startedAt, testNetworkSignature)
 
@@ -2608,7 +2608,7 @@ private fun SettingsPage(
                     ParamField("失败兜底", failureLimit, onFailureLimitChange, Modifier.weight(1f))
                 }
                 ParamField("目标会话（条）", successLimit, onSuccessLimitChange, Modifier.fillMaxWidth())
-                Text("默认 128 为智能调速；修改后会静默按新值重分配策略，保护降速仍然生效。", color = Muted, fontSize = 12.sp, lineHeight = 16.sp)
+                Text("默认 128 为智能调速；修改后严格按用户 CPS 发起，FD / pending / 网络异常只暂停或停止。", color = Muted, fontSize = 12.sp, lineHeight = 16.sp)
             }
         }
         item {
