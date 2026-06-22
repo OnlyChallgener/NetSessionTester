@@ -9,6 +9,7 @@ import com.demonv.netsessiontester.model.SessionConfig
 import com.demonv.netsessiontester.model.TestMode
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -40,6 +41,16 @@ class TcpTester {
     private val socketLock = Mutex()
 
     /**
+     * build81：恢复接近 v0.9.8 的高速测速核心。
+     * 之前使用默认 Dispatchers.IO，在连接超时或失败堆积时会被默认并发度限制，
+     * 导致手动 800/1000 CPS 中途掉速、UI 僵直。这里给 TCP connect 单独的
+     * 高并发 dispatcher，让手动 CPS 更接近用户设定；真正的保护只靠 pending、
+     * 分段失败上限、FD 上限和网络异常。
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private val connectDispatcher = Dispatchers.IO.limitedParallelism(1024)
+
+    /**
      * Android 常见单进程 FD 上限约 32768，但 App 自身还会占用 DNS、通知、日志、
      * 图表、pipe/eventfd、STUN/Ping 等 FD。build66 不再固定 32000/32600 作为主判断，
      * 而是实时读取 /proc/self/fd 与 /proc/self/limits，按剩余 FD 分三段保护。
@@ -56,7 +67,7 @@ class TcpTester {
     private val fdHardRemaining = 300
 
     /**
-     * build80：失败数改为按峰值分段上限，避免低容量僵直，也避免高容量过早截断：
+     * build80/build81：失败数按峰值分段上限，避免低容量僵直，也避免高容量过早截断：
      * <1000:120，<6000:200，<12000:360，>=12000:600。
      */
     private val absoluteFailureCap = 600
@@ -554,7 +565,7 @@ class TcpTester {
                     val address = addresses[addressCursor % addresses.size]
                     addressCursor++
                     totalLaunched++
-                    pending += async(Dispatchers.IO) { openOne(address, config.port, timeoutMs, protocolEpoch) }
+                    pending += async(connectDispatcher) { openOne(address, config.port, timeoutMs, protocolEpoch) }
                 }
             }
 
@@ -608,7 +619,7 @@ class TcpTester {
         try {
             val safeCount = count.coerceIn(1, 640)
             val jobs = (0 until safeCount).map { index ->
-                async(Dispatchers.IO) {
+                async(connectDispatcher) {
                     if (releaseEpoch.get() != expectedEpoch) {
                         OpenResult(discarded = true)
                     } else {

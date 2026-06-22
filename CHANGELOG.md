@@ -1,9 +1,10 @@
 # Changelog
 
-## v0.9.9 build80
+## v0.9.9 build 81 local
 
-- 失败数阈值从固定 300 改为分段：120 / 200 / 360 / 600。
-- 增加低容量快停，减少几百会话场景僵直等待。
-- TCP 连接超时固定 3000ms，不再动态变化。
-- FD 预警不再降速，接近上限直接收尾，减少高容量降速卡顿。
-- 保留手动 CPS 优先、时间发射器、pending 保护、释放图形进度和 NAT 增强检测。
+- Restore high-concurrency TCP connect core closer to the v0.9.8 behavior.
+- Use a dedicated high-parallelism connect dispatcher to avoid default Dispatchers.IO throttling during timeout/failure bursts.
+- Keep fixed 3000ms TCP timeout.
+- Keep segmented failure limits: <1000=120, <6000=200, <12000=360, >=12000=600.
+- Keep manual CPS priority: ordinary failure-rate/growth checks do not silently lower the user target CPS.
+- Keep FD hard protection and release UI.
