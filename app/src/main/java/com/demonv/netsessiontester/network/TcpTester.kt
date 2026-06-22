@@ -124,7 +124,7 @@ class TcpTester {
         onLog(LogLine(level = LogLevel.SUCCESS, text = "${protocol.label} 解析成功：${addressText.joinToString(" / ")}"))
         val userCps = config.batchSize.coerceIn(20, 1500)
         val manualCpsMode = userCps != 128
-        onLog(LogLine(level = LogLevel.INFO, text = if (manualCpsMode) "${protocol.label} 静默策略：用户新增值 ${userCps} CPS，按该值重分配上限，保护降速仍生效" else "${protocol.label} 智能策略：默认128 CPS起步，快速加速，顶部确认硬止损，FD动态保护：剩余900预警/500保护/300硬停，活动32600兜底"))
+        onLog(LogLine(level = LogLevel.INFO, text = if (manualCpsMode) "${protocol.label} 静默策略：用户新增值 ${userCps} CPS，按该值重分配上限；失败、无增长和FD保护仍会自动降速/停止" else "${protocol.label} 智能策略：默认128 CPS起步，快速接近上限，顶部精准确认限时，FD动态保护：剩余900预警/500保护/300硬停，活动32600兜底"))
 
         var totalSuccess = 0
         var totalFailure = 0
@@ -139,6 +139,8 @@ class TcpTester {
         var topConfirmStartedAt = 0L
         var topConfirmStartPeak = 0
         var topConfirmStartFailure = 0
+        var lowCpsStartedAt = 0L
+        var lowCpsStartPeak = 0
         var currentCps = userCps.coerceIn(40, 1500)
         var fdSeen = false
         var lastFdGuardLogAt = 0L
@@ -172,9 +174,9 @@ class TcpTester {
             else -> 120
         }
         fun noGrowthWindowMs(peak: Int): Long = when {
-            peak < 3_000 -> 4_000L
-            peak < 10_000 -> 6_000L
-            else -> 6_000L
+            peak < 3_000 -> 5_000L
+            peak < 10_000 -> 8_000L
+            else -> 8_000L
         }
         fun noGrowthFailThreshold(peak: Int): Float = when {
             peak < 3_000 -> 0.55f
@@ -182,16 +184,29 @@ class TcpTester {
             else -> 0.35f
         }
         fun topConfirmMs(peak: Int): Long = when {
-            peak < 3_000 -> 2_500L
-            peak < 10_000 -> 3_500L
-            else -> 4_000L
+            peak < 3_000 -> 8_000L
+            peak < 10_000 -> 10_000L
+            else -> 10_000L
+        }
+        fun connectTimeoutFor(peak: Int, fdRemaining: Int, inTopConfirm: Boolean): Int {
+            val base = config.timeoutMs.coerceIn(2_500, 5_000)
+            return when {
+                inTopConfirm -> base.coerceAtLeast(3_500).coerceAtMost(5_000)
+                fdRemaining in 1..fdGuardRemaining -> base.coerceAtLeast(3_000).coerceAtMost(4_500)
+                else -> base
+            }
+        }
+        fun topGrowthStopThreshold(peak: Int): Int = when {
+            peak < 3_000 -> 50
+            peak < 10_000 -> 100
+            else -> 180
         }
         fun enterTopConfirm(now: Long, peak: Int, reason: String) {
             if (topConfirmStartedAt == 0L) {
                 topConfirmStartedAt = now
                 topConfirmStartPeak = peak
                 topConfirmStartFailure = totalFailure
-                currentCps = currentCps.coerceAtMost(20).coerceAtLeast(8)
+                currentCps = currentCps.coerceAtMost(32).coerceAtLeast(16)
                 // 顶部确认只写一次日志，避免高频刷屏。
                 // forceLog 仍由 emitStats 统一控制 1 秒节流。
             }
@@ -278,20 +293,21 @@ class TcpTester {
                 val topFailures = totalFailure - topConfirmStartFailure
                 val confirmMs = topConfirmMs(peak)
                 val topBudget = topFailureBudget(peak)
+                val topStopGrowth = topGrowthStopThreshold(peak)
                 when {
                     topFailures >= topBudget -> {
                         stopPhase = "无增长确认"
                         onLog(LogLine(level = LogLevel.WARN, text = "${protocol.label} 顶部确认失败已达 $topFailures/$topBudget，停止新增，避免低 CPS 长尾"))
                         break
                     }
-                    topElapsed >= confirmMs && topGrowth < meaningfulGrowthStep(peak) -> {
+                    topElapsed >= confirmMs && topGrowth < topStopGrowth -> {
                         stopPhase = "无增长确认"
-                        onLog(LogLine(level = LogLevel.WARN, text = "${protocol.label} 顶部确认 ${topElapsed / 1000.0}s 无有效增长，停止新增"))
+                        onLog(LogLine(level = LogLevel.WARN, text = "${protocol.label} 顶部精准确认 ${topElapsed / 1000.0}s，增长 $topGrowth/$topStopGrowth，停止新增"))
                         break
                     }
-                    topElapsed >= confirmMs * 2 -> {
+                    topElapsed >= confirmMs + 3_000L -> {
                         stopPhase = "无增长确认"
-                        onLog(LogLine(level = LogLevel.WARN, text = "${protocol.label} 顶部确认超时，停止新增，避免长尾拖延"))
+                        onLog(LogLine(level = LogLevel.WARN, text = "${protocol.label} 顶部确认达到硬时间上限，停止新增，避免低 CPS 长尾"))
                         break
                     }
                 }
@@ -316,28 +332,44 @@ class TcpTester {
                 }
                 peak > 0 && now - lastGrowthAt >= noGrowthWindowMs(peak) && activeBefore >= (peak * 0.985f).roundToInt() -> {
                     enterTopConfirm(now, peak, "无有效增长")
-                    currentCps = currentCps.coerceAtMost(16).coerceAtLeast(8)
+                    currentCps = currentCps.coerceAtMost(32).coerceAtLeast(16)
                 }
                 peak > 10_000 && windowFailure >= 8 && failRate >= noGrowthFailThreshold(peak) && activeBefore >= (peak * 0.98f).roundToInt() -> {
                     enterTopConfirm(now, peak, "失败抬头")
-                    currentCps = currentCps.coerceAtMost(16).coerceAtLeast(8)
+                    currentCps = currentCps.coerceAtMost(32).coerceAtLeast(16)
                 }
             }
 
             if (topConfirmStartedAt > 0L || now - lastGrowthAt >= noGrowthWindowMs(peak) / 2) {
-                currentCps = currentCps.coerceAtMost(20).coerceAtLeast(8)
+                currentCps = currentCps.coerceAtMost(32).coerceAtLeast(16)
+            }
+
+            if (currentCps <= 36 && peak > 0 && activeBefore >= (peak * 0.98f).roundToInt()) {
+                if (lowCpsStartedAt == 0L) {
+                    lowCpsStartedAt = now
+                    lowCpsStartPeak = peak
+                } else if (now - lowCpsStartedAt >= 12_000L && peak - lowCpsStartPeak < topGrowthStopThreshold(peak)) {
+                    stopPhase = "无增长确认"
+                    onLog(LogLine(level = LogLevel.WARN, text = "${protocol.label} 低 CPS 确认已达 ${(now - lowCpsStartedAt) / 1000}s，增长不足，停止新增避免长尾"))
+                    break
+                }
+            } else {
+                lowCpsStartedAt = 0L
+                lowCpsStartPeak = peak
             }
 
             val remainingSuccess = config.successLimit - totalSuccess
             if (remainingSuccess <= 0) break
             val tickMs = config.intervalMs.coerceIn(350L, 700L)
-            val requestedLaunchCount = ((currentCps * tickMs) / 1000L).toInt().coerceIn(1, 640).coerceAtMost(remainingSuccess)
+            val requestedLaunchCount = ((currentCps * tickMs) / 1000L).toInt()
+                .coerceIn(1, if (topConfirmStartedAt > 0L) 24 else 640)
+                .coerceAtMost(remainingSuccess)
 
             val pressure = resourcePressure(requestedLaunchCount)
             if (pressure.fdRemaining in 1..fdWarnRemaining) {
                 if (pressure.fdRemaining <= fdGuardRemaining) {
                     enterTopConfirm(now, peak, "FD保护")
-                    currentCps = currentCps.coerceAtMost(80).coerceAtLeast(8)
+                    currentCps = currentCps.coerceAtMost(80).coerceAtLeast(16)
                 } else {
                     currentCps = currentCps.coerceAtMost(260).coerceAtLeast(30)
                 }
@@ -355,7 +387,8 @@ class TcpTester {
                 break
             }
             val launchCount = minOf(requestedLaunchCount, pressure.allowedLaunch.coerceAtLeast(1))
-            val batch = openBatch(addresses, config.port, config.timeoutMs.coerceIn(300, 800), launchCount, protocolEpoch)
+            val connectTimeoutMs = connectTimeoutFor(peak, pressure.fdRemaining, topConfirmStartedAt > 0L)
+            val batch = openBatch(addresses, config.port, connectTimeoutMs, launchCount, protocolEpoch)
             if (!currentCoroutineContext().isActive || releaseEpoch.get() != protocolEpoch) {
                 batch.successSockets.forEach { socket -> runCatching { socket.close() } }
                 break
@@ -385,6 +418,8 @@ class TcpTester {
                     topConfirmStartedAt = 0L
                     topConfirmStartPeak = 0
                     topConfirmStartFailure = 0
+                    lowCpsStartedAt = 0L
+                    lowCpsStartPeak = 0
                 }
             }
             maxStable = maxOf(maxStable, activeAfter)
