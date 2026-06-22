@@ -421,24 +421,42 @@ private data class StunProbeResult(
     val successCount: Int = 1,
     val totalCount: Int = 1,
     val mappedPorts: Set<Int> = setOf(mappedPort),
-    val mappedIps: Set<String> = setOf(mappedIp)
+    val mappedIps: Set<String> = setOf(mappedIp),
+    val roundCount: Int = 1,
+    val stableRoundCount: Int = 1,
+    val usedBackup: Boolean = false,
+    val sourceHost: String = ""
 ) {
     val portStable: Boolean
         get() = mappedPorts.size <= 1
 
     val ipStable: Boolean
         get() = mappedIps.size <= 1
+
+    val roundStable: Boolean
+        get() = stableRoundCount >= roundCount.coerceAtLeast(1)
 }
 
 private data class StunEndpoint(
     val host: String,
     val port: Int
-)
+) {
+    val key: String
+        get() = "$host:$port"
+}
 
 private data class StunRequest(
     val bytes: ByteArray,
     val transactionId: ByteArray
 )
+
+private data class PendingStunRequest(
+    val endpoint: StunEndpoint,
+    val address: InetAddress,
+    val request: StunRequest
+)
+
+private val stunRandom = java.security.SecureRandom()
 
 private data class DnsProbeResult(
     val systemHasA: Boolean,
@@ -602,8 +620,8 @@ private fun buildNetworkProbeInfo(
     val filtering = when {
         env.hasVpn -> "无法准确判断"
         isDirectPublicV4 -> "无明显限制"
-        stun != null -> "端口受限"
-        publicV4 != null && full -> "端口受限待确认"
+        stun != null -> "多节点推断"
+        publicV4 != null && full -> "过滤待确认"
         stun == null && full -> "UDP回包失败"
         else -> "待检测"
     }
@@ -611,10 +629,10 @@ private fun buildNetworkProbeInfo(
     val confidence = when {
         env.hasVpn -> "低"
         !full -> "低"
-        strongSymmetric && stun!!.ipStable && multiStun >= 5 -> "高"
-        strongSymmetric && stun!!.ipStable -> "中高"
-        stun != null && multiStun >= 5 && stun.ipStable -> "高"
-        stun != null && multiStun >= 4 -> "中高"
+        strongSymmetric && stun!!.ipStable && stun.roundStable && multiStun >= 5 -> "高"
+        strongSymmetric && stun!!.ipStable && multiStun >= 4 -> "中高"
+        stun != null && multiStun >= 5 && stun.ipStable && stun.roundStable -> "高"
+        stun != null && multiStun >= 4 && stun.roundStable -> "中高"
         stun != null && multiStun >= 3 -> "中"
         stun != null -> "低"
         publicV4 != null -> "低"
@@ -630,7 +648,9 @@ private fun buildNetworkProbeInfo(
         else -> "无AAAA"
     }
 
-    val stunNodeText = if (full && stunTotal > 0) "STUN节点 ${multiStun}/${stunTotal} 成功。" else ""
+    val stunRoundText = stun?.let { if (it.roundCount >= 2) "复测${it.roundCount}轮${if (it.roundStable) "稳定" else "有波动"}。" else "" } ?: ""
+    val stunBackupText = stun?.let { if (it.usedBackup) "已启用备用节点。" else "" } ?: ""
+    val stunNodeText = if (full && stunTotal > 0) "STUN节点 ${multiStun}/${stunTotal} 成功。${stunRoundText}${stunBackupText}" else ""
     val diagnosis = when {
         env.hasVpn -> "检测到VPN/代理，NAT、出口和IPv6结果仅供参考。"
         dns.fakeIpDetected -> "检测到Fake-IP，DNS可能被代理工具接管。"
@@ -638,7 +658,7 @@ private fun buildNetworkProbeInfo(
         !dns.systemHasAaaa && dns.globalHasAaaa -> "系统和国内备用DNS未返回IPv6，国外备用DNS可解析，可能存在地区DNS差异或本地DNS策略影响。"
         natType.startsWith("NAT4 / 对称") -> "${stunNodeText}多个可用STUN目标返回的外部端口不一致，当前可按对称型/NAT4理解，P2P/游戏联机可能受影响。"
         natType.startsWith("NAT3 / 端口受限") && weakPortChange -> "${stunNodeText}UDP基础探测可用，但可用节点不足以确认对称型，当前按端口受限型理解，建议换网络或再次刷新复测。"
-        natType.startsWith("NAT3 / 端口受限") -> "${stunNodeText}UDP基础探测可用，当前可按端口受限型理解，P2P/游戏联机可能受影响。"
+        natType.startsWith("NAT3 / 端口受限") -> "${stunNodeText}UDP基础探测可用，过滤行为为公共STUN多节点推断；如需完全确认，需要RFC5780/自建服务器复测。"
         natType.startsWith("NAT3 / 待确认") -> "公网IPv4可用，但STUN基础探测未成功，NAT类型暂按严格/待确认处理。"
         natType.startsWith("UDP") -> "多个STUN基础请求均失败，当前仅能判断为UDP受限/无法判断，可能是UDP被防火墙、代理或运营商限制。"
         natType.startsWith("NAT2") -> "UDP映射较稳定，普通联机能力中等。"
@@ -724,7 +744,8 @@ private fun detectTcpLocalPort(host: String, port: Int, timeoutMs: Int): Int {
 }
 
 private fun stunBindingProbe(): StunProbeResult {
-    // 6 主 + 2 备：首轮只跑 6 个主节点，主节点不足才启用备用，避免单个失败节点拖慢 NAT 解析。
+    // 方案A：公共 STUN 增强版。
+    // 关键点：同一个 UDP socket 复用本地端口、主 6 备 2、标准 2 轮复测、够票提前出结果、备用只补票。
     val primary = listOf(
         StunEndpoint("stun.cloudflare.com", 3478),
         StunEndpoint("stun.miwifi.com", 3478),
@@ -738,72 +759,120 @@ private fun stunBindingProbe(): StunProbeResult {
         StunEndpoint("stun.qq.com", 3478)
     )
 
-    val primaryResults = probeStunGroup(primary, minSuccess = 5, perNodeTimeoutMs = 900, overallTimeoutMs = 1800)
-    val allResults = primaryResults.toMutableList()
-    var totalCount = primary.size
+    DatagramSocket().use { socket ->
+        val roundResults = mutableListOf<List<StunProbeResult>>()
+        var usedBackup = false
+        var totalCount = primary.size
 
-    if (allResults.size < 4) {
-        val backupResults = probeStunGroup(backup, minSuccess = 1, perNodeTimeoutMs = 800, overallTimeoutMs = 1100)
-        allResults += backupResults
-        totalCount += backup.size
+        val firstPrimary = probeStunRoundSharedSocket(socket, primary, overallTimeoutMs = 1200)
+        var firstRound = firstPrimary
+        if (firstPrimary.map { it.sourceHost }.toSet().size < 4) {
+            usedBackup = true
+            totalCount = primary.size + backup.size
+            firstRound = firstPrimary + probeStunRoundSharedSocket(socket, backup, overallTimeoutMs = 850)
+        }
+        roundResults += firstRound
+
+        // 第二轮只复测首轮成功的主节点；如果主节点不足，再带上备用节点。
+        // 这样既能验证端口稳定性，又不会让失败节点拖慢解析。
+        val firstSuccessHosts = firstRound.map { it.sourceHost }.toSet()
+        val secondTargets = (primary + if (usedBackup) backup else emptyList())
+            .filter { it.key in firstSuccessHosts }
+            .ifEmpty { primary }
+        val secondRound = probeStunRoundSharedSocket(socket, secondTargets, overallTimeoutMs = if (usedBackup) 1200 else 1000)
+        if (secondRound.isNotEmpty()) roundResults += secondRound
+
+        val allResults = roundResults.flatten()
+        if (allResults.isEmpty()) error("STUN基础探测无响应")
+
+        val uniqueSuccess = allResults.map { it.sourceHost }.filter { it.isNotBlank() }.toSet().size
+        val stableRoundCount = roundResults.count { round ->
+            round.isNotEmpty() && round.map { it.mappedIp }.toSet().size <= 1 && round.map { it.mappedPort }.toSet().size <= 1
+        }
+        val representative = allResults.first()
+        return representative.copy(
+            successCount = uniqueSuccess,
+            totalCount = totalCount,
+            mappedPorts = allResults.map { it.mappedPort }.toSet(),
+            mappedIps = allResults.map { it.mappedIp }.toSet(),
+            roundCount = roundResults.size,
+            stableRoundCount = stableRoundCount,
+            usedBackup = usedBackup
+        )
     }
-
-    if (allResults.isEmpty()) error("STUN基础探测无响应")
-    val representative = allResults.first()
-    return representative.copy(
-        successCount = allResults.size,
-        totalCount = totalCount,
-        mappedPorts = allResults.map { it.mappedPort }.toSet(),
-        mappedIps = allResults.map { it.mappedIp }.toSet()
-    )
 }
 
-private fun probeStunGroup(
+private fun probeStunRoundSharedSocket(
+    socket: DatagramSocket,
     endpoints: List<StunEndpoint>,
-    minSuccess: Int,
-    perNodeTimeoutMs: Int,
     overallTimeoutMs: Long
 ): List<StunProbeResult> {
     if (endpoints.isEmpty()) return emptyList()
-    val executor = Executors.newFixedThreadPool(endpoints.size)
-    val completion = ExecutorCompletionService<StunProbeResult?>(executor)
-    return try {
-        endpoints.forEach { endpoint ->
-            completion.submit(Callable { probeSingleStun(endpoint, perNodeTimeoutMs) })
+    val pending = linkedMapOf<String, PendingStunRequest>()
+    endpoints.forEach { endpoint ->
+        val address = runCatching { resolveFirstIpv4(endpoint.host) }.getOrNull() ?: return@forEach
+        val request = buildStunBindingRequest()
+        pending[request.transactionId.stunKey()] = PendingStunRequest(endpoint, address, request)
+    }
+    if (pending.isEmpty()) return emptyList()
+
+    pending.values.forEach { sendStunPacket(socket, it) }
+
+    val results = mutableListOf<StunProbeResult>()
+    val completed = mutableSetOf<String>()
+    val start = System.currentTimeMillis()
+    val deadline = start + overallTimeoutMs.coerceIn(650L, 1800L)
+    val resendAt = start + (overallTimeoutMs.coerceIn(650L, 1800L) / 2)
+    var resent = false
+    val buffer = ByteArray(768)
+
+    while (completed.size < pending.size && System.currentTimeMillis() < deadline) {
+        val now = System.currentTimeMillis()
+        if (!resent && now >= resendAt) {
+            pending.filterKeys { it !in completed }.values.forEach { sendStunPacket(socket, it) }
+            resent = true
         }
-        val results = mutableListOf<StunProbeResult>()
-        val deadline = System.currentTimeMillis() + overallTimeoutMs
-        var completed = 0
-        while (completed < endpoints.size && System.currentTimeMillis() < deadline) {
-            val left = (deadline - System.currentTimeMillis()).coerceAtLeast(1L)
-            val future = completion.poll(left, TimeUnit.MILLISECONDS) ?: break
-            completed++
-            runCatching { future.get() }.getOrNull()?.let { results += it }
-            if (results.size >= minSuccess) break
-        }
-        results
-    } finally {
-        executor.shutdownNow()
+        val left = (deadline - now).coerceAtLeast(1L).coerceAtMost(220L).toInt()
+        socket.soTimeout = left
+        val packet = DatagramPacket(buffer, buffer.size)
+        val received = runCatching {
+            socket.receive(packet)
+            true
+        }.getOrDefault(false)
+        if (!received) continue
+        val txKey = stunTransactionKeyFromPacket(packet.data, packet.length) ?: continue
+        val pendingRequest = pending[txKey] ?: continue
+        if (txKey in completed) continue
+        val parsed = parseStunMappedAddress(
+            data = packet.data,
+            length = packet.length,
+            localPort = socket.localPort,
+            transactionId = pendingRequest.request.transactionId
+        ) ?: continue
+        results += parsed.copy(sourceHost = pendingRequest.endpoint.key)
+        completed += txKey
+    }
+    return results
+}
+
+private fun sendStunPacket(socket: DatagramSocket, pending: PendingStunRequest) {
+    runCatching {
+        socket.send(
+            DatagramPacket(
+                pending.request.bytes,
+                pending.request.bytes.size,
+                pending.address,
+                pending.endpoint.port
+            )
+        )
     }
 }
 
-private fun probeSingleStun(endpoint: StunEndpoint, perNodeTimeoutMs: Int): StunProbeResult? {
-    val server = runCatching { resolveFirstIpv4(endpoint.host) }.getOrNull() ?: return null
-    DatagramSocket().use { socket ->
-        socket.soTimeout = perNodeTimeoutMs.coerceIn(500, 1200)
-        val localPort = socket.localPort
-        repeat(2) {
-            val request = buildStunBindingRequest()
-            runCatching {
-                socket.send(DatagramPacket(request.bytes, request.bytes.size, server, endpoint.port))
-                val buf = ByteArray(768)
-                val packet = DatagramPacket(buf, buf.size)
-                socket.receive(packet)
-                parseStunMappedAddress(packet.data, packet.length, localPort, request.transactionId)?.let { return it }
-            }
-        }
-    }
-    return null
+private fun ByteArray.stunKey(): String = joinToString(separator = "") { b -> "%02x".format(b.toInt() and 0xFF) }
+
+private fun stunTransactionKeyFromPacket(data: ByteArray, length: Int): String? {
+    if (length < 20) return null
+    return data.copyOfRange(8, 20).stunKey()
 }
 
 private fun resolveFirstIpv4(host: String): InetAddress {
@@ -812,8 +881,8 @@ private fun resolveFirstIpv4(host: String): InetAddress {
 }
 
 private fun buildStunBindingRequest(): StunRequest {
-    val seed = System.nanoTime() xor Thread.currentThread().id
-    val tx = ByteArray(12) { (seed.shr((it % 8) * 8).toInt() and 0xFF).toByte() }
+    val tx = ByteArray(12)
+    synchronized(stunRandom) { stunRandom.nextBytes(tx) }
     val req = ByteArray(20)
     req[1] = 0x01.toByte()
     req[4] = 0x21.toByte()
