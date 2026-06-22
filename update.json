@@ -1,14 +1,14 @@
 {
   "versionCode": 84,
-  "versionName": "0.9.9",
+  "versionName": "v0.9.9",
   "title": "发现新版本 v0.9.9 build 84",
   "content": [
-    "发布性能核心：固定目标CPS，取消128动态调速",
+    "发布性能核心：固定目标CPS，取消128动态调速，默认起步200/s",
     "图表只保留会话数蓝线，取消CPS曲线和双Y轴",
-    "测试期间关闭Ping监控和公网/STUN刷新，减少额外IO和UI刷新",
-    "总计改为成功+失败，避免活动/失败/总计不一致",
-    "运营商卡片改回NAT置信度",
-    "FD安全线保护保留，接近Android Socket/FD上限立即收尾释放"
+    "保留Ping图表刷新；测试开始不自动刷新公网IP/STUN，减少额外IO",
+    "总计=成功+失败，避免活动/失败/总计不一致",
+    "网络信息右下卡片显示NAT置信度，底部标签显示运营商",
+    "FD安全线约32360：0失败跑到安全线释放；有失败按区间上限释放（<1000=120，<6000=200，<12000=300，>=12000=600）"
   ],
   "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v0.9.9-84/NetSessionTester-v0.9.9-build84-signed.apk",
   "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/latest",

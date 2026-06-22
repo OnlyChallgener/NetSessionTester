@@ -414,6 +414,7 @@ private data class NetworkEnvironment(
 
 private data class NetworkProbeInfo(
     val localIp: String = "检测中",
+    val carrier: String = "未知",
     val natType: String = "检测中",
     val latencyText: String = "检测中",
     val portText: String = "检测中",
@@ -715,8 +716,11 @@ private fun buildNetworkProbeInfo(
         else -> "网络信息已更新。"
     }
 
+    val carrierText = displayCarrierFromEnv(env, publicV4 ?: publicIpResult.ipv4, publicIpResult.ipv6)
+
     return NetworkProbeInfo(
         localIp = localIpv4 ?: localIpv6 ?: "不可用",
+        carrier = carrierText,
         natType = natType,
         latencyText = latencyMs?.let { "${it}ms" } ?: "不可用",
         portText = stun?.mappedPort?.toString() ?: tcpPort?.toString() ?: "不可用",
@@ -1151,7 +1155,7 @@ private fun NetSessionTesterApp() {
     var host by remember { mutableStateOf("www.baidu.com") }
     var port by remember { mutableStateOf("80") }
     var mode by remember { mutableStateOf(TestMode.IPV4_THEN_IPV6) }
-    var batchSize by remember { mutableStateOf("1000") }
+    var batchSize by remember { mutableStateOf("200") }
     var intervalMs by remember { mutableStateOf("100") }
     var timeoutMs by remember { mutableStateOf("1200") }
     var successLimit by remember { mutableStateOf("65535") }
@@ -1584,7 +1588,7 @@ private fun NetSessionTesterApp() {
                 host = host.ifBlank { "www.baidu.com" },
                 port = port.toIntOrNull() ?: 80,
                 mode = mode,
-                batchSize = batchSize.toIntOrNull() ?: 1000,
+                batchSize = batchSize.toIntOrNull() ?: 200,
                 intervalMs = intervalMs.toLongOrNull() ?: 100L,
                 timeoutMs = timeoutMs.toIntOrNull() ?: 1200,
                 successLimit = successLimit.toIntOrNull() ?: 65535,
@@ -2184,7 +2188,7 @@ private fun NetSessionTesterApp() {
                     onSave = { scope.launch { snackbarHostState.showSnackbar("参数已保存") } },
                     onRestoreDefault = {
                         host = "www.baidu.com"; port = "80"; mode = TestMode.IPV4_THEN_IPV6
-                        batchSize = "1000"; intervalMs = "100"; timeoutMs = "1200"
+                        batchSize = "200"; intervalMs = "100"; timeoutMs = "1200"
                         successLimit = "65535"; failureLimit = "1200"; keepConnections = true; maskPrivacy = false; historyLimit = "30"
                     }
                 )
@@ -2645,7 +2649,7 @@ private fun SettingsPage(
                     ParamField("失败兜底", failureLimit, onFailureLimitChange, Modifier.weight(1f))
                     ParamField("目标会话（条）", successLimit, onSuccessLimitChange, Modifier.weight(1f))
                 }
-                Text("性能发布版：目标CPS固定执行，内部100ms发射；取消128动态调速和CPS曲线；保留Ping图表刷新。命中FD/失败兜底立即收尾。", color = Muted, fontSize = 12.sp, lineHeight = 16.sp)
+                Text("性能发布版：默认目标CPS 200/s，固定执行；取消128动态调速和CPS曲线；保留Ping图表刷新。有失败按会话区间上限收尾，0失败时约32360会话触发FD保护释放。", color = Muted, fontSize = 12.sp, lineHeight = 16.sp)
             }
         }
         item {
@@ -3473,6 +3477,30 @@ private fun timeLabels(minX: Int, maxX: Int, step: Int): List<Int> {
     return labels.distinct()
 }
 
+
+private fun failureIntervalSummary(points: List<ChartPoint>, bucketSeconds: Int = 10): String {
+    if (points.isEmpty()) return ""
+    val sorted = points.sortedBy { it.elapsedSec }
+    val firstFailure = sorted.first().failure
+    val lastFailure = sorted.last().failure
+    if (lastFailure <= firstFailure) return ""
+    val buckets = linkedMapOf<Int, Int>()
+    var prevFailure = firstFailure
+    var prevSec = sorted.first().elapsedSec
+    sorted.drop(1).forEach { point ->
+        val delta = (point.failure - prevFailure).coerceAtLeast(0)
+        if (delta > 0) {
+            val bucketStart = (prevSec / bucketSeconds) * bucketSeconds
+            buckets[bucketStart] = (buckets[bucketStart] ?: 0) + delta
+        }
+        prevFailure = point.failure
+        prevSec = point.elapsedSec
+    }
+    if (buckets.isEmpty()) return ""
+    val top = buckets.entries.sortedByDescending { it.value }.take(3)
+    return "失败区间：" + top.joinToString("，") { (start, count) -> "${start}-${start + bucketSeconds}s +$count" }
+}
+
 @Composable
 private fun SessionGrowthChart(points: List<ChartPoint>) {
     val sorted = points.sortedBy { it.elapsedSec }
@@ -3519,6 +3547,10 @@ private fun SessionGrowthChart(points: List<ChartPoint>) {
         }
         Row(modifier = Modifier.fillMaxWidth().padding(start = 34.dp), horizontalArrangement = Arrangement.SpaceBetween) {
             timeLabels(minX, maxX, step).forEach { Text("${it}s", color = Muted, fontSize = 10.sp) }
+        }
+        val failSummary = failureIntervalSummary(sorted)
+        if (failSummary.isNotBlank()) {
+            Text(failSummary, color = ErrorRed, fontSize = 10.sp, lineHeight = 13.sp, fontWeight = FontWeight.Bold)
         }
         Text("说明：性能版只绘制会话数蓝线，CPS仅在上方文字显示，不参与图表重绘。", color = Muted, fontSize = 10.sp, lineHeight = 13.sp)
     }
@@ -3599,7 +3631,7 @@ private fun NetworkEnvironmentSettingsCard(
         FlowRow(horizontalArrangement = Arrangement.spacedBy(7.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             StatusChip(if (env.hasInternet) "可访问互联网" else "无互联网能力", if (env.hasInternet) GreenSoft else RedSoft, if (env.hasInternet) Green else ErrorRed, compact = true)
             StatusChip("网络 ${env.typeLabel}", Color(0xFFF3E8FF), Purple, compact = true)
-            StatusChip("NAT置信度 ${probeInfo.confidence}", Color(0xFFF3E8FF), Purple, compact = true)
+            StatusChip("运营商 ${probeInfo.carrier}", Color(0xFFF3E8FF), Purple, compact = true)
             if (env.hasVpn) StatusChip("VPN/代理仅供参考", Color(0xFFF3E8FF), Purple, compact = true)
         }
     }

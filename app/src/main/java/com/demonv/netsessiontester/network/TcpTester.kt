@@ -42,17 +42,17 @@ import java.util.concurrent.atomic.AtomicLong
  * 保留新版必要能力：
  * - releaseEpoch，防止释放后迟到 socket 回流；
  * - detachForRelease / closeDetachedSockets，配合释放进度 UI；
- * - 分段失败上限：<1000=120，<6000=200，<12000=360，>=12000=600；
+ * - 分段失败上限：<1000=120，<6000=200，<12000=300，>=12000=600；
  * - IPv4 6000+ / IPv6 默认高容量，不再顶部慢跑；
- * - active >= 32000 直接按设备 FD 保护收尾；
- * - active >= 31800 后进行批量裁剪，避免一次大批量超冲到 32500+ 导致闪退。
+ * - 0失败时 active/maxStable >= 32360 直接按设备 FD 保护收尾；有失败时按当前会话区间失败上限收尾；
+ * - active >= 32160 后进行批量裁剪，避免一次大批量超冲到 32500+ 导致闪退。
  */
 class TcpTester {
     private val socketLock = Mutex()
     private val releaseEpoch = AtomicLong(0L)
-    private val fdClipStart = 31_800
-    private val fdSafeStop = 32_000
-    private val fdEmergencyStop = 32_200
+    private val fdClipStart = 32_160
+    private val fdSafeStop = 32_360
+    private val fdEmergencyStop = 32_500
 
     private val heldSockets: MutableMap<IpProtocol, MutableList<Socket>> = mutableMapOf(
         IpProtocol.IPV4 to Collections.synchronizedList(mutableListOf()),
@@ -118,9 +118,9 @@ class TcpTester {
 
         val addressText = addresses.mapNotNull { it.hostAddress }.distinct()
         val targetCps = config.batchSize.coerceIn(20, 2_000)
-        val tickMs = 100L
+        val tickMs = 0L
         onLog(LogLine(level = LogLevel.SUCCESS, text = "${protocol.label} 解析成功：${addressText.joinToString(" / ")}"))
-        onLog(LogLine(level = LogLevel.INFO, text = "${protocol.label} 使用 v0.9.9 性能核心：固定目标 ${targetCps} CPS，100ms 发射，不做 128 动态调速，不绘制 CPS 曲线。"))
+        onLog(LogLine(level = LogLevel.INFO, text = "${protocol.label} 使用 v0.9.9 性能核心：固定目标 ${targetCps} CPS，高速批量发射，不做 128 动态调速，不绘制 CPS 曲线。"))
 
         var totalSuccess = 0
         var totalFailure = 0
@@ -130,6 +130,8 @@ class TcpTester {
         var lastEmitSuccess = 0
         var lastLogAt = 0L
         var lastCps = 0
+        var lastGrowthAt = System.currentTimeMillis()
+        var lastGrowthSuccess = 0
         var stats = ProtocolStats(protocol = protocol, phase = "建连中", resolvedAddresses = addressText, lastAdded = targetCps)
         val errors = linkedMapOf<String, Int>()
         onStats(stats)
@@ -148,8 +150,9 @@ class TcpTester {
                 onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 触发 Android FD/Socket 上限保护：峰值 $maxStable，活动 $activeBefore，停止新增"))
                 break
             }
-            if (totalFailure >= config.failureLimit) {
-                onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 达到失败兜底：${config.failureLimit}"))
+            val preFailureLimit = minOf(config.failureLimit, failureLimitFor(maxStable))
+            if (totalFailure >= preFailureLimit) {
+                onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 达到分段失败上限：$totalFailure/$preFailureLimit"))
                 break
             }
 
@@ -161,7 +164,16 @@ class TcpTester {
                 maxStable >= fdClipStart || activeBefore >= fdClipStart -> (fdSafeStop - maxOf(maxStable, activeBefore)).coerceAtLeast(0)
                 else -> rawTargetBatch
             }
-            val targetBatch = minOf(rawTargetBatch, fdBudget)
+            val segmentFailureLimitBefore = minOf(config.failureLimit, failureLimitFor(maxStable))
+            val segmentFailureBudgetBefore = (segmentFailureLimitBefore - totalFailure).coerceAtLeast(0)
+            // 低会话失败上限是 120。为了避免目标不可用时第一批直接打出 200/1000 个失败，
+            // 在 1000 会话以内把单批限制到本区间剩余失败预算；中高会话 0 失败时不限制批量，保证性能。
+            val failureAwareBatch = if (maxStable < 1_000) {
+                minOf(rawTargetBatch, segmentFailureBudgetBefore.coerceAtLeast(1))
+            } else {
+                rawTargetBatch
+            }
+            val targetBatch = minOf(failureAwareBatch, fdBudget)
             if (targetBatch <= 0) {
                 errors["FD上限"] = (errors["FD上限"] ?: 0) + 1
                 stats = stats.copy(phase = "FD上限", errorSummary = errors.toMap(), maxStableSessions = maxStable)
@@ -170,7 +182,9 @@ class TcpTester {
                 break
             }
 
-            val failureBudget = (config.failureLimit - totalFailure).coerceAtLeast(0)
+            val activeForFailureLimit = maxOf(maxStable, activeBefore)
+            val currentFailureLimit = minOf(config.failureLimit, failureLimitFor(activeForFailureLimit))
+            val failureBudget = (currentFailureLimit - totalFailure).coerceAtLeast(0)
             if (failureBudget <= 0) break
 
             val batchResult = openBatchWithFailureBudget(
@@ -187,7 +201,18 @@ class TcpTester {
             totalSuccess += batchResult.successSockets.size
             totalFailure += failAdd
             totalAttempts = totalSuccess + totalFailure
-            batchResult.errors.forEach { (key, value) -> errors[key] = (errors[key] ?: 0) + value }
+            var remainingErrorBudget = failAdd
+            batchResult.errors.forEach { (key, value) ->
+                if (remainingErrorBudget > 0) {
+                    val add = value.coerceAtMost(remainingErrorBudget)
+                    errors[key] = (errors[key] ?: 0) + add
+                    remainingErrorBudget -= add
+                }
+            }
+            if (totalSuccess > lastGrowthSuccess) {
+                lastGrowthSuccess = totalSuccess
+                lastGrowthAt = System.currentTimeMillis()
+            }
 
             if (batchResult.successSockets.isNotEmpty()) {
                 socketLock.withLock {
@@ -201,13 +226,25 @@ class TcpTester {
 
             val active = totalSuccess
             maxStable = maxOf(maxStable, active)
+            val hasConnectFailure = failAdd > 0 || batchResult.errors.isNotEmpty()
+            val activeFailureLimit = minOf(
+                config.failureLimit,
+                failureLimitFor(activeForFailureLimit),
+                failureLimitFor(maxOf(maxStable, active))
+            )
+            val failureLimitHit = totalFailure >= activeFailureLimit
+            val lowSessionNoGrowthHit = active < 1_000 && totalSuccess > 0 && (System.currentTimeMillis() - lastGrowthAt) >= lowNoGrowthStopMs(active)
+            if (lowSessionNoGrowthHit) {
+                errors["低会话无增长"] = (errors["低会话无增长"] ?: 0) + 1
+            }
             val terminal =
                 maxStable >= fdSafeStop ||
                     active >= fdSafeStop ||
                     maxStable >= fdEmergencyStop ||
                     active >= fdEmergencyStop ||
+                    failureLimitHit ||
+                    lowSessionNoGrowthHit ||
                     totalSuccess >= config.successLimit ||
-                    totalFailure >= config.failureLimit ||
                     batchResult.errors.containsKey("FD上限")
 
             val now = System.currentTimeMillis()
@@ -248,10 +285,15 @@ class TcpTester {
                         onStats(stats)
                         onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 触发 Android FD/Socket 上限保护：峰值 $maxStable，活动 $active，停止新增并释放"))
                     }
-                    totalFailure >= config.failureLimit -> {
+                    failureLimitHit -> {
                         stats = stats.copy(phase = "失败上限", errorSummary = errors.toMap(), maxStableSessions = maxStable)
                         onStats(stats)
-                        onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 达到失败兜底：${config.failureLimit}"))
+                        onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 达到分段失败上限：$totalFailure/$activeFailureLimit，停止新增并释放"))
+                    }
+                    lowSessionNoGrowthHit -> {
+                        stats = stats.copy(phase = "低会话无增长", errorSummary = errors.toMap(), maxStableSessions = maxStable)
+                        onStats(stats)
+                        onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 低会话阶段 ${lowNoGrowthStopMs(active) / 1000}s 无增长，停止新增并释放"))
                     }
                 }
                 break
@@ -259,15 +301,18 @@ class TcpTester {
 
             val cost = System.currentTimeMillis() - tickStartedAt
             val sleep = tickMs - cost
-            if (sleep > 0) delay(sleep)
+            if (sleep > 0) delay(sleep) else if (cost <= 0L) kotlinx.coroutines.yield()
         }
 
         val finalActive = activeCount(protocol)
         val finalPeak = maxOf(maxStable, finalActive, totalSuccess)
         val finalTotal = totalSuccess + totalFailure
+        val finalFailureLimit = minOf(config.failureLimit, failureLimitFor(finalPeak))
         val finalPhase = when {
             finalPeak >= fdSafeStop || stats.errorSummary.containsKey("FD上限") || stats.phase == "FD上限" -> "FD上限"
-            totalFailure >= config.failureLimit -> "失败上限"
+            stats.phase == "低会话无增长" -> "低会话无增长"
+            totalFailure >= finalFailureLimit -> "失败上限"
+            totalFailure > 0 -> "出现失败"
             totalSuccess >= config.successLimit -> "测试完成"
             else -> "测试完成"
         }
@@ -296,24 +341,25 @@ class TcpTester {
     }
 
     private fun batchFor(config: SessionConfig, protocol: IpProtocol, peak: Int): Int {
-        // v0.9.9 performance：batchSize == 目标 CPS；固定 100ms tick。
-        // 1000 CPS => 每 tick 发 100 个，避免一次性开 1000 个协程导致 UI/FD 抖动。
-        val perTick = ((config.batchSize.coerceIn(20, 2_000) * 100L + 999L) / 1000L).toInt()
-        return perTick.coerceIn(1, 250)
+        // v0.9.9 build84 performance-fix：batchSize 直接作为高速批量窗口。
+        // 上一版按 100ms 切成 100/批，并且等待整批 connect 完成；在公网目标上平均 CPS 会被 RTT/系统调度拖到 300~500，
+        // 出现 32k 会话花 100s+。这里恢复接近 v0.9.7 图4的高速核心：一次发起接近目标CPS的批量，
+        // 由 32360 FD 安全线裁剪尾段；失败按会话区间阈值硬收尾，优先保证耗时短、不卡死、不闪退。
+        val target = config.batchSize.coerceIn(20, 2_000)
+        val nearFd = peak >= fdClipStart
+        return if (nearFd) target.coerceIn(1, 250) else target.coerceIn(1, 1_200)
     }
 
     private fun failureLimitFor(peak: Int): Int = when {
         peak < 1_000 -> 120
         peak < 6_000 -> 200
-        peak < 12_000 -> 360
+        peak < 12_000 -> 300
         else -> 600
     }
 
-    private fun meaningfulGrowthStep(peak: Int): Int = when {
-        peak < 1_000 -> 30
-        peak < 6_000 -> 80
-        peak < 12_000 -> 140
-        else -> 220
+    private fun lowNoGrowthStopMs(active: Int): Long = when {
+        active < 500 -> 3_000L
+        else -> 5_000L
     }
 
     private suspend fun openBatchWithFailureBudget(
