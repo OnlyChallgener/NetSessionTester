@@ -39,14 +39,20 @@ class TcpTester {
     private val socketLock = Mutex()
 
     /**
-     * Android 常见 FD 上限约 32760/32768。
-     * build63 实测在 32147 附近进入长尾，继续低 CPS 重试会拖到 200s+。
-     * 这里增加“活动连接保护线”：到 32000 直接按设备 FD 上限保护收尾，
-     * 给 Compose、日志、DNS、通知和释放流程预留更大余量，避免 UI 不同步或闪退。
+     * Android 常见单进程 FD 上限约 32768，但 App 自身还会占用 DNS、通知、日志、
+     * 图表、pipe/eventfd、STUN/Ping 等 FD。build66 不再固定 32000/32600 作为主判断，
+     * 而是实时读取 /proc/self/fd 与 /proc/self/limits，按剩余 FD 分三段保护。
+     *
+     * 预警：剩余 <= 900，降低 CPS，继续接近上限；
+     * 保护：剩余 <= 500，进入顶部确认，只允许少量补测；
+     * 硬停：剩余 <= 300，立即停止新增并释放。
+     *
+     * active 32600 仅作为最终兜底，防止某些 ROM 读取 FD 异常时继续冲顶。
      */
-    private val fdActiveGuardStop = 32_000
-    private val fdHardStop = 32_300
-    private val fdReserve = 468
+    private val fdActiveFallbackStop = 32_600
+    private val fdWarnRemaining = 900
+    private val fdGuardRemaining = 500
+    private val fdHardRemaining = 300
 
     /** Low memory reserve. If free heap is lower than this, stop before OOM. */
     private val memoryReserveBytes = 48L * 1024L * 1024L
@@ -116,7 +122,7 @@ class TcpTester {
 
         val addressText = addresses.mapNotNull { it.hostAddress }.distinct()
         onLog(LogLine(level = LogLevel.SUCCESS, text = "${protocol.label} 解析成功：${addressText.joinToString(" / ")}"))
-        onLog(LogLine(level = LogLevel.INFO, text = "${protocol.label} 智能策略：起始CPS ${config.batchSize}，快速加速，顶部确认硬止损，活动连接 32000 保护"))
+        onLog(LogLine(level = LogLevel.INFO, text = "${protocol.label} 智能策略：起始CPS ${config.batchSize}，快速加速，顶部确认硬止损，FD动态保护：剩余900预警/500保护/300硬停，活动32600兜底"))
 
         var totalSuccess = 0
         var totalFailure = 0
@@ -133,6 +139,7 @@ class TcpTester {
         var topConfirmStartFailure = 0
         var currentCps = config.batchSize.coerceIn(40, 1500)
         var fdSeen = false
+        var lastFdGuardLogAt = 0L
         var stopPhase: String? = null
         val errors = linkedMapOf<String, Int>()
         val samples = ArrayDeque<WindowSample>()
@@ -251,10 +258,10 @@ class TcpTester {
             val windowTotal = windowSuccess + windowFailure
             val failRate = if (windowTotal <= 0) 0f else windowFailure.toFloat() / windowTotal.toFloat()
 
-            if (activeBefore >= fdActiveGuardStop) {
+            if (activeBefore >= fdActiveFallbackStop) {
                 fdSeen = true
                 stopPhase = "FD上限"
-                onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 活动连接已到 $activeBefore，达到 Android FD 保护线 $fdActiveGuardStop，立即停止新增"))
+                onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 活动连接已到 $activeBefore，达到 Android FD 兜底保护线 $fdActiveFallbackStop，立即停止新增"))
                 break
             }
 
@@ -284,10 +291,10 @@ class TcpTester {
             }
 
             when {
-                activeBefore >= fdHardStop -> {
+                activeBefore >= fdActiveFallbackStop -> {
                     fdSeen = true
                     stopPhase = "FD上限"
-                    onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 接近 Android FD 上限，活动连接 $activeBefore，已保护停止"))
+                    onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 接近 Android FD 兜底上限，活动连接 $activeBefore，已保护停止"))
                     break
                 }
                 consecutiveFailure >= consecutiveLimit -> {
@@ -320,6 +327,19 @@ class TcpTester {
             val requestedLaunchCount = ((currentCps * tickMs) / 1000L).toInt().coerceIn(1, 640).coerceAtMost(remainingSuccess)
 
             val pressure = resourcePressure(requestedLaunchCount)
+            if (pressure.fdRemaining in 1..fdWarnRemaining) {
+                if (pressure.fdRemaining <= fdGuardRemaining) {
+                    enterTopConfirm(now, peak, "FD保护")
+                    currentCps = currentCps.coerceAtMost(80).coerceAtLeast(8)
+                } else {
+                    currentCps = currentCps.coerceAtMost(260).coerceAtLeast(30)
+                }
+                if (now - lastFdGuardLogAt >= 1_000L) {
+                    lastFdGuardLogAt = now
+                    val level = if (pressure.fdRemaining <= fdGuardRemaining) LogLevel.WARN else LogLevel.INFO
+                    onLog(LogLine(level = level, text = "${protocol.label} FD动态保护：${pressure.detail}，策略CPS已限制为 $currentCps"))
+                }
+            }
             if (pressure.stopNow) {
                 recordFailure(pressure.reason)
                 stopPhase = pressure.reason
@@ -516,45 +536,65 @@ class TcpTester {
         val fdNow = currentFdCount()
         val fdMax = maxOpenFiles()
         val heapFree = availableHeapBytes()
-        val fdSafeMax = minOf(fdHardStop, (fdMax - fdReserve).coerceAtLeast(128))
 
         if (heapFree in 1 until memoryReserveBytes) {
             return ResourcePressure(
                 stopNow = true,
                 allowedLaunch = 0,
                 reason = "资源保护",
-                detail = "可用堆内存约 ${heapFree / 1024 / 1024}MB，低于保护阈值 ${memoryReserveBytes / 1024 / 1024}MB"
+                detail = "可用堆内存约 ${heapFree / 1024 / 1024}MB，低于保护阈值 ${memoryReserveBytes / 1024 / 1024}MB",
+                fdNow = fdNow,
+                fdMax = fdMax,
+                fdRemaining = -1
             )
         }
 
-        if (fdNow > 0) {
-            val remaining = fdSafeMax - fdNow
-            if (remaining <= 0) {
+        if (fdNow > 0 && fdMax > 0) {
+            val remaining = (fdMax - fdNow).coerceAtLeast(0)
+            if (remaining <= fdHardRemaining) {
                 return ResourcePressure(
                     stopNow = true,
                     allowedLaunch = 0,
                     reason = "FD上限",
-                    detail = "当前FD=$fdNow，保护线=$fdSafeMax，系统上限=$fdMax"
+                    detail = "当前FD=$fdNow，剩余=$remaining，硬停阈值=$fdHardRemaining，系统上限=$fdMax",
+                    fdNow = fdNow,
+                    fdMax = fdMax,
+                    fdRemaining = remaining
                 )
             }
-            val allowed = remaining.coerceAtMost(requestedLaunch)
-            if (allowed <= 0) {
-                return ResourcePressure(
-                    stopNow = true,
-                    allowedLaunch = 0,
-                    reason = "FD上限",
-                    detail = "当前FD=$fdNow，保护线=$fdSafeMax，系统上限=$fdMax"
-                )
-            }
+
+            val allowed = when {
+                remaining <= fdGuardRemaining -> {
+                    // 保护区：只允许极少量补测，避免一下子吃掉硬停冗余。
+                    minOf(requestedLaunch, (remaining - fdHardRemaining).coerceIn(1, 40))
+                }
+                remaining <= fdWarnRemaining -> {
+                    // 预警区：降低冲刺速度，但仍允许继续接近真实上限。
+                    minOf(requestedLaunch, (remaining - fdGuardRemaining).coerceIn(20, 180))
+                }
+                else -> requestedLaunch
+            }.coerceAtLeast(1)
+
             return ResourcePressure(
                 stopNow = false,
                 allowedLaunch = allowed,
                 reason = "",
-                detail = "当前FD=$fdNow，保护线=$fdSafeMax，系统上限=$fdMax"
+                detail = "当前FD=$fdNow，剩余=$remaining，预警=$fdWarnRemaining，保护=$fdGuardRemaining，硬停=$fdHardRemaining，系统上限=$fdMax",
+                fdNow = fdNow,
+                fdMax = fdMax,
+                fdRemaining = remaining
             )
         }
 
-        return ResourcePressure(stopNow = false, allowedLaunch = requestedLaunch, reason = "", detail = "FD未知")
+        return ResourcePressure(
+            stopNow = false,
+            allowedLaunch = requestedLaunch,
+            reason = "",
+            detail = "FD未知",
+            fdNow = fdNow,
+            fdMax = fdMax,
+            fdRemaining = -1
+        )
     }
 
     private suspend fun resolveInetAddresses(host: String, protocol: IpProtocol): List<InetAddress> = withContext(Dispatchers.IO) {
@@ -632,7 +672,10 @@ class TcpTester {
         val stopNow: Boolean,
         val allowedLaunch: Int,
         val reason: String,
-        val detail: String
+        val detail: String,
+        val fdNow: Int,
+        val fdMax: Int,
+        val fdRemaining: Int
     )
 
     private data class WindowSample(val timeMs: Long, val success: Int, val failure: Int)
