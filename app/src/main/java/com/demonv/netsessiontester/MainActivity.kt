@@ -1151,9 +1151,9 @@ private fun NetSessionTesterApp() {
     var host by remember { mutableStateOf("www.baidu.com") }
     var port by remember { mutableStateOf("80") }
     var mode by remember { mutableStateOf(TestMode.IPV4_THEN_IPV6) }
-    var batchSize by remember { mutableStateOf("128") }
-    var intervalMs by remember { mutableStateOf("500") }
-    var timeoutMs by remember { mutableStateOf("3000") }
+    var batchSize by remember { mutableStateOf("1000") }
+    var intervalMs by remember { mutableStateOf("100") }
+    var timeoutMs by remember { mutableStateOf("1200") }
     var successLimit by remember { mutableStateOf("65535") }
     var failureLimit by remember { mutableStateOf("1200") }
     var keepConnections by remember { mutableStateOf(true) }
@@ -1173,7 +1173,6 @@ private fun NetSessionTesterApp() {
     var chartMode by remember { mutableStateOf(ChartMode.GROWTH) }
     var chartPoints by remember { mutableStateOf<List<ChartPoint>>(emptyList()) }
     var lastChartSampleAt by remember { mutableStateOf<Map<IpProtocol, Long>>(emptyMap()) }
-    var lastStatsUiAt by remember { mutableStateOf<Map<IpProtocol, Long>>(emptyMap()) }
     var pingPoints by remember { mutableStateOf<List<PingPoint>>(emptyList()) }
     var pingJob by remember { mutableStateOf<Job?>(null) }
     var pingIntervalLabel by remember { mutableStateOf("AUTO") }
@@ -1583,13 +1582,13 @@ private fun NetSessionTesterApp() {
         val config = runCatching {
             SessionConfig(
                 host = host.ifBlank { "www.baidu.com" },
-                port = port.toInt(),
+                port = port.toIntOrNull() ?: 80,
                 mode = mode,
-                batchSize = batchSize.toInt(),
-                intervalMs = intervalMs.toLong(),
-                timeoutMs = timeoutMs.toInt(),
-                successLimit = successLimit.toInt(),
-                failureLimit = failureLimit.toInt(),
+                batchSize = batchSize.toIntOrNull() ?: 1000,
+                intervalMs = intervalMs.toLongOrNull() ?: 100L,
+                timeoutMs = timeoutMs.toIntOrNull() ?: 1200,
+                successLimit = successLimit.toIntOrNull() ?: 65535,
+                failureLimit = failureLimit.toIntOrNull() ?: 1200,
                 keepConnectionsAfterStop = true
             ).normalized()
         }.getOrElse { error ->
@@ -1869,7 +1868,7 @@ private fun NetSessionTesterApp() {
         currentTestConfig = config
         testNetworkSignature = currentNetworkSignature(context)
         resetCurrentCharts()
-        refreshPublicIp()
+        // 性能发布版：测试开始时不再触发公网/IP/STUN刷新，避免抢占网络与 IO。
         manualStopRequested = false
         state = state.copy(
             isAdding = true,
@@ -1881,7 +1880,8 @@ private fun NetSessionTesterApp() {
             summary = null,
             error = null
         )
-        appendLog(LogLine(level = LogLevel.INFO, text = "目标：${config.host}:${config.port} | 模式：${config.mode.label} | 新增值：${config.batchSize}/批 | 间隔：${config.intervalMs}ms | v0.9.7高速核心"))
+        appendLog(LogLine(level = LogLevel.INFO, text = "目标：${config.host}:${config.port} | 模式：${config.mode.label} | 目标CPS：${config.batchSize}/s | v0.9.9性能核心"))
+        // 发布版保留 Ping 图表刷新：独立协程 + 秒级聚合，不参与会话发射调度。
         startPingMonitor(config, startedAt)
         startNetworkWatch(startedAt, testNetworkSignature)
 
@@ -1897,10 +1897,6 @@ private fun NetSessionTesterApp() {
                 val pair = tester.runSessionHoldTest(
                     rawConfig = config,
                     onStats = statsHandler@ { stats ->
-                        val nowUi = System.currentTimeMillis()
-                        val lastUi = lastStatsUiAt[stats.protocol] ?: 0L
-                        if (nowUi - lastUi < 200L) return@statsHandler
-                        lastStatsUiAt = lastStatsUiAt + (stats.protocol to nowUi)
                         if (activeRunId != startedAt || !state.isAdding) return@statsHandler
                         recordChartPoint(stats)
                         val nextPhase = if (stats.phase.contains("无增长") || stats.phase.contains("确认")) RunPhase.TopConfirm else RunPhase.Running
@@ -2188,7 +2184,7 @@ private fun NetSessionTesterApp() {
                     onSave = { scope.launch { snackbarHostState.showSnackbar("参数已保存") } },
                     onRestoreDefault = {
                         host = "www.baidu.com"; port = "80"; mode = TestMode.IPV4_THEN_IPV6
-                        batchSize = "128"; intervalMs = "500"; timeoutMs = "3000"
+                        batchSize = "1000"; intervalMs = "100"; timeoutMs = "1200"
                         successLimit = "65535"; failureLimit = "1200"; keepConnections = true; maskPrivacy = false; historyLimit = "30"
                     }
                 )
@@ -2443,8 +2439,8 @@ private fun HistoryProtocolCard(title: String, stats: ProtocolStats, maskPrivacy
             MetricTile("总计", stats.totalAttempts.toString(), Navy, Modifier.weight(1f))
         }
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            MetricTile("新增", stats.lastAdded.toString(), Blue, Modifier.weight(1f))
-            MetricTile("CPS", "${stats.cps}/s", Blue, Modifier.weight(1f))
+            MetricTile("目标CPS", "${stats.lastAdded}/s", Blue, Modifier.weight(1f))
+            MetricTile("实际CPS", "${stats.cps}/s", Blue, Modifier.weight(1f))
             MetricTile("峰值", protocolPeak(stats).toString(), Green, Modifier.weight(1f))
         }
         if (stats.resolvedAddresses.isNotEmpty()) {
@@ -2642,15 +2638,14 @@ private fun SettingsPage(
             SoftCard {
                 SectionTitle("≡", "会话参数", Green)
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    ParamField("新增值/批", batchSize, onBatchSizeChange, Modifier.weight(1f))
-                    ParamField("调度间隔ms", intervalMs, onIntervalMsChange, Modifier.weight(1f))
+                    ParamField("目标CPS", batchSize, onBatchSizeChange, Modifier.weight(1f))
+                    ParamField("超时（ms）", timeoutMs, onTimeoutMsChange, Modifier.weight(1f))
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    ParamField("超时（ms）", timeoutMs, onTimeoutMsChange, Modifier.weight(1f))
                     ParamField("失败兜底", failureLimit, onFailureLimitChange, Modifier.weight(1f))
+                    ParamField("目标会话（条）", successLimit, onSuccessLimitChange, Modifier.weight(1f))
                 }
-                ParamField("目标会话（条）", successLimit, onSuccessLimitChange, Modifier.fillMaxWidth())
-                Text("默认 128 使用高速自适应；修改后按每批新增值执行。间隔默认 500ms，命中失败/FD 上限即收尾。", color = Muted, fontSize = 12.sp, lineHeight = 16.sp)
+                Text("性能发布版：目标CPS固定执行，内部100ms发射；取消128动态调速和CPS曲线；保留Ping图表刷新。命中FD/失败兜底立即收尾。", color = Muted, fontSize = 12.sp, lineHeight = 16.sp)
             }
         }
         item {
@@ -3380,8 +3375,8 @@ private fun SessionStatsCard(
         }
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             MetricTile("总计", stats.totalAttempts.toString(), Navy, Modifier.weight(1f))
-            MetricTile("新增", stats.lastAdded.toString(), Blue, Modifier.weight(1f))
-            MetricTile("CPS", "${stats.cps}/s", Blue, Modifier.weight(1f))
+            MetricTile("目标CPS", "${stats.lastAdded}/s", Blue, Modifier.weight(1f))
+            MetricTile("实际CPS", "${stats.cps}/s", Blue, Modifier.weight(1f))
         }
         if (stats.resolvedAddresses.isNotEmpty()) {
             Text(
@@ -3485,25 +3480,15 @@ private fun SessionGrowthChart(points: List<ChartPoint>) {
     val maxXRaw = sorted.lastOrNull()?.elapsedSec ?: (minX + 1)
     val maxX = maxOf(minX + 1, maxXRaw)
     val maxSessionY = sessionYAxisMax(sorted.maxOfOrNull { it.active } ?: 0)
-    val maxCpsRaw = sorted.maxOfOrNull { it.cps } ?: 0
-    val maxCpsY = when {
-        maxCpsRaw <= 300 -> 300
-        maxCpsRaw <= 600 -> 600
-        maxCpsRaw <= 900 -> 900
-        maxCpsRaw <= 1200 -> 1200
-        else -> (((maxCpsRaw + 299) / 300) * 300).coerceAtMost(2000)
-    }
     val step = chartXAxisStep(maxX - minX)
     val last = sorted.lastOrNull()
     Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("会话数 & CPS", color = Muted, fontSize = 10.sp)
+            Text("会话数", color = Muted, fontSize = 10.sp)
             Spacer(Modifier.width(8.dp))
             Text("● 会话数", color = Blue, fontSize = 10.sp, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.width(8.dp))
-            Text("● CPS", color = Orange, fontSize = 10.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.weight(1f))
-            Text(last?.let { "${it.elapsedSec}s 活动 ${it.active}｜CPS ${it.cps}/s" } ?: "", color = Muted, fontSize = 10.sp, maxLines = 1)
+            Text(last?.let { "${it.elapsedSec}s 活动 ${it.active}｜失败 ${it.failure}" } ?: "", color = Muted, fontSize = 10.sp, maxLines = 1)
         }
         Row(modifier = Modifier.fillMaxWidth().height(158.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(modifier = Modifier.width(34.dp).height(145.dp), verticalArrangement = Arrangement.SpaceBetween) {
@@ -3518,40 +3503,24 @@ private fun SessionGrowthChart(points: List<ChartPoint>) {
                 }
                 fun xOf(p: ChartPoint) = w * ((p.elapsedSec - minX).toFloat() / (maxX - minX).toFloat())
                 fun ySession(v: Int) = h - h * (v.coerceIn(0, maxSessionY).toFloat() / maxSessionY.toFloat())
-                fun yCps(v: Int) = h - h * (v.coerceIn(0, maxCpsY).toFloat() / maxCpsY.toFloat())
-                fun pathSession(value: (ChartPoint) -> Int): Path {
-                    val path = Path()
-                    sorted.forEachIndexed { index, p ->
-                        val x = xOf(p); val y = ySession(value(p))
-                        if (index == 0) path.moveTo(x, y) else path.lineTo(x, y)
-                    }
-                    return path
-                }
-                fun pathCps(value: (ChartPoint) -> Int): Path {
-                    val path = Path()
-                    sorted.forEachIndexed { index, p ->
-                        val x = xOf(p); val y = yCps(value(p))
-                        if (index == 0) path.moveTo(x, y) else path.lineTo(x, y)
-                    }
-                    return path
-                }
                 if (sorted.size > 1) {
-                    drawPath(pathSession { it.active }, color = Blue, style = Stroke(width = 4f, cap = StrokeCap.Round))
-                    drawPath(pathCps { it.cps }, color = Orange, style = Stroke(width = 3f, cap = StrokeCap.Round))
+                    val path = Path()
+                    sorted.forEachIndexed { index, p ->
+                        val x = xOf(p)
+                        val y = ySession(p.active)
+                        if (index == 0) path.moveTo(x, y) else path.lineTo(x, y)
+                    }
+                    drawPath(path, color = Blue, style = Stroke(width = 4f, cap = StrokeCap.Round))
                 }
                 sorted.forEach { p ->
                     drawCircle(Blue, radius = 2.6f, center = Offset(xOf(p), ySession(p.active)))
-                    drawCircle(Orange, radius = 2.3f, center = Offset(xOf(p), yCps(p.cps)))
                 }
             }
-            Column(modifier = Modifier.width(32.dp).height(145.dp), verticalArrangement = Arrangement.SpaceBetween, horizontalAlignment = Alignment.End) {
-                axisLabels(maxCpsY).forEach { Text(it.toString(), color = Orange, fontSize = 9.sp, maxLines = 1) }
-            }
         }
-        Row(modifier = Modifier.fillMaxWidth().padding(start = 34.dp, end = 32.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+        Row(modifier = Modifier.fillMaxWidth().padding(start = 34.dp), horizontalArrangement = Arrangement.SpaceBetween) {
             timeLabels(minX, maxX, step).forEach { Text("${it}s", color = Muted, fontSize = 10.sp) }
         }
-        Text("说明：蓝线为会话数（左轴），橙线为 CPS（右轴），共用下方时间轴。", color = Muted, fontSize = 10.sp, lineHeight = 13.sp)
+        Text("说明：性能版只绘制会话数蓝线，CPS仅在上方文字显示，不参与图表重绘。", color = Muted, fontSize = 10.sp, lineHeight = 13.sp)
     }
 }
 
@@ -3618,7 +3587,7 @@ private fun NetworkEnvironmentSettingsCard(
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
             InfoMetricTile("D", "DNS诊断", probeInfo.dnsStatus, Color(0xFFF3E8FF), Purple, Modifier.weight(1f))
-            InfoMetricTile("O", "运营商", displayCarrierFromEnv(env, publicIpResult.ipv4, publicIpResult.ipv6), Color(0xFFF8FAFC), Muted, Modifier.weight(1f))
+            InfoMetricTile("C", "NAT置信度", probeInfo.confidence, Color(0xFFF8FAFC), Muted, Modifier.weight(1f))
         }
         Text(
             probeInfo.diagnosis,
@@ -3630,7 +3599,7 @@ private fun NetworkEnvironmentSettingsCard(
         FlowRow(horizontalArrangement = Arrangement.spacedBy(7.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             StatusChip(if (env.hasInternet) "可访问互联网" else "无互联网能力", if (env.hasInternet) GreenSoft else RedSoft, if (env.hasInternet) Green else ErrorRed, compact = true)
             StatusChip("网络 ${env.typeLabel}", Color(0xFFF3E8FF), Purple, compact = true)
-            StatusChip("运营商 ${displayCarrierFromEnv(env, publicIpResult.ipv4, publicIpResult.ipv6)}", Color(0xFFF3E8FF), Purple, compact = true)
+            StatusChip("NAT置信度 ${probeInfo.confidence}", Color(0xFFF3E8FF), Purple, compact = true)
             if (env.hasVpn) StatusChip("VPN/代理仅供参考", Color(0xFFF3E8FF), Purple, compact = true)
         }
     }

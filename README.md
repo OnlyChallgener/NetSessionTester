@@ -1,7 +1,20 @@
-# NetSessionTester v0.9.9 build84 local
+# NetSessionTester v0.9.9 build84 performance release
 
-# NetSessionTester v0.9.9 build 83
+这版是发布用性能版：优先保证速度、稳定、不闪退。
 
-自测代码包。当前版本基于 v0.9.7 高速测速核心，增加 FD / Socket 上限优先判断和运营商识别。
+核心策略：
 
-此包不是 APK，需要通过 GitHub Actions / Gradle 编译后安装。
+- 目标CPS固定执行，不再做 128 动态调速。
+- 默认目标CPS 1000，内部 100ms tick 发射。
+- 测试页主图只画会话数蓝线，CPS只显示文字。
+- 测试期间关闭 Ping 监控和公网/STUN刷新，避免抢占网络和 UI。
+- 总计统一为成功 + 失败。
+- NAT信息恢复显示 NAT置信度。
+- 保留 FD 保护，接近 Android Socket/FD 上限立即收尾释放。
+
+编译：
+
+```bash
+./gradlew clean
+./gradlew assembleRelease
+```
