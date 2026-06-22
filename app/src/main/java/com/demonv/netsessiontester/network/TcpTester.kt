@@ -124,7 +124,7 @@ class TcpTester {
         onLog(LogLine(level = LogLevel.SUCCESS, text = "${protocol.label} 解析成功：${addressText.joinToString(" / ")}"))
         val userCps = config.batchSize.coerceIn(20, 1500)
         val manualCpsMode = userCps != 128
-        onLog(LogLine(level = LogLevel.INFO, text = if (manualCpsMode) "${protocol.label} 静默策略：用户新增值 ${userCps} CPS，按该值重分配上限；失败、无增长和FD保护仍会自动降速/停止" else "${protocol.label} 智能策略：默认128 CPS起步，快速接近上限，顶部精准确认限时，FD动态保护：剩余900预警/500保护/300硬停，活动32600兜底"))
+        onLog(LogLine(level = LogLevel.INFO, text = if (manualCpsMode) "${protocol.label} 静默策略：用户新增值 ${userCps} CPS 作为手动上限，平滑起步；失败、增长效率低、无增长和FD保护仍会自动降速/停止" else "${protocol.label} 智能策略：默认128 CPS起步，快速接近上限，低容量/平台期快速确认，顶部精准确认限时，FD动态保护：剩余900预警/500保护/300硬停，活动32600兜底"))
 
         var totalSuccess = 0
         var totalFailure = 0
@@ -134,14 +134,17 @@ class TcpTester {
         var lastTotalAttempts = 0
         var lastStatsAt = System.currentTimeMillis()
         var lastLogAt = 0L
-        var lastGrowthAt = System.currentTimeMillis()
+        val testStartedAt = System.currentTimeMillis()
+        var lastGrowthAt = testStartedAt
         var lastMeaningfulPeak = 0
         var topConfirmStartedAt = 0L
         var topConfirmStartPeak = 0
         var topConfirmStartFailure = 0
         var lowCpsStartedAt = 0L
         var lowCpsStartPeak = 0
-        var currentCps = userCps.coerceIn(40, 1500)
+        // 用户修改“新增值”后，它作为手动 CPS 上限，不作为一上来硬冲的固定 CPS。
+        // 这样既尊重用户上限，又避免低容量网络被第一批过大并发打出大量失败。
+        var currentCps = if (manualCpsMode) userCps.coerceIn(20, 300) else 128
         var fdSeen = false
         var lastFdGuardLogAt = 0L
         var stopPhase: String? = null
@@ -174,18 +177,21 @@ class TcpTester {
             else -> 120
         }
         fun noGrowthWindowMs(peak: Int): Long = when {
-            peak < 3_000 -> 5_000L
+            peak < 1_000 -> 4_500L
+            peak < 3_000 -> 5_500L
             peak < 10_000 -> 8_000L
             else -> 8_000L
         }
         fun noGrowthFailThreshold(peak: Int): Float = when {
-            peak < 3_000 -> 0.55f
-            peak < 10_000 -> 0.60f
+            peak < 1_000 -> 0.35f
+            peak < 3_000 -> 0.45f
+            peak < 10_000 -> 0.55f
             else -> 0.35f
         }
         fun topConfirmMs(peak: Int): Long = when {
-            peak < 3_000 -> 8_000L
-            peak < 10_000 -> 10_000L
+            peak < 1_000 -> 5_000L
+            peak < 3_000 -> 6_000L
+            peak < 10_000 -> 8_500L
             else -> 10_000L
         }
         fun connectTimeoutFor(peak: Int, fdRemaining: Int, inTopConfirm: Boolean): Int {
@@ -197,9 +203,35 @@ class TcpTester {
             }
         }
         fun topGrowthStopThreshold(peak: Int): Int = when {
-            peak < 3_000 -> 50
-            peak < 10_000 -> 100
+            peak < 1_000 -> 40
+            peak < 3_000 -> 60
+            peak < 10_000 -> 120
             else -> 180
+        }
+        fun lowCapacityGrowthThreshold(peak: Int): Int = when {
+            peak < 500 -> 45
+            peak < 1_000 -> 80
+            else -> 120
+        }
+        fun efficiencyWindowMs(peak: Int): Long = when {
+            peak < 1_000 -> 4_000L
+            peak < 3_000 -> 6_000L
+            peak < 10_000 -> 8_000L
+            else -> 10_000L
+        }
+        fun efficiencyThreshold(peak: Int): Float = when {
+            peak < 1_000 -> 0.25f
+            peak < 3_000 -> 0.23f
+            peak < 10_000 -> 0.20f
+            else -> 0.15f
+        }
+        fun recentFailureSignal(windowFailRate: Float, shortFailRate: Float, totalFailures: Int, peak: Int): Boolean {
+            if (totalFailures <= 0) return false
+            return when {
+                peak < 1_000 -> shortFailRate >= 0.25f || windowFailRate >= 0.30f
+                peak < 10_000 -> shortFailRate >= 0.18f || windowFailRate >= 0.25f
+                else -> shortFailRate >= 0.12f || windowFailRate >= 0.20f
+            }
         }
         fun enterTopConfirm(now: Long, peak: Int, reason: String) {
             if (topConfirmStartedAt == 0L) {
@@ -279,12 +311,34 @@ class TcpTester {
             val (windowSuccess, windowFailure) = windowStats(noGrowthWindowMs(peak))
             val windowTotal = windowSuccess + windowFailure
             val failRate = if (windowTotal <= 0) 0f else windowFailure.toFloat() / windowTotal.toFloat()
+            val runElapsed = now - testStartedAt
+            val (shortSuccess, shortFailure) = windowStats(4_000L)
+            val shortTotal = shortSuccess + shortFailure
+            val shortFailRate = if (shortTotal <= 0) 0f else shortFailure.toFloat() / shortTotal.toFloat()
+            val efficiencyMs = efficiencyWindowMs(peak)
+            val (effSuccess, effFailure) = windowStats(efficiencyMs)
+            val effAttempts = effSuccess + effFailure
+            val growthEfficiency = if (effAttempts <= 0) 1f else effSuccess.toFloat() / effAttempts.toFloat()
 
             if (activeBefore >= fdActiveFallbackStop) {
                 fdSeen = true
                 stopPhase = "FD上限"
                 onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 活动连接已到 $activeBefore，达到 Android FD 兜底保护线 $fdActiveFallbackStop，立即停止新增"))
                 break
+            }
+
+            // 低容量网络快速确认：失败率已明显升高、增长又慢时，不再长时间低 CPS 磨。
+            if (topConfirmStartedAt == 0L && runElapsed >= 8_000L && peak in 1 until 1_000 && shortTotal >= 80 && shortFailRate >= 0.35f && shortSuccess < lowCapacityGrowthThreshold(peak)) {
+                enterTopConfirm(now, peak, "低容量快速确认")
+                currentCps = currentCps.coerceAtMost(32).coerceAtLeast(16)
+                onLog(LogLine(level = LogLevel.WARN, text = "${protocol.label} 低容量快速确认：近4秒成功 $shortSuccess、失败 $shortFailure，失败率 ${(shortFailRate * 100).roundToInt()}%，进入短确认"))
+            }
+
+            // 平台期增长效率判断：连接数还在缓慢增加，但新增收益已经很低时进入顶部确认。
+            if (topConfirmStartedAt == 0L && runElapsed >= 12_000L && peak >= 1_000 && effAttempts >= 90 && growthEfficiency < efficiencyThreshold(peak) && activeBefore >= (peak * 0.97f).roundToInt()) {
+                enterTopConfirm(now, peak, "增长效率低")
+                currentCps = currentCps.coerceAtMost(32).coerceAtLeast(16)
+                onLog(LogLine(level = LogLevel.WARN, text = "${protocol.label} 增长效率偏低：近${efficiencyMs / 1000}s 成功 $effSuccess / 尝试 $effAttempts，效率 ${(growthEfficiency * 100).roundToInt()}%，进入顶部确认"))
             }
 
             if (topConfirmStartedAt > 0L) {
@@ -344,18 +398,29 @@ class TcpTester {
                 currentCps = currentCps.coerceAtMost(32).coerceAtLeast(16)
             }
 
-            if (currentCps <= 36 && peak > 0 && activeBefore >= (peak * 0.98f).roundToInt()) {
+            val confirmationLowCps = currentCps <= 36 && peak > 0 && activeBefore >= (peak * 0.97f).roundToInt() &&
+                (topConfirmStartedAt > 0L || recentFailureSignal(failRate, shortFailRate, totalFailure, peak))
+            if (confirmationLowCps) {
                 if (lowCpsStartedAt == 0L) {
                     lowCpsStartedAt = now
                     lowCpsStartPeak = peak
-                } else if (now - lowCpsStartedAt >= 12_000L && peak - lowCpsStartPeak < topGrowthStopThreshold(peak)) {
-                    stopPhase = "无增长确认"
-                    onLog(LogLine(level = LogLevel.WARN, text = "${protocol.label} 低 CPS 确认已达 ${(now - lowCpsStartedAt) / 1000}s，增长不足，停止新增避免长尾"))
-                    break
+                } else {
+                    val lowElapsed = now - lowCpsStartedAt
+                    val lowGrowth = peak - lowCpsStartPeak
+                    val lowHardLimit = when {
+                        peak < 1_000 -> 6_000L
+                        peak < 10_000 -> 9_000L
+                        else -> 11_000L
+                    }
+                    if (lowElapsed >= lowHardLimit) {
+                        stopPhase = "无增长确认"
+                        onLog(LogLine(level = LogLevel.WARN, text = "${protocol.label} 低 CPS 确认已达 ${lowElapsed / 1000}s，累计增长 $lowGrowth，停止新增避免长尾"))
+                        break
+                    }
                 }
             } else {
                 lowCpsStartedAt = 0L
-                lowCpsStartPeak = peak
+                lowCpsStartPeak = 0
             }
 
             val remainingSuccess = config.successLimit - totalSuccess

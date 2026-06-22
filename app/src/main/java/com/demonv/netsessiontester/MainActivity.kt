@@ -3482,17 +3482,32 @@ private fun SessionGrowthChart(points: List<ChartPoint>) {
                     }
                     return path
                 }
-                fun pathCps(value: (ChartPoint) -> Int): Path {
-                    val path = Path()
-                    sorted.forEachIndexed { index, p ->
-                        val x = xOf(p); val y = yCps(value(p))
-                        if (index == 0) path.moveTo(x, y) else path.lineTo(x, y)
+                fun cpsSegments(value: (ChartPoint) -> Int): List<Path> {
+                    val paths = mutableListOf<Path>()
+                    var path = Path()
+                    var started = false
+                    var lastSec: Int? = null
+                    sorted.forEach { p ->
+                        val x = xOf(p)
+                        val y = yCps(value(p))
+                        val gap = lastSec?.let { p.elapsedSec - it } ?: 0
+                        if (!started || gap > 2) {
+                            if (started) paths += path
+                            path = Path().apply { moveTo(x, y) }
+                            started = true
+                        } else {
+                            path.lineTo(x, y)
+                        }
+                        lastSec = p.elapsedSec
                     }
-                    return path
+                    if (started) paths += path
+                    return paths
                 }
                 if (sorted.size > 1) {
                     drawPath(pathSession { it.active }, color = Blue, style = Stroke(width = 4f, cap = StrokeCap.Round))
-                    drawPath(pathCps { it.cps }, color = Orange, style = Stroke(width = 3f, cap = StrokeCap.Round))
+                    cpsSegments { it.cps }.forEach { path ->
+                        drawPath(path, color = Orange, style = Stroke(width = 3f, cap = StrokeCap.Round))
+                    }
                 }
                 sorted.forEach { p ->
                     drawCircle(Blue, radius = 2.6f, center = Offset(xOf(p), ySession(p.active)))
