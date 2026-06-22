@@ -171,6 +171,12 @@ class TcpTester {
             // 但 FD、失败率、无增长和后台保护仍会继续降速/止损。
             return if (manualCpsMode) userCps.coerceIn(20, 1500) else smartCap
         }
+        fun runningCpsFloor(peak: Int): Int = when {
+            peak >= 30_000 -> 180
+            peak >= 10_000 -> 150
+            peak >= 3_000 -> 96
+            else -> 64
+        }
         fun meaningfulGrowthStep(peak: Int): Int = when {
             peak < 3_000 -> 12
             peak < 10_000 -> 40
@@ -189,10 +195,11 @@ class TcpTester {
             else -> 0.35f
         }
         fun topConfirmMs(peak: Int): Long = when {
+            peak >= 32_000 -> 6_000L
+            peak >= 10_000 -> 8_000L
             peak < 1_000 -> 5_000L
             peak < 3_000 -> 6_000L
-            peak < 10_000 -> 8_500L
-            else -> 10_000L
+            else -> 8_000L
         }
         fun connectTimeoutFor(peak: Int, fdRemaining: Int, inTopConfirm: Boolean): Int {
             val base = config.timeoutMs.coerceIn(2_500, 5_000)
@@ -203,10 +210,11 @@ class TcpTester {
             }
         }
         fun topGrowthStopThreshold(peak: Int): Int = when {
+            peak >= 32_000 -> 80
+            peak >= 10_000 -> 150
             peak < 1_000 -> 40
             peak < 3_000 -> 60
-            peak < 10_000 -> 120
-            else -> 180
+            else -> 120
         }
         fun lowCapacityGrowthThreshold(peak: Int): Int = when {
             peak < 500 -> 45
@@ -325,6 +333,17 @@ class TcpTester {
                 stopPhase = "FD上限"
                 onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 活动连接已到 $activeBefore，达到 Android FD 兜底保护线 $fdActiveFallbackStop，立即停止新增"))
                 break
+            }
+
+            // 高连接数接近 FD 区间时，不允许很早掉到个位数 CPS。
+            // 30000 以上仍用中速推进；32200 以上才进入限时顶部确认。
+            if (topConfirmStartedAt == 0L && activeBefore >= 30_000) {
+                currentCps = currentCps.coerceAtLeast(runningCpsFloor(activeBefore)).coerceAtMost(cpsCap(activeBefore))
+            }
+            if (topConfirmStartedAt == 0L && activeBefore >= 32_200) {
+                enterTopConfirm(now, peak, "FD接近确认")
+                currentCps = currentCps.coerceAtMost(32).coerceAtLeast(16)
+                onLog(LogLine(level = LogLevel.WARN, text = "${protocol.label} 已接近 FD 上限区间：活动 $activeBefore，进入 6 秒顶部确认"))
             }
 
             // 低容量网络快速确认：失败率已明显升高、增长又慢时，不再长时间低 CPS 磨。
@@ -479,7 +498,9 @@ class TcpTester {
             if (activeAfter >= lastMeaningfulPeak + meaningfulGrowthStep(maxOf(prevPeak, activeAfter))) {
                 lastMeaningfulPeak = activeAfter
                 lastGrowthAt = System.currentTimeMillis()
-                if (topConfirmStartedAt > 0L) {
+                // 普通平台期允许“有效增长”退出确认；但 FD 附近的确认不能被零散增长反复重置，
+                // 否则会重新出现 100s+ 的低 CPS 长尾。
+                if (topConfirmStartedAt > 0L && topConfirmStartPeak < 30_000 && activeAfter < 30_000) {
                     topConfirmStartedAt = 0L
                     topConfirmStartPeak = 0
                     topConfirmStartFailure = 0
@@ -494,12 +515,18 @@ class TcpTester {
             val recentTotal = recentS + recentF
             val recentFailRate = if (recentTotal <= 0) 0f else recentF.toFloat() / recentTotal.toFloat()
             val recentSuccessRate = if (recentTotal <= 0) 1f else recentS.toFloat() / recentTotal.toFloat()
-            currentCps = when {
-                recentFailRate > 0.50f -> (currentCps * 0.30f).roundToInt().coerceAtLeast(20)
-                recentFailRate > 0.20f -> (currentCps * 0.50f).roundToInt().coerceAtLeast(30)
+            val cpsCandidate = when {
+                recentFailRate > 0.50f -> (currentCps * 0.30f).roundToInt()
+                recentFailRate > 0.20f -> (currentCps * 0.50f).roundToInt()
                 topConfirmStartedAt == 0L && recentSuccessRate >= 0.95f && batchFailure <= 1 && activeAfter >= activeBefore -> (currentCps * 1.70f).roundToInt()
                 else -> currentCps
-            }.coerceIn(5, cpsCap(maxOf(maxStable, activeAfter)))
+            }
+            val cpsPeak = maxOf(maxStable, activeAfter)
+            currentCps = if (topConfirmStartedAt > 0L) {
+                cpsCandidate.coerceIn(16, 32)
+            } else {
+                cpsCandidate.coerceIn(runningCpsFloor(cpsPeak), cpsCap(cpsPeak))
+            }
 
             emitStats()
 
