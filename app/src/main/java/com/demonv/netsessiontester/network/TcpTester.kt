@@ -39,11 +39,14 @@ class TcpTester {
     private val socketLock = Mutex()
 
     /**
-     * Android 常见 FD 上限约 32760/32768。这里强制在 32500 附近保护停止，
-     * 给 Compose、日志、DNS、通知和释放流程预留 FD，避免 UI 不同步或闪退。
+     * Android 常见 FD 上限约 32760/32768。
+     * build63 实测在 32147 附近进入长尾，继续低 CPS 重试会拖到 200s+。
+     * 这里增加“活动连接保护线”：到 32000 直接按设备 FD 上限保护收尾，
+     * 给 Compose、日志、DNS、通知和释放流程预留更大余量，避免 UI 不同步或闪退。
      */
-    private val fdHardStop = 32_500
-    private val fdReserve = 268
+    private val fdActiveGuardStop = 32_000
+    private val fdHardStop = 32_300
+    private val fdReserve = 468
 
     /** Low memory reserve. If free heap is lower than this, stop before OOM. */
     private val memoryReserveBytes = 48L * 1024L * 1024L
@@ -113,7 +116,7 @@ class TcpTester {
 
         val addressText = addresses.mapNotNull { it.hostAddress }.distinct()
         onLog(LogLine(level = LogLevel.SUCCESS, text = "${protocol.label} 解析成功：${addressText.joinToString(" / ")}"))
-        onLog(LogLine(level = LogLevel.INFO, text = "${protocol.label} 智能策略：起始CPS ${config.batchSize}，动态调速，无增长确认，FD 32500 保护"))
+        onLog(LogLine(level = LogLevel.INFO, text = "${protocol.label} 智能策略：起始CPS ${config.batchSize}，快速加速，顶部确认硬止损，活动连接 32000 保护"))
 
         var totalSuccess = 0
         var totalFailure = 0
@@ -124,7 +127,11 @@ class TcpTester {
         var lastStatsAt = System.currentTimeMillis()
         var lastLogAt = 0L
         var lastGrowthAt = System.currentTimeMillis()
-        var currentCps = config.batchSize.coerceIn(40, 1200)
+        var lastMeaningfulPeak = 0
+        var topConfirmStartedAt = 0L
+        var topConfirmStartPeak = 0
+        var topConfirmStartFailure = 0
+        var currentCps = config.batchSize.coerceIn(40, 1500)
         var fdSeen = false
         var stopPhase: String? = null
         val errors = linkedMapOf<String, Int>()
@@ -132,23 +139,48 @@ class TcpTester {
         var stats = ProtocolStats(protocol = protocol, phase = "建连中", resolvedAddresses = addressText)
         onStats(stats)
 
-        fun dynamicConsecutiveLimit(peak: Int): Int = ((peak * 0.025f).roundToInt()).coerceIn(40, 250)
-        fun dynamicTotalLimit(peak: Int): Int = ((peak * 0.06f).roundToInt()).coerceIn(100, 1200)
+        fun dynamicConsecutiveLimit(peak: Int): Int = ((peak * 0.012f).roundToInt()).coerceIn(25, 120)
+        fun dynamicTotalLimit(peak: Int): Int = ((peak * 0.015f).roundToInt()).coerceIn(80, 400)
+        fun topFailureBudget(peak: Int): Int = when {
+            peak < 3_000 -> 25
+            peak < 10_000 -> 50
+            else -> 90
+        }
         fun cpsCap(peak: Int): Int = when {
-            peak < 2_000 -> 200
-            peak < 6_000 -> 400
-            peak < 10_000 -> 700
-            else -> 1000
+            peak < 2_000 -> 300
+            peak < 6_000 -> 600
+            peak < 10_000 -> 900
+            else -> 1200
+        }
+        fun meaningfulGrowthStep(peak: Int): Int = when {
+            peak < 3_000 -> 12
+            peak < 10_000 -> 40
+            else -> 120
         }
         fun noGrowthWindowMs(peak: Int): Long = when {
-            peak < 3_000 -> 5_000L
-            peak < 10_000 -> 8_000L
-            else -> 12_000L
+            peak < 3_000 -> 4_000L
+            peak < 10_000 -> 6_000L
+            else -> 6_000L
         }
         fun noGrowthFailThreshold(peak: Int): Float = when {
-            peak < 3_000 -> 0.70f
-            peak < 10_000 -> 0.75f
-            else -> 0.80f
+            peak < 3_000 -> 0.55f
+            peak < 10_000 -> 0.60f
+            else -> 0.35f
+        }
+        fun topConfirmMs(peak: Int): Long = when {
+            peak < 3_000 -> 2_500L
+            peak < 10_000 -> 3_500L
+            else -> 4_000L
+        }
+        fun enterTopConfirm(now: Long, peak: Int, reason: String) {
+            if (topConfirmStartedAt == 0L) {
+                topConfirmStartedAt = now
+                topConfirmStartPeak = peak
+                topConfirmStartFailure = totalFailure
+                currentCps = currentCps.coerceAtMost(20).coerceAtLeast(8)
+                // 顶部确认只写一次日志，避免高频刷屏。
+                // forceLog 仍由 emitStats 统一控制 1 秒节流。
+            }
         }
         fun addSample(success: Int, failure: Int) {
             val now = System.currentTimeMillis()
@@ -214,10 +246,42 @@ class TcpTester {
             val activeBefore = activeCount(protocol)
             val peak = maxOf(maxStable, activeBefore)
             val consecutiveLimit = dynamicConsecutiveLimit(peak)
-            val totalLimit = dynamicTotalLimit(peak).coerceAtLeast(config.failureLimit.coerceAtMost(1200))
+            val totalLimit = minOf(dynamicTotalLimit(peak), config.failureLimit.coerceAtLeast(80))
             val (windowSuccess, windowFailure) = windowStats(noGrowthWindowMs(peak))
             val windowTotal = windowSuccess + windowFailure
             val failRate = if (windowTotal <= 0) 0f else windowFailure.toFloat() / windowTotal.toFloat()
+
+            if (activeBefore >= fdActiveGuardStop) {
+                fdSeen = true
+                stopPhase = "FD上限"
+                onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 活动连接已到 $activeBefore，达到 Android FD 保护线 $fdActiveGuardStop，立即停止新增"))
+                break
+            }
+
+            if (topConfirmStartedAt > 0L) {
+                val topElapsed = now - topConfirmStartedAt
+                val topGrowth = peak - topConfirmStartPeak
+                val topFailures = totalFailure - topConfirmStartFailure
+                val confirmMs = topConfirmMs(peak)
+                val topBudget = topFailureBudget(peak)
+                when {
+                    topFailures >= topBudget -> {
+                        stopPhase = "无增长确认"
+                        onLog(LogLine(level = LogLevel.WARN, text = "${protocol.label} 顶部确认失败已达 $topFailures/$topBudget，停止新增，避免低 CPS 长尾"))
+                        break
+                    }
+                    topElapsed >= confirmMs && topGrowth < meaningfulGrowthStep(peak) -> {
+                        stopPhase = "无增长确认"
+                        onLog(LogLine(level = LogLevel.WARN, text = "${protocol.label} 顶部确认 ${topElapsed / 1000.0}s 无有效增长，停止新增"))
+                        break
+                    }
+                    topElapsed >= confirmMs * 2 -> {
+                        stopPhase = "无增长确认"
+                        onLog(LogLine(level = LogLevel.WARN, text = "${protocol.label} 顶部确认超时，停止新增，避免长尾拖延"))
+                        break
+                    }
+                }
+            }
 
             when {
                 activeBefore >= fdHardStop -> {
@@ -236,21 +300,24 @@ class TcpTester {
                     onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 累计失败达到动态上限：$totalFailure/$totalLimit，已停止新增"))
                     break
                 }
-                peak > 0 && now - lastGrowthAt >= noGrowthWindowMs(peak) && failRate >= noGrowthFailThreshold(peak) && activeBefore >= (peak * 0.95f).roundToInt() -> {
-                    stopPhase = "无增长确认"
-                    onLog(LogLine(level = LogLevel.WARN, text = "${protocol.label} ${noGrowthWindowMs(peak) / 1000}秒无有效增长，失败率 ${(failRate * 100).roundToInt()}%，已确认到顶"))
-                    break
+                peak > 0 && now - lastGrowthAt >= noGrowthWindowMs(peak) && activeBefore >= (peak * 0.985f).roundToInt() -> {
+                    enterTopConfirm(now, peak, "无有效增长")
+                    currentCps = currentCps.coerceAtMost(16).coerceAtLeast(8)
+                }
+                peak > 10_000 && windowFailure >= 8 && failRate >= noGrowthFailThreshold(peak) && activeBefore >= (peak * 0.98f).roundToInt() -> {
+                    enterTopConfirm(now, peak, "失败抬头")
+                    currentCps = currentCps.coerceAtMost(16).coerceAtLeast(8)
                 }
             }
 
-            if (now - lastGrowthAt >= noGrowthWindowMs(peak) / 2) {
-                currentCps = currentCps.coerceAtMost(20).coerceAtLeast(5)
+            if (topConfirmStartedAt > 0L || now - lastGrowthAt >= noGrowthWindowMs(peak) / 2) {
+                currentCps = currentCps.coerceAtMost(20).coerceAtLeast(8)
             }
 
             val remainingSuccess = config.successLimit - totalSuccess
             if (remainingSuccess <= 0) break
-            val tickMs = config.intervalMs.coerceIn(300L, 1_000L)
-            val requestedLaunchCount = ((currentCps * tickMs) / 1000L).toInt().coerceIn(1, 512).coerceAtMost(remainingSuccess)
+            val tickMs = config.intervalMs.coerceIn(350L, 700L)
+            val requestedLaunchCount = ((currentCps * tickMs) / 1000L).toInt().coerceIn(1, 640).coerceAtMost(remainingSuccess)
 
             val pressure = resourcePressure(requestedLaunchCount)
             if (pressure.stopNow) {
@@ -283,7 +350,16 @@ class TcpTester {
             addSample(batchSuccess, batchFailure)
 
             val activeAfter = activeCount(protocol)
-            if (activeAfter > maxStable) lastGrowthAt = System.currentTimeMillis()
+            val prevPeak = maxStable
+            if (activeAfter >= lastMeaningfulPeak + meaningfulGrowthStep(maxOf(prevPeak, activeAfter))) {
+                lastMeaningfulPeak = activeAfter
+                lastGrowthAt = System.currentTimeMillis()
+                if (topConfirmStartedAt > 0L) {
+                    topConfirmStartedAt = 0L
+                    topConfirmStartPeak = 0
+                    topConfirmStartFailure = 0
+                }
+            }
             maxStable = maxOf(maxStable, activeAfter)
             if (batch.errors.keys.any { it == "FD上限" || it == "资源保护" }) fdSeen = true
 
@@ -294,7 +370,7 @@ class TcpTester {
             currentCps = when {
                 recentFailRate > 0.50f -> (currentCps * 0.30f).roundToInt().coerceAtLeast(20)
                 recentFailRate > 0.20f -> (currentCps * 0.50f).roundToInt().coerceAtLeast(30)
-                recentSuccessRate >= 0.95f && batchFailure <= 1 && activeAfter >= activeBefore -> (currentCps * 1.50f).roundToInt()
+                topConfirmStartedAt == 0L && recentSuccessRate >= 0.95f && batchFailure <= 1 && activeAfter >= activeBefore -> (currentCps * 1.70f).roundToInt()
                 else -> currentCps
             }.coerceIn(5, cpsCap(maxOf(maxStable, activeAfter)))
 
@@ -343,7 +419,7 @@ class TcpTester {
     ): BatchOpenResult = coroutineScope {
         if (releaseEpoch.get() != expectedEpoch) return@coroutineScope BatchOpenResult(emptyList(), emptyMap())
         try {
-            val safeCount = count.coerceIn(1, 512)
+            val safeCount = count.coerceIn(1, 640)
             val jobs = (0 until safeCount).map { index ->
                 async(Dispatchers.IO) {
                     if (releaseEpoch.get() != expectedEpoch) {

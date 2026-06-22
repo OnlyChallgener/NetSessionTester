@@ -44,7 +44,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -1251,10 +1250,28 @@ private fun NetSessionTesterApp() {
         runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
     }
 
+    fun isIgnoredUpdate(info: UpdateInfo): Boolean {
+        val ignoredCode = updatePrefs.getInt("ignored_version_code", -1)
+        return ignoredCode == info.versionCode
+    }
+
     fun postponeUpdate() {
         updatePrefs.edit().putLong("postpone_until", System.currentTimeMillis() + UPDATE_POSTPONE_MS).apply()
         showUpdateDialog = false
         scope.launch { snackbarHostState.showSnackbar("已稍后更新，8分钟内不再自动提醒") }
+    }
+
+    fun ignoreUpdate(info: UpdateInfo) {
+        updatePrefs.edit()
+            .putInt("ignored_version_code", info.versionCode)
+            .putString("ignored_version_name", info.versionName)
+            .putLong("ignored_at", System.currentTimeMillis())
+            .remove("postpone_until")
+            .apply()
+        latestUpdate = null
+        updateAvailable = false
+        showUpdateDialog = false
+        scope.launch { snackbarHostState.showSnackbar("已忽略 v${info.versionName} build ${info.versionCode}，下个版本再自动提醒") }
     }
 
     fun checkForUpdate(manual: Boolean = false) {
@@ -1263,11 +1280,14 @@ private fun NetSessionTesterApp() {
             runCatching { fetchUpdateInfo() }
                 .onSuccess { info ->
                     val hasNew = info.versionCode > currentAppVersionCode(context)
+                    val ignored = hasNew && isIgnoredUpdate(info)
                     latestUpdate = info.takeIf { hasNew }
-                    updateAvailable = hasNew
-                    if (hasNew) {
+                    updateAvailable = hasNew && !ignored
+                    if (hasNew && (manual || !ignored)) {
                         showVersionDialog = false
                         showUpdateDialog = true
+                    } else if (hasNew && ignored) {
+                        showUpdateDialog = false
                     } else if (manual) {
                         snackbarHostState.showSnackbar("已是最新版本")
                     }
@@ -1321,8 +1341,9 @@ private fun NetSessionTesterApp() {
             } else {
                 runCatching { fetchUpdateInfo() }.onSuccess { info ->
                     val hasNew = info.versionCode > currentAppVersionCode(context)
+                    val ignored = hasNew && isIgnoredUpdate(info)
                     latestUpdate = info.takeIf { hasNew }
-                    updateAvailable = hasNew
+                    updateAvailable = hasNew && !ignored
                 }
             }
         }
@@ -1935,6 +1956,7 @@ private fun NetSessionTesterApp() {
                 info = info,
                 onDismiss = { showUpdateDialog = false },
                 onPostpone = { postponeUpdate() },
+                onIgnore = { ignoreUpdate(info) },
                 onOpenGithub = { openGithub(info.githubUrl.ifBlank { PROJECT_GITHUB_URL }) },
                 onUpdateNow = { startUpdateDownload(info) }
             )
@@ -2928,6 +2950,7 @@ private fun UpdateAvailableDialog(
     info: UpdateInfo,
     onDismiss: () -> Unit,
     onPostpone: () -> Unit,
+    onIgnore: () -> Unit,
     onOpenGithub: () -> Unit,
     onUpdateNow: () -> Unit
 ) {
@@ -2937,8 +2960,13 @@ private fun UpdateAvailableDialog(
             Button(onClick = onUpdateNow, shape = ShapeM) { Text("一键更新", fontSize = 13.sp) }
         },
         dismissButton = {
-            Row {
+            FlowRow(
+                horizontalArrangement = Arrangement.End,
+                verticalArrangement = Arrangement.Center,
+                modifier = Modifier.fillMaxWidth()
+            ) {
                 TextButton(onClick = onPostpone) { Text("稍后更新", fontSize = 13.sp) }
+                TextButton(onClick = onIgnore) { Text("忽略本版", fontSize = 13.sp) }
                 TextButton(onClick = onOpenGithub) { Text("打开 GitHub", fontSize = 13.sp, fontWeight = FontWeight.Bold) }
             }
         },
@@ -2962,6 +2990,7 @@ private fun UpdateAvailableDialog(
                         Text(item, color = TextDark, fontSize = 12.sp, lineHeight = 16.sp, modifier = Modifier.weight(1f))
                     }
                 }
+                Text("忽略本版后不会自动弹出当前版本；手动检测更新仍可再次打开，直到下一个版本会重新自动提醒。", color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
                 Text("如果下载速度较慢，建议切换代理网络或打开 GitHub 手动下载。", color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
             }
         },
@@ -3941,9 +3970,8 @@ private fun BottomNav(selectedTab: MainTab, onSelect: (MainTab) -> Unit) {
             .fillMaxWidth()
             .height(58.dp)
             .background(Color(0xFFEAF2FF))
-            .navigationBarsPadding()
-            .padding(horizontal = 22.dp, vertical = 2.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
+            .padding(horizontal = 18.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         MainTab.entries.forEach { tab ->
@@ -3955,11 +3983,11 @@ private fun BottomNav(selectedTab: MainTab, onSelect: (MainTab) -> Unit) {
             }
             Column(
                 modifier = Modifier
-                    .width(86.dp)
-                    .height(56.dp)
+                    .weight(1f)
+                    .height(50.dp)
                     .background(if (selected) Color(0xFFEBDCFD) else Color.Transparent, RoundedCornerShape(24.dp))
                     .clickable { onSelect(tab) }
-                    .padding(vertical = 5.dp),
+                    .padding(top = 5.dp, bottom = 4.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Center
             ) {
@@ -3967,10 +3995,17 @@ private fun BottomNav(selectedTab: MainTab, onSelect: (MainTab) -> Unit) {
                     image,
                     contentDescription = tab.label,
                     tint = if (selected) Blue else Muted,
-                    modifier = Modifier.width(22.dp).height(22.dp)
+                    modifier = Modifier.width(21.dp).height(21.dp)
                 )
-                Spacer(Modifier.height(3.dp))
-                Text(tab.label, color = TextDark, fontSize = 11.sp, lineHeight = 13.sp, maxLines = 1)
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    tab.label,
+                    color = TextDark,
+                    fontSize = 11.sp,
+                    lineHeight = 12.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Clip
+                )
             }
         }
     }
