@@ -55,8 +55,11 @@ class TcpTester {
     private val fdGuardRemaining = 500
     private val fdHardRemaining = 300
 
-    /** 用户要求失败阈值硬卡 300：达到后立即停止新增，后续 pending 失败不再累计到 UI。 */
-    private val maxFailureLimit = 300
+    /**
+     * build80：失败数改为按峰值分段上限，避免低容量僵直，也避免高容量过早截断：
+     * <1000:120，<6000:200，<12000:360，>=12000:600。
+     */
+    private val absoluteFailureCap = 600
 
     /** Low memory reserve. If free heap is lower than this, stop before OOM. */
     private val memoryReserveBytes = 48L * 1024L * 1024L
@@ -209,9 +212,17 @@ class TcpTester {
             return (currentActive - base).coerceAtLeast(0)
         }
 
+        fun failureLimitFor(peak: Int): Int = when {
+            peak < 1_000 -> 120
+            peak < 6_000 -> 200
+            peak < 12_000 -> 360
+            else -> absoluteFailureCap
+        }
+
         fun recordFailure(key: String): Boolean {
             if (key == "FD上限" || key == "资源保护") fdSeen = true
-            if (totalFailure >= maxFailureLimit) return false
+            val limit = failureLimitFor(maxStable)
+            if (totalFailure >= limit) return false
             totalFailure++
             consecutiveFailure++
             errors[key] = (errors[key] ?: 0) + 1
@@ -408,9 +419,10 @@ class TcpTester {
                 break
             }
 
-            if (totalFailure >= maxFailureLimit) {
+            val currentFailureLimit = failureLimitFor(peak)
+            if (totalFailure >= currentFailureLimit) {
                 stopPhase = "失败上限"
-                onLog(LogLine(level = LogLevel.WARN, text = "${protocol.label} 失败数达到上限 $maxFailureLimit，停止新增，避免失败堆积"))
+                onLog(LogLine(level = LogLevel.WARN, text = "${protocol.label} 失败数达到当前档位上限 $totalFailure/$currentFailureLimit，停止新增，避免失败堆积"))
                 break
             }
 
@@ -443,6 +455,15 @@ class TcpTester {
                 onLog(LogLine(level = LogLevel.INFO, text = "IPv4 活动连接已超过 6000，切换为高容量/疑似公网策略；手动 CPS 不降速，主要依靠 pending/FD 保护收尾。"))
             }
 
+            // build80：低容量直接快停，不再进入长时间僵直确认。
+            // 典型几百会话网络在 6 秒左右已经平台时，失败达到 80 即可判定到顶。
+            val lowCapacityHardDone = elapsed >= 6_000L && peak < 1_000 && growth4 < 30 && totalFailure >= 80
+            if (lowCapacityHardDone) {
+                stopPhase = "低容量确认"
+                onLog(LogLine(level = LogLevel.WARN, text = "${protocol.label} 低容量快速收尾：峰值 $peak，4秒增长 $growth4，失败 $totalFailure，停止新增"))
+                break
+            }
+
             // 手动 CPS 模式：用户设 800/1000/1500 后，普通失败率/增长效率不能再把 CPS 压到个位数。
             // 低容量场景直接快速停止；FD 接近直接短收尾；不进入 16~32 CPS 慢确认。
             if (manualCpsMode) {
@@ -460,7 +481,10 @@ class TcpTester {
                 }
             } else {
                 if (pressure.fdRemaining in 1..fdGuardRemaining || active >= 32_200) {
-                    enterTopConfirm(now, peak, "FD接近")
+                    fdSeen = true
+                    stopPhase = "FD上限"
+                    onLog(LogLine(level = LogLevel.WARN, text = "${protocol.label} 已接近 FD 上限：活动 $active，${pressure.detail}，停止新增并释放"))
+                    break
                 }
 
                 val lowCapacityLooksDone = elapsed >= 8_000L && active < 1_000 && win4Total >= 40 && failRate4 >= 0.35f && growth4 < 60
@@ -712,17 +736,9 @@ class TcpTester {
                 )
             }
 
-            val allowed = when {
-                remaining <= fdGuardRemaining -> {
-                    // 保护区：只允许极少量补测，避免一下子吃掉硬停冗余。
-                    minOf(requestedLaunch, (remaining - fdHardRemaining).coerceIn(1, 96))
-                }
-                remaining <= fdWarnRemaining -> {
-                    // 预警区：降低冲刺速度，但仍允许继续接近真实上限。
-                    minOf(requestedLaunch, (remaining - fdGuardRemaining).coerceIn(80, 640))
-                }
-                else -> requestedLaunch
-            }.coerceAtLeast(1)
+            // build80：FD 预警不再做降速，避免高容量阶段一降速就卡顿。
+            // FD 只负责硬保护：剩余 <= guard/hard 时由主循环或这里直接停止。
+            val allowed = requestedLaunch.coerceAtLeast(1)
 
             return ResourcePressure(
                 stopNow = false,

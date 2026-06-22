@@ -1,15 +1,9 @@
 # Changelog
 
-## v0.9.9 build79 local
+## v0.9.9 build80
 
-- Optimize manual CPS execution and pending handling.
-- Keep failure count capped at 300.
-- Keep TCP timeout fixed at 3000ms.
-- Reduce high-FD UI and cleanup stutter.
-- Cache max open files and avoid heavy socket-list cleanup during active-count snapshots.
-
-## v0.9.9 build78 local
-
-- Cap failure count at 300.
-- Fix TCP timeout at 3000ms.
-- Keep manual CPS priority and dynamic FD protection.
+- 失败数阈值从固定 300 改为分段：120 / 200 / 360 / 600。
+- 增加低容量快停，减少几百会话场景僵直等待。
+- TCP 连接超时固定 3000ms，不再动态变化。
+- FD 预警不再降速，接近上限直接收尾，减少高容量降速卡顿。
+- 保留手动 CPS 优先、时间发射器、pending 保护、释放图形进度和 NAT 增强检测。

@@ -1,5 +1,3 @@
-# NetSessionTester v0.9.9 build79 local
+# NetSessionTester v0.9.9 build80 local
 
-Local self-test package. Not intended for update push.
-
-Key points: manual CPS priority, fixed 3000ms timeout, failure cap 300, smoother high-CPS pending cleanup and release/UI transitions.
+本包为本地自测版，未更新 update.json，适合验证分段失败阈值、低容量快停和高容量 FD 收尾策略。
