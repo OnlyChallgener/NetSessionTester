@@ -42,7 +42,7 @@ import java.util.concurrent.atomic.AtomicLong
  * 保留新版必要能力：
  * - releaseEpoch，防止释放后迟到 socket 回流；
  * - detachForRelease / closeDetachedSockets，配合释放进度 UI；
- * - 分段失败上限：<1000=120，<6000=200，>=6000=360；
+ * - 分段失败上限：<1000=120，<6000=200，<12000=360，>=12000=600；
  * - IPv4 6000+ / IPv6 默认高容量，不再顶部慢跑；
  * - 0失败时 active/maxStable >= 32360 直接按设备 FD 保护收尾；有失败时只按当前会话区间失败上限收尾；
  * - active >= 32160 后进行批量裁剪，避免一次大批量超冲到 32500+ 导致闪退。
@@ -121,7 +121,7 @@ class TcpTester {
         val targetCps = config.batchSize.coerceIn(20, 2_000)
         val tickMs = 0L
         onLog(LogLine(level = LogLevel.SUCCESS, text = "${protocol.label} 解析成功：${addressText.joinToString(" / ")}"))
-        onLog(LogLine(level = LogLevel.INFO, text = "${protocol.label} 使用 v0.9.9 build88 流水线性能核心：固定目标 ${targetCps} CPS，持续发射，不做 128 动态调速，不绘制 CPS 曲线。"))
+        onLog(LogLine(level = LogLevel.INFO, text = "${protocol.label} 使用 v0.9.9 build89 自测核心：固定目标 ${targetCps} CPS，流水线持续发射，多地址轮询，扩大 pending 窗口，6000-12000 失败阈值 360，12000+ 阈值 600。"))
 
         var totalSuccess = 0
         var totalFailure = 0
@@ -138,6 +138,47 @@ class TcpTester {
         val pending = mutableListOf<kotlinx.coroutines.Deferred<OpenResult>>()
         var launchIndex = 0
         var terminalReached = false
+        var failureConfirmStartedAt = 0L
+        var failureConfirmSuccess = 0
+        var failureConfirmLimit = 0
+
+        fun resetFailureConfirm() {
+            failureConfirmStartedAt = 0L
+            failureConfirmSuccess = totalSuccess
+            failureConfirmLimit = 0
+        }
+
+        fun shouldStopByFailure(limit: Int, now: Long): Boolean {
+            if (totalFailure < limit) {
+                resetFailureConfirm()
+                return false
+            }
+            // 低/中低会话仍然按阈值硬终止，避免坏目标拖很久。
+            if (maxStable < 6_000) return true
+
+            // 6000-12000：360 作为软阈值，先确认是否还在增长；600 是硬上限。
+            // 12000+：600 作为硬阈值。
+            val hardLimit = failureHardLimitFor(maxStable, config.failureLimit)
+            if (totalFailure >= hardLimit) return true
+
+            if (failureConfirmStartedAt <= 0L || failureConfirmLimit != limit) {
+                failureConfirmStartedAt = now
+                failureConfirmSuccess = totalSuccess
+                failureConfirmLimit = limit
+                return false
+            }
+
+            if (now - failureConfirmStartedAt < 2_000L) return false
+
+            val growth = totalSuccess - failureConfirmSuccess
+            // 自测策略：失败到软阈值后，2 秒内还有 >=60 个成功增长就继续放行；否则收尾。
+            if (growth < 60) return true
+
+            failureConfirmStartedAt = now
+            failureConfirmSuccess = totalSuccess
+            failureConfirmLimit = limit
+            return false
+        }
 
         suspend fun drainCompletedResults() {
             if (pending.isEmpty()) return
@@ -173,8 +214,8 @@ class TcpTester {
 
             if (batchErrors.isNotEmpty()) {
                 val activeForLimit = maxOf(maxStable, totalSuccess)
-                val currentLimit = minOf(config.failureLimit, failureLimitFor(activeForLimit))
-                val failureBudget = (currentLimit - totalFailure).coerceAtLeast(0)
+                val countLimit = failureHardLimitFor(activeForLimit, config.failureLimit)
+                val failureBudget = (countLimit - totalFailure).coerceAtLeast(0)
                 var remainingErrorBudget = batchErrors.values.sum().coerceAtMost(failureBudget)
                 val failAdd = remainingErrorBudget
                 if (failAdd > 0) {
@@ -240,7 +281,7 @@ class TcpTester {
                 }
 
                 val currentFailureLimit = minOf(config.failureLimit, failureLimitFor(maxStable))
-                if (totalFailure >= currentFailureLimit) {
+                if (shouldStopByFailure(currentFailureLimit, System.currentTimeMillis())) {
                     terminalReached = true
                     onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 达到分段失败上限：$totalFailure/$currentFailureLimit"))
                     break
@@ -253,8 +294,9 @@ class TcpTester {
                 }
 
                 val perTick = ((targetCps * 100L + 999L) / 1000L).toInt().coerceIn(1, 250)
-                val maxPendingSeconds = ((config.timeoutMs + 999) / 1000 + 1).coerceIn(2, 8)
-                val maxInFlight = (targetCps * maxPendingSeconds).coerceIn(targetCps.coerceAtLeast(100), 8_000)
+                // build89 自测：扩大 pending connect 窗口，避免 9000-10000 会话附近被少量慢 connect 卡住发射器。
+                // pending 仍然计入 FD 预算，接近 32360 会被 fdBudget 裁剪，避免冲爆系统 FD。
+                val maxInFlight = (targetCps * 8).coerceIn(2_000, 16_000)
                 val fdBudget = (fdSafeStop - maxOf(maxStable, activeBefore) - pending.size).coerceAtLeast(0)
                 val pendingBudget = (maxInFlight - pending.size).coerceAtLeast(0)
                 val segmentFailureBudget = (currentFailureLimit - totalFailure).coerceAtLeast(0)
@@ -285,12 +327,13 @@ class TcpTester {
                 maxStable = maxOf(maxStable, totalSuccess)
 
                 val activeFailureLimit = minOf(config.failureLimit, failureLimitFor(maxStable))
+                val failureStop = shouldStopByFailure(activeFailureLimit, System.currentTimeMillis())
                 val terminal =
                     maxStable >= fdSafeStop ||
                         totalSuccess >= fdSafeStop ||
                         maxStable >= fdEmergencyStop ||
                         totalSuccess >= fdEmergencyStop ||
-                        totalFailure >= activeFailureLimit ||
+                        failureStop ||
                         totalSuccess >= config.successLimit ||
                         errors.containsKey("FD上限")
 
@@ -305,7 +348,7 @@ class TcpTester {
                             onStats(stats)
                             onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 触发 Android FD/Socket 上限保护：峰值 $maxStable，活动 $totalSuccess，停止新增并释放"))
                         }
-                        totalFailure >= activeFailureLimit -> {
+                        failureStop -> {
                             stats = stats.copy(phase = "失败上限", errorSummary = errors.toMap(), maxStableSessions = maxStable)
                             onStats(stats)
                             onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 达到分段失败上限：$totalFailure/$activeFailureLimit，停止新增并释放"))
@@ -377,7 +420,18 @@ class TcpTester {
     private fun failureLimitFor(peak: Int): Int = when {
         peak < 1_000 -> 120
         peak < 6_000 -> 200
-        else -> 360
+        peak < 12_000 -> 360
+        else -> 600
+    }
+
+    private fun failureHardLimitFor(peak: Int, userLimit: Int): Int {
+        val hard = when {
+            peak < 1_000 -> 120
+            peak < 6_000 -> 200
+            peak < 12_000 -> 600
+            else -> 600
+        }
+        return minOf(userLimit.coerceAtLeast(1), hard)
     }
 
     private suspend fun openBatchWithFailureBudget(
