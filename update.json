@@ -1,16 +1,16 @@
 {
-  "versionCode": 67,
+  "versionCode": 64,
   "versionName": "0.9.9",
-  "title": "发现新版本 v0.9.9 build 67",
+  "title": "发现新版本 v0.9.9 build 64",
   "content": [
-    "NAT 检测升级为公共 STUN 增强版：同一轮检测复用同一个 UDP Socket，本地端口保持一致，映射判断更稳定",
-    "新增 NAT 复测机制：首轮完成后对成功节点进行二次确认，降低单次丢包或节点波动导致的误判",
-    "优化 STUN 响应匹配：按 Transaction ID 匹配返回包，减少多节点并发响应串包造成的错误结果",
-    "NAT 结果文案更严谨：过滤行为标注为多节点推断，未使用 RFC5780 服务器时不再过度确认",
-    "继承动态 FD 保护策略：根据系统 FD 剩余数量分段降速、确认和保护停止，兼顾高连接数上限与稳定性",
-    "保留智能 CPS、释放图形进度、更新忽略、底部导航适配、日志 1 秒采集和曲线 1 秒采样"
+    "修复 build63 在 32000 左右进入低 CPS 长尾的问题，活动连接达到 32000 直接进入 FD 保护收尾",
+    "新增顶部确认硬止损：进入顶部后 4 秒无有效增长或失败达到预算即停止，不再等待累计失败到 1200",
+    "失败阈值收紧：累计失败最高约 400，顶部确认失败预算最高约 90，避免失败数异常堆高",
+    "CPS 加速加强：分段上限提升到 300 / 600 / 900 / 1200，成功率高时更快接近设备上限",
+    "有效增长改为按阶梯判断，避免少量零散成功反复刷新无增长计时导致 100 秒以上拖尾",
+    "保持释放图形进度、状态机同步、日志和曲线 1 秒采样"
   ],
-  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v0.9.9-67/NetSessionTester-v0.9.9-build67-signed.apk",
+  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v0.9.9-64/NetSessionTester-v0.9.9-build64-signed.apk",
   "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/latest",
   "force": false
 }

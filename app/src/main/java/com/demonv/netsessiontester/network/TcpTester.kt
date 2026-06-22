@@ -122,7 +122,9 @@ class TcpTester {
 
         val addressText = addresses.mapNotNull { it.hostAddress }.distinct()
         onLog(LogLine(level = LogLevel.SUCCESS, text = "${protocol.label} 解析成功：${addressText.joinToString(" / ")}"))
-        onLog(LogLine(level = LogLevel.INFO, text = "${protocol.label} 智能策略：起始CPS ${config.batchSize}，快速加速，顶部确认硬止损，FD动态保护：剩余900预警/500保护/300硬停，活动32600兜底"))
+        val userCps = config.batchSize.coerceIn(20, 1500)
+        val manualCpsMode = userCps != 128
+        onLog(LogLine(level = LogLevel.INFO, text = if (manualCpsMode) "${protocol.label} 静默策略：用户新增值 ${userCps} CPS，按该值重分配上限，保护降速仍生效" else "${protocol.label} 智能策略：默认128 CPS起步，快速加速，顶部确认硬止损，FD动态保护：剩余900预警/500保护/300硬停，活动32600兜底"))
 
         var totalSuccess = 0
         var totalFailure = 0
@@ -137,7 +139,7 @@ class TcpTester {
         var topConfirmStartedAt = 0L
         var topConfirmStartPeak = 0
         var topConfirmStartFailure = 0
-        var currentCps = config.batchSize.coerceIn(40, 1500)
+        var currentCps = userCps.coerceIn(40, 1500)
         var fdSeen = false
         var lastFdGuardLogAt = 0L
         var stopPhase: String? = null
@@ -153,11 +155,16 @@ class TcpTester {
             peak < 10_000 -> 50
             else -> 90
         }
-        fun cpsCap(peak: Int): Int = when {
-            peak < 2_000 -> 300
-            peak < 6_000 -> 600
-            peak < 10_000 -> 900
-            else -> 1200
+        fun cpsCap(peak: Int): Int {
+            val smartCap = when {
+                peak < 2_000 -> 300
+                peak < 6_000 -> 600
+                peak < 10_000 -> 900
+                else -> 1200
+            }
+            // 默认 128 走智能分段；用户修改新增值后静默切换为“手动上限”。
+            // 但 FD、失败率、无增长和后台保护仍会继续降速/止损。
+            return if (manualCpsMode) userCps.coerceIn(20, 1500) else smartCap
         }
         fun meaningfulGrowthStep(peak: Int): Int = when {
             peak < 3_000 -> 12

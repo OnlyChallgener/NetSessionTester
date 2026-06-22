@@ -150,9 +150,11 @@ import com.demonv.netsessiontester.network.PublicIpDetector
 import com.demonv.netsessiontester.network.PublicIpResult
 import com.demonv.netsessiontester.ui.theme.NetSessionTesterTheme
 import com.demonv.netsessiontester.util.CsvExporter
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -305,9 +307,12 @@ private suspend fun downloadUpdateApk(
 ): File = withContext(Dispatchers.IO) {
     if (info.apkUrl.isBlank()) error("更新包链接为空")
     val dir = File(context.getExternalFilesDir(null), "updates").apply { mkdirs() }
-    val apkName = "NetSessionTester-v${info.versionName.ifBlank { info.versionCode.toString() }}-signed.apk"
+    val apkName = runCatching { URL(info.apkUrl).path.substringAfterLast('/').ifBlank { "NetSessionTester-v${info.versionName.ifBlank { info.versionCode.toString() }}-signed.apk" } }
+        .getOrDefault("NetSessionTester-v${info.versionName.ifBlank { info.versionCode.toString() }}-signed.apk")
     val outFile = File(dir, apkName)
+    val partFile = File(dir, "$apkName.part")
     if (outFile.exists()) outFile.delete()
+    if (partFile.exists()) partFile.delete()
 
     val conn = (URL(info.apkUrl).openConnection() as HttpURLConnection).apply {
         connectTimeout = 8000
@@ -326,10 +331,11 @@ private suspend fun downloadUpdateApk(
         var slowSince = 0L
         val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
         BufferedInputStream(conn.inputStream).use { input ->
-            FileOutputStream(outFile).use { output ->
+            FileOutputStream(partFile).use { output ->
                 while (true) {
                     val read = input.read(buffer)
                     if (read <= 0) break
+                    if (!currentCoroutineContext().isActive) throw CancellationException("已取消下载")
                     output.write(buffer, 0, read)
                     downloaded += read
                     val now = System.currentTimeMillis()
@@ -348,18 +354,24 @@ private suspend fun downloadUpdateApk(
                         val msg = if (slowSince > 0L && now - slowSince > 10_000L) {
                             "下载速度较慢，建议切换代理网络或打开 GitHub 手动下载"
                         } else "正在下载更新包"
-                        onProgress(UpdateDownloadUi(true, false, false, progress, downloaded, total, speed, msg, outFile.absolutePath))
+                        onProgress(UpdateDownloadUi(true, false, false, progress, downloaded, total, speed, msg, partFile.absolutePath))
                         lastAt = now
                         lastBytes = downloaded
                     }
                 }
             }
         }
+        if (!partFile.renameTo(outFile)) {
+            partFile.copyTo(outFile, overwrite = true)
+            partFile.delete()
+        }
         onProgress(UpdateDownloadUi(active = false, finished = true, progress = 100, downloadedBytes = downloaded, totalBytes = total, speedBytesPerSecond = 0L, message = "下载完成", apkFilePath = outFile.absolutePath))
         outFile
     } catch (e: Exception) {
+        runCatching { partFile.delete() }
         runCatching { outFile.delete() }
-        onProgress(UpdateDownloadUi(active = false, failed = true, message = e.message ?: "下载失败，建议切换代理网络或打开 GitHub"))
+        val reason = e.message ?: "下载失败，建议切换代理网络或打开 GitHub"
+        onProgress(UpdateDownloadUi(active = false, failed = true, message = reason, apkFilePath = null))
         throw e
     } finally {
         conn.disconnect()
@@ -1102,7 +1114,7 @@ private fun NetSessionTesterApp() {
     var host by remember { mutableStateOf("www.baidu.com") }
     var port by remember { mutableStateOf("80") }
     var mode by remember { mutableStateOf(TestMode.IPV4_THEN_IPV6) }
-    var batchSize by remember { mutableStateOf("120") }
+    var batchSize by remember { mutableStateOf("128") }
     var intervalMs by remember { mutableStateOf("500") }
     var timeoutMs by remember { mutableStateOf("3000") }
     var successLimit by remember { mutableStateOf("65535") }
@@ -1148,6 +1160,8 @@ private fun NetSessionTesterApp() {
     var showUpdateDialog by remember { mutableStateOf(false) }
     var showDownloadDialog by remember { mutableStateOf(false) }
     var downloadUi by remember { mutableStateOf(UpdateDownloadUi()) }
+    var downloadJob by remember { mutableStateOf<Job?>(null) }
+    var downloadRunId by remember { mutableStateOf(0L) }
 
     BackHandler(enabled = showRunLogDetail) { showRunLogDetail = false }
 
@@ -1371,13 +1385,17 @@ private fun NetSessionTesterApp() {
     fun startUpdateDownload(info: UpdateInfo) {
         showUpdateDialog = false
         showDownloadDialog = true
+        downloadJob?.cancel()
+        val runId = System.nanoTime()
+        downloadRunId = runId
         downloadUi = UpdateDownloadUi(active = true, message = "正在准备下载")
-        scope.launch {
+        downloadJob = scope.launch {
             runCatching {
                 downloadUpdateApk(context.applicationContext, info) { ui ->
-                    scope.launch { downloadUi = ui }
+                    if (downloadRunId == runId) scope.launch { downloadUi = ui }
                 }
             }.onSuccess { file ->
+                if (downloadRunId != runId) return@onSuccess
                 downloadUi = UpdateDownloadUi(
                     active = false,
                     finished = true,
@@ -1390,10 +1408,22 @@ private fun NetSessionTesterApp() {
                 showDownloadDialog = true
                 snackbarHostState.showSnackbar("更新包下载完成，可以安装")
             }.onFailure { e ->
-                downloadUi = UpdateDownloadUi(active = false, failed = true, message = e.message ?: "下载失败，建议切换代理网络或打开 GitHub")
+                if (downloadRunId != runId) return@onFailure
+                if (e is CancellationException) {
+                    downloadUi = UpdateDownloadUi(active = false, failed = true, message = "已取消下载，可重新下载")
+                } else {
+                    downloadUi = UpdateDownloadUi(active = false, failed = true, message = e.message ?: "下载失败，建议切换代理网络或打开 GitHub")
+                }
                 showDownloadDialog = true
             }
         }
+    }
+
+    fun cancelUpdateDownload() {
+        downloadRunId = System.nanoTime()
+        downloadJob?.cancel()
+        downloadJob = null
+        downloadUi = UpdateDownloadUi(active = false, failed = true, message = "已取消下载，可重新下载")
     }
 
     fun installReadyApk() {
@@ -1810,7 +1840,7 @@ private fun NetSessionTesterApp() {
             summary = null,
             error = null
         )
-        appendLog(LogLine(level = LogLevel.INFO, text = "目标：${config.host}:${config.port} | 模式：${config.mode.label} | 起始CPS：${config.batchSize} | 采样：1s | 动态调速"))
+        appendLog(LogLine(level = LogLevel.INFO, text = "目标：${config.host}:${config.port} | 模式：${config.mode.label} | 新增值：${config.batchSize} | 采样：1s | 静默策略重分配"))
         startPingMonitor(config, startedAt)
         startNetworkWatch(startedAt, testNetworkSignature)
 
@@ -2038,6 +2068,8 @@ private fun NetSessionTesterApp() {
             state = downloadUi,
             onDismiss = { showDownloadDialog = false },
             onInstall = { installReadyApk() },
+            onRetry = { latestUpdate?.let { startUpdateDownload(it) } },
+            onCancelDownload = { cancelUpdateDownload() },
             onOpenGithub = { openGithub(latestUpdate?.githubUrl ?: PROJECT_GITHUB_URL) }
         )
     }
@@ -2111,7 +2143,7 @@ private fun NetSessionTesterApp() {
                     onSave = { scope.launch { snackbarHostState.showSnackbar("参数已保存") } },
                     onRestoreDefault = {
                         host = "www.baidu.com"; port = "80"; mode = TestMode.IPV4_THEN_IPV6
-                        batchSize = "120"; intervalMs = "500"; timeoutMs = "3000"
+                        batchSize = "128"; intervalMs = "500"; timeoutMs = "3000"
                         successLimit = "65535"; failureLimit = "1200"; keepConnections = true; maskPrivacy = false; historyLimit = "30"
                     }
                 )
@@ -2565,7 +2597,7 @@ private fun SettingsPage(
             SoftCard {
                 SectionTitle("≡", "会话参数", Green)
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    ParamField("起始CPS", batchSize, onBatchSizeChange, Modifier.weight(1f))
+                    ParamField("新增值(CPS)", batchSize, onBatchSizeChange, Modifier.weight(1f))
                     ParamField("调度间隔ms", intervalMs, onIntervalMsChange, Modifier.weight(1f))
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -2573,7 +2605,7 @@ private fun SettingsPage(
                     ParamField("失败兜底", failureLimit, onFailureLimitChange, Modifier.weight(1f))
                 }
                 ParamField("目标会话（条）", successLimit, onSuccessLimitChange, Modifier.fillMaxWidth())
-                Text("起始CPS会自动加速/降速；日志与曲线固定 1 秒采样，释放阶段显示进度。", color = Muted, fontSize = 12.sp, lineHeight = 16.sp)
+                Text("默认 128 为智能调速；修改后会静默按新值重分配策略，保护降速仍然生效。", color = Muted, fontSize = 12.sp, lineHeight = 16.sp)
             }
         }
         item {
@@ -3073,39 +3105,61 @@ private fun UpdateDownloadDialog(
     state: UpdateDownloadUi,
     onDismiss: () -> Unit,
     onInstall: () -> Unit,
+    onRetry: () -> Unit,
+    onCancelDownload: () -> Unit,
     onOpenGithub: () -> Unit
 ) {
+    val titleText = when {
+        state.finished -> "下载完成"
+        state.failed -> if (state.message.contains("取消")) "已取消" else "下载失败"
+        state.active -> "正在下载更新"
+        else -> "下载更新"
+    }
+    val iconTint = when {
+        state.finished -> Green
+        state.failed -> ErrorRed
+        else -> Blue
+    }
     AlertDialog(
         onDismissRequest = onDismiss,
         confirmButton = {
-            if (state.finished) {
-                Button(onClick = onInstall, shape = ShapeM) { Text("立即安装", fontSize = 13.sp) }
-            } else {
-                TextButton(onClick = onDismiss) { Text("后台下载", fontSize = 13.sp) }
+            when {
+                state.finished -> {
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Button(onClick = onInstall, shape = ShapeM) { Text("立即安装", fontSize = 13.sp) }
+                        OutlinedButton(onClick = onDismiss, shape = ShapeM) { Text("稍后安装", fontSize = 13.sp) }
+                    }
+                }
+                state.failed -> {
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        OutlinedButton(onClick = onRetry, shape = ShapeM) { Text("重新下载", fontSize = 13.sp) }
+                        TextButton(onClick = onOpenGithub) { Text("打开 GitHub", fontSize = 13.sp) }
+                        TextButton(onClick = onDismiss) { Text("关闭", fontSize = 13.sp) }
+                    }
+                }
+                state.active -> {
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        OutlinedButton(onClick = onCancelDownload, shape = ShapeM) { Text("取消下载", fontSize = 13.sp) }
+                        Button(onClick = onDismiss, shape = ShapeM) { Text("后台下载", fontSize = 13.sp) }
+                    }
+                }
+                else -> {
+                    Button(onClick = onRetry, shape = ShapeM) { Text("开始下载", fontSize = 13.sp) }
+                }
             }
         },
-        dismissButton = {
-            TextButton(onClick = onOpenGithub) { Text(if (state.failed) "打开 GitHub" else "稍后处理", fontSize = 13.sp) }
-        },
+        dismissButton = {},
         title = {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(
-                    if (state.finished) Icons.Filled.CheckCircle else Icons.Filled.Download,
+                    if (state.finished) Icons.Filled.CheckCircle else if (state.failed) Icons.Filled.WarningAmber else Icons.Filled.Download,
                     contentDescription = null,
-                    tint = if (state.finished) Green else Blue,
+                    tint = iconTint,
                     modifier = Modifier.width(28.dp).height(28.dp)
                 )
                 Spacer(Modifier.width(10.dp))
                 Column(Modifier.weight(1f)) {
-                    Text(
-                        when {
-                            state.finished -> "下载完成"
-                            state.failed -> "下载失败"
-                            else -> "正在下载新版本"
-                        },
-                        fontWeight = FontWeight.ExtraBold,
-                        color = TextDark
-                    )
+                    Text(titleText, fontWeight = FontWeight.ExtraBold, color = TextDark)
                     Text("v${info?.versionName ?: ""}", color = Muted, fontSize = 12.sp)
                 }
                 IconButton(onClick = onDismiss) { Icon(Icons.Filled.Close, contentDescription = "关闭", tint = Muted) }
@@ -3117,8 +3171,8 @@ private fun UpdateDownloadDialog(
                 LinearProgressIndicator(
                     progress = { state.progress / 100f },
                     modifier = Modifier.fillMaxWidth().height(8.dp),
-                    color = Blue,
-                    trackColor = BlueSoft
+                    color = if (state.failed) ErrorRed else Blue,
+                    trackColor = if (state.failed) RedSoft else BlueSoft
                 )
                 Text("${state.progress}%  ·  ${formatBytes(state.downloadedBytes)} / ${if (state.totalBytes > 0) formatBytes(state.totalBytes) else "未知大小"}", color = TextDark, fontSize = 12.sp)
                 if (state.active) Text("速度：${formatSpeed(state.speedBytesPerSecond)}", color = Blue, fontSize = 12.sp, fontWeight = FontWeight.Bold)
@@ -3135,7 +3189,13 @@ private fun UpdateDownloadDialog(
                             .padding(if (warn) 8.dp else 0.dp)
                     )
                 }
-                if (state.active) Text("关闭卡片后会继续在后台下载，完成后会再次提示安装。", color = Muted, fontSize = 11.sp)
+                val note = when {
+                    state.failed -> "重新下载会自动清理未完成文件（.part），并从 0% 重新开始。"
+                    state.active -> "关闭卡片后会继续在后台下载，完成后会再次提示安装。"
+                    state.finished -> "下载完成后如无法安装，请检查未知来源安装权限。"
+                    else -> "下载失败时可重新下载或打开 GitHub 手动处理。"
+                }
+                Text(note, color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
             }
         },
         shape = ShapeL
@@ -3379,18 +3439,30 @@ private fun SessionGrowthChart(points: List<ChartPoint>) {
     val minX = sorted.firstOrNull()?.elapsedSec ?: 0
     val maxXRaw = sorted.lastOrNull()?.elapsedSec ?: (minX + 1)
     val maxX = maxOf(minX + 1, maxXRaw)
-    val maxY = sessionYAxisMax(sorted.maxOfOrNull { maxOf(it.active, it.failure) } ?: 0)
+    val maxSessionY = sessionYAxisMax(sorted.maxOfOrNull { it.active } ?: 0)
+    val maxCpsRaw = sorted.maxOfOrNull { it.cps } ?: 0
+    val maxCpsY = when {
+        maxCpsRaw <= 300 -> 300
+        maxCpsRaw <= 600 -> 600
+        maxCpsRaw <= 900 -> 900
+        maxCpsRaw <= 1200 -> 1200
+        else -> (((maxCpsRaw + 299) / 300) * 300).coerceAtMost(2000)
+    }
     val step = chartXAxisStep(maxX - minX)
     val last = sorted.lastOrNull()
     Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("会话数", color = Muted, fontSize = 10.sp)
+            Text("会话数 & CPS", color = Muted, fontSize = 10.sp)
+            Spacer(Modifier.width(8.dp))
+            Text("● 会话数", color = Blue, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.width(8.dp))
+            Text("● CPS", color = Orange, fontSize = 10.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.weight(1f))
-            Text(last?.let { "${it.elapsedSec}s 活动 ${it.active}｜失败 ${it.failure}" } ?: "", color = Muted, fontSize = 10.sp, maxLines = 1)
+            Text(last?.let { "${it.elapsedSec}s 活动 ${it.active}｜CPS ${it.cps}/s" } ?: "", color = Muted, fontSize = 10.sp, maxLines = 1)
         }
         Row(modifier = Modifier.fillMaxWidth().height(158.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(modifier = Modifier.width(34.dp).height(145.dp), verticalArrangement = Arrangement.SpaceBetween) {
-                axisLabels(maxY).forEach { Text(it.toString(), color = Muted, fontSize = 9.sp, maxLines = 1) }
+                axisLabels(maxSessionY).forEach { Text(it.toString(), color = Muted, fontSize = 9.sp, maxLines = 1) }
             }
             Canvas(modifier = Modifier.weight(1f).height(145.dp).background(Color(0xFFF8FAFC), ShapeS).padding(6.dp)) {
                 val w = size.width
@@ -3400,28 +3472,41 @@ private fun SessionGrowthChart(points: List<ChartPoint>) {
                     drawLine(Border.copy(alpha = 0.55f), Offset(0f, y), Offset(w, y), strokeWidth = 1f)
                 }
                 fun xOf(p: ChartPoint) = w * ((p.elapsedSec - minX).toFloat() / (maxX - minX).toFloat())
-                fun yOf(v: Int) = h - h * (v.coerceIn(0, maxY).toFloat() / maxY.toFloat())
-                fun pathOf(value: (ChartPoint) -> Int): Path {
+                fun ySession(v: Int) = h - h * (v.coerceIn(0, maxSessionY).toFloat() / maxSessionY.toFloat())
+                fun yCps(v: Int) = h - h * (v.coerceIn(0, maxCpsY).toFloat() / maxCpsY.toFloat())
+                fun pathSession(value: (ChartPoint) -> Int): Path {
                     val path = Path()
                     sorted.forEachIndexed { index, p ->
-                        val x = xOf(p); val y = yOf(value(p))
+                        val x = xOf(p); val y = ySession(value(p))
+                        if (index == 0) path.moveTo(x, y) else path.lineTo(x, y)
+                    }
+                    return path
+                }
+                fun pathCps(value: (ChartPoint) -> Int): Path {
+                    val path = Path()
+                    sorted.forEachIndexed { index, p ->
+                        val x = xOf(p); val y = yCps(value(p))
                         if (index == 0) path.moveTo(x, y) else path.lineTo(x, y)
                     }
                     return path
                 }
                 if (sorted.size > 1) {
-                    drawPath(pathOf { it.active }, color = Blue, style = Stroke(width = 4f))
-                    drawPath(pathOf { it.failure }, color = ErrorRed, style = Stroke(width = 3f))
+                    drawPath(pathSession { it.active }, color = Blue, style = Stroke(width = 4f, cap = StrokeCap.Round))
+                    drawPath(pathCps { it.cps }, color = Orange, style = Stroke(width = 3f, cap = StrokeCap.Round))
                 }
                 sorted.forEach { p ->
-                    drawCircle(Blue, radius = 3f, center = Offset(xOf(p), yOf(p.active)))
-                    if (p.failure > 0) drawCircle(ErrorRed, radius = 3f, center = Offset(xOf(p), yOf(p.failure)))
+                    drawCircle(Blue, radius = 2.6f, center = Offset(xOf(p), ySession(p.active)))
+                    drawCircle(Orange, radius = 2.3f, center = Offset(xOf(p), yCps(p.cps)))
                 }
             }
+            Column(modifier = Modifier.width(32.dp).height(145.dp), verticalArrangement = Arrangement.SpaceBetween, horizontalAlignment = Alignment.End) {
+                axisLabels(maxCpsY).forEach { Text(it.toString(), color = Orange, fontSize = 9.sp, maxLines = 1) }
+            }
         }
-        Row(modifier = Modifier.fillMaxWidth().padding(start = 34.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+        Row(modifier = Modifier.fillMaxWidth().padding(start = 34.dp, end = 32.dp), horizontalArrangement = Arrangement.SpaceBetween) {
             timeLabels(minX, maxX, step).forEach { Text("${it}s", color = Muted, fontSize = 10.sp) }
         }
+        Text("说明：蓝线为会话数（左轴），橙线为 CPS（右轴），共用下方时间轴。", color = Muted, fontSize = 10.sp, lineHeight = 13.sp)
     }
 }
 

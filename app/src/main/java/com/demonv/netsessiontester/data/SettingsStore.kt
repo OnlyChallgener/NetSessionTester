@@ -9,7 +9,7 @@ data class SavedSettings(
     val host: String = "www.baidu.com",
     val port: String = "80",
     val mode: TestMode = TestMode.IPV4_THEN_IPV6,
-    val batchSize: String = "120",
+    val batchSize: String = "128",
     val intervalMs: String = "500",
     val timeoutMs: String = "3000",
     val successLimit: String = "65535",
@@ -28,7 +28,7 @@ class SettingsStore(context: Context) {
             port = prefs.getString(KEY_PORT, "80") ?: "80",
             mode = runCatching { TestMode.valueOf(prefs.getString(KEY_MODE, TestMode.IPV4_THEN_IPV6.name) ?: TestMode.IPV4_THEN_IPV6.name) }
                 .getOrDefault(TestMode.IPV4_THEN_IPV6),
-            batchSize = prefs.getString(KEY_BATCH_SIZE, "120") ?: "120",
+            batchSize = prefs.getString(KEY_BATCH_SIZE, "128") ?: "128",
             intervalMs = prefs.getString(KEY_INTERVAL_MS, "500") ?: "500",
             timeoutMs = prefs.getString(KEY_TIMEOUT_MS, "3000") ?: "3000",
             successLimit = prefs.getString(KEY_SUCCESS_LIMIT, "65535") ?: "65535",
