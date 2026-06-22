@@ -1173,6 +1173,7 @@ private fun NetSessionTesterApp() {
     var chartMode by remember { mutableStateOf(ChartMode.GROWTH) }
     var chartPoints by remember { mutableStateOf<List<ChartPoint>>(emptyList()) }
     var lastChartSampleAt by remember { mutableStateOf<Map<IpProtocol, Long>>(emptyMap()) }
+    var lastStatsUiAt by remember { mutableStateOf<Map<IpProtocol, Long>>(emptyMap()) }
     var pingPoints by remember { mutableStateOf<List<PingPoint>>(emptyList()) }
     var pingJob by remember { mutableStateOf<Job?>(null) }
     var pingIntervalLabel by remember { mutableStateOf("AUTO") }
@@ -1896,6 +1897,10 @@ private fun NetSessionTesterApp() {
                 val pair = tester.runSessionHoldTest(
                     rawConfig = config,
                     onStats = statsHandler@ { stats ->
+                        val nowUi = System.currentTimeMillis()
+                        val lastUi = lastStatsUiAt[stats.protocol] ?: 0L
+                        if (nowUi - lastUi < 200L) return@statsHandler
+                        lastStatsUiAt = lastStatsUiAt + (stats.protocol to nowUi)
                         if (activeRunId != startedAt || !state.isAdding) return@statsHandler
                         recordChartPoint(stats)
                         val nextPhase = if (stats.phase.contains("无增长") || stats.phase.contains("确认")) RunPhase.TopConfirm else RunPhase.Running

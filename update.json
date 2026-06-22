@@ -1,16 +1,14 @@
 {
-  "versionCode": 64,
+  "versionCode": 84,
   "versionName": "0.9.9",
-  "title": "发现新版本 v0.9.9 build 64",
+  "title": "发现新版本 v0.9.9 build 84",
   "content": [
-    "修复 build63 在 32000 左右进入低 CPS 长尾的问题，活动连接达到 32000 直接进入 FD 保护收尾",
-    "新增顶部确认硬止损：进入顶部后 4 秒无有效增长或失败达到预算即停止，不再等待累计失败到 1200",
-    "失败阈值收紧：累计失败最高约 400，顶部确认失败预算最高约 90，避免失败数异常堆高",
-    "CPS 加速加强：分段上限提升到 300 / 600 / 900 / 1200，成功率高时更快接近设备上限",
-    "有效增长改为按阶梯判断，避免少量零散成功反复刷新无增长计时导致 100 秒以上拖尾",
-    "保持释放图形进度、状态机同步、日志和曲线 1 秒采样"
+    "版本号更新为 v0.9.9，versionCode 更新为 84",
+    "保留上一版修复：UI 200ms 节流、Socket 并发限制、FD 临界保护与释放状态同步",
+    "保留 v0.9.7 高速测速核心，并继续优化 FD 临界附近卡顿僵直问题",
+    "建议使用 clean 后重新编译，覆盖安装前确认卸载旧包或签名一致"
   ],
-  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v0.9.9-64/NetSessionTester-v0.9.9-build64-signed.apk",
+  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v0.9.9-84/NetSessionTester-v0.9.9-build84-signed.apk",
   "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/latest",
   "force": false
 }

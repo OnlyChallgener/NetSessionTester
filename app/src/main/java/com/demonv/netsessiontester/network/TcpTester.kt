@@ -31,6 +31,7 @@ import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 import java.util.Collections
 import java.util.concurrent.atomic.AtomicLong
+import kotlinx.coroutines.sync.Semaphore
 
 /**
  * build82：回归 v0.9.7 高速测速核心。
@@ -50,6 +51,7 @@ import java.util.concurrent.atomic.AtomicLong
 class TcpTester {
     private val socketLock = Mutex()
     private val releaseEpoch = AtomicLong(0L)
+    private val openPermits = Semaphore(200)
     private val fdClipStart = 31_800
     private val fdSafeStop = 32_000
     private val fdEmergencyStop = 32_200
@@ -361,6 +363,14 @@ class TcpTester {
     ): BatchOpenResult = coroutineScope {
         val jobs = (0 until count).map { index ->
             async(Dispatchers.IO) {
+                openPermits.acquire()
+                try {
+                    val address = addresses[index % addresses.size]
+                    openOne(address, port, timeoutMs, expectedEpoch)
+                } finally {
+                    openPermits.release()
+                }
+            }
                 val address = addresses[index % addresses.size]
                 openOne(address, port, timeoutMs, expectedEpoch)
             }
