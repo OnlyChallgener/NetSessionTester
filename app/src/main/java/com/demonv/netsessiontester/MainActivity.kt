@@ -29,6 +29,9 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.Canvas
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.animateIntAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -276,6 +279,14 @@ private fun formatSpeed(bytesPerSecond: Long): String = when {
     bytesPerSecond <= 0L -> "-- KB/s"
     bytesPerSecond < 1024L * 1024L -> "${(bytesPerSecond / 1024L).coerceAtLeast(1L)} KB/s"
     else -> String.format(java.util.Locale.US, "%.2f MB/s", bytesPerSecond / 1024.0 / 1024.0)
+}
+
+private fun formatReleaseDuration(ms: Long): String =
+    String.format(java.util.Locale.US, "%.1fs", ms.coerceAtLeast(0L) / 1000.0)
+
+private fun formatReleaseEta(seconds: Int): String = when {
+    seconds <= 0 -> "<1s"
+    else -> "约 ${seconds}s"
 }
 
 private suspend fun fetchUpdateInfo(updateJsonUrl: String = UPDATE_JSON_URL): UpdateInfo = withContext(Dispatchers.IO) {
@@ -1821,6 +1832,7 @@ private fun NetSessionTesterApp() {
                 refreshHistory()
             }
         } finally {
+            val releaseElapsedMs = System.currentTimeMillis() - releaseStart
             val failed = reason != FinishReason.Completed && reason != FinishReason.ForceRelease
             state = state.copy(
                 isAdding = false,
@@ -1831,6 +1843,7 @@ private fun NetSessionTesterApp() {
                 releaseUi = state.releaseUi.copy(
                     visible = true,
                     closed = state.releaseUi.total.takeIf { it > 0 } ?: closed,
+                    elapsedMs = releaseElapsedMs,
                     finished = true,
                     message = "释放完成"
                 ),
@@ -2680,7 +2693,7 @@ private fun SettingsPage(
                     ParamField("目标会话（条）", successLimit, onSuccessLimitChange, Modifier.weight(1f))
                     Spacer(Modifier.weight(1f))
                 }
-                Text("test92：固定CPS校准；新增低会话质量判定；高会话缩短有效超时提速；UI/曲线每秒采样。", color = Muted, fontSize = 12.sp, lineHeight = 16.sp)
+                Text("test95：基于test93高性能核心；运行中文案更新；释放完成显示耗时并优化进度动画。", color = Muted, fontSize = 12.sp, lineHeight = 16.sp)
             }
         }
         item {
@@ -2758,7 +2771,7 @@ private fun TestPage(
                 Text(
                     when {
                         releaseBusy -> "正在释放连接，完成后会自动恢复开始按钮"
-                        isAdding -> "● 正在运行 · 固定CPS · UI/曲线每秒采样"
+                        isAdding -> "正在运行 · 定速发射 · UI/曲线每秒采样"
                         else -> "状态：$status"
                     },
                     color = if (isAdding) Green else if (releaseBusy) Orange else Muted,
@@ -2798,8 +2811,26 @@ private fun TestPage(
 @Composable
 private fun ReleaseProgressCard(releaseUi: ReleaseUiState) {
     val total = releaseUi.total.coerceAtLeast(0)
-    val closed = releaseUi.closed.coerceIn(0, total.coerceAtLeast(releaseUi.closed))
-    val progress = releaseUi.progress
+    val closedRaw = releaseUi.closed.coerceIn(0, total.coerceAtLeast(releaseUi.closed))
+    val animatedClosed by animateIntAsState(
+        targetValue = closedRaw,
+        animationSpec = tween(durationMillis = 420),
+        label = "releaseClosed"
+    )
+    val closed = animatedClosed.coerceIn(0, total.coerceAtLeast(animatedClosed))
+    val animatedProgress by animateFloatAsState(
+        targetValue = releaseUi.progress,
+        animationSpec = tween(durationMillis = 420),
+        label = "releaseProgress"
+    )
+    val progress = animatedProgress.coerceIn(0f, 1f)
+    val percent = (progress * 100f).roundToInt().coerceIn(0, 100)
+    val rightLabel = if (releaseUi.finished) "耗时" else "预计剩余"
+    val rightValue = if (releaseUi.finished) {
+        formatReleaseDuration(releaseUi.elapsedMs)
+    } else {
+        formatReleaseEta(releaseUi.etaSeconds)
+    }
     SoftCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
             SectionTitle("↧", if (releaseUi.finished) "释放完成" else "正在释放连接", Purple)
@@ -2832,7 +2863,7 @@ private fun ReleaseProgressCard(releaseUi: ReleaseUiState) {
                     )
                 }
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("${releaseUi.percent}%", color = TextDark, fontSize = 24.sp, fontWeight = FontWeight.ExtraBold)
+                    Text("${percent}%", color = TextDark, fontSize = 24.sp, fontWeight = FontWeight.ExtraBold)
                     Text("释放进度", color = Muted, fontSize = 11.sp)
                 }
             }
@@ -2841,7 +2872,7 @@ private fun ReleaseProgressCard(releaseUi: ReleaseUiState) {
                 Text(releaseUi.message.ifBlank { "正在关闭 Socket 连接，请勿退出页面" }, color = Muted, fontSize = 12.sp, lineHeight = 16.sp)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                     MetricTile("释放速度", if (releaseUi.speedPerSecond > 0) "${releaseUi.speedPerSecond}/s" else "—", Blue, Modifier.weight(1f))
-                    MetricTile("预计剩余", if (releaseUi.finished) "0s" else "约 ${releaseUi.etaSeconds}s", Orange, Modifier.weight(1f))
+                    MetricTile(rightLabel, rightValue, Orange, Modifier.weight(1f))
                 }
             }
         }
@@ -3097,9 +3128,9 @@ private fun VersionInfoDialog(
             Column(verticalArrangement = Arrangement.spacedBy(9.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("当前版本", color = Muted, fontSize = 12.sp, modifier = Modifier.weight(1f))
-                    StatusChip("v0.9.9 test92", BlueSoft, Blue, compact = true)
+                    StatusChip("v0.9.9 test95", BlueSoft, Blue, compact = true)
                 }
-                VersionLine("v0.9.9 test92", "低会话质量判定 + 高会话有效超时优化；保留固定CPS和调度间隔。")
+                VersionLine("v0.9.9 test95", "基于test93性能核心；释放完成显示耗时，进度动画更平滑。")
                 VersionLine("v0.9.8", "保留 0.9.7 高速测速核心，新增更新检测与后台下载。")
                 VersionLine("v0.9.7", "修复 FD 上限附近闪退；触发FD上限时优先释放本机连接并保存历史。")
                 VersionLine("v0.9.6", "修复停止按钮、通知跳转、新增批次被200锁死的问题。")

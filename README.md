@@ -1,15 +1,7 @@
-# NetSessionTester
+# NetSessionTester v0.9.9-test95
 
-## v0.9.9-test89 自测版
+自测版，不发布。基于 test93 高性能固定 CPS 核心，仅优化运行中文案和释放进度卡片观感。
 
-该包仅用于自测 9000-10000 会话区间卡住问题，不建议作为正式发布版。
-
-- versionCode 89
-- versionName v0.9.9-test89
-- update.json 暂时保持 build88，避免未发布 v89 Release 时触发 404 下载
-- TCP 发射核心：100ms tick 流水线持续发射
-- pending connect 窗口扩大到 targetCps * 8，范围 2000 - 16000
-- 失败阈值四档：0-1000=120，1000-6000=200，6000-12000=360，12000+=600
-- 6000-12000 区间达到 360 后做 2 秒增长确认，避免 9000-10000 附近被误杀
-- 图表继续只保留会话数蓝线，失败仅显示区间文字
-- 保留 Ping 图表刷新、平均 CPS、FD 32360 保护
+- versionCode: 95
+- versionName: v0.9.9-test95
+- update.json 保持 build88，避免自测版未发布时更新检测 404。
