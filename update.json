@@ -1,16 +1,6 @@
 {
-  "versionCode": 100,
-  "versionName": "V1.0.0",
-  "title": "发现新版本 V1.0.0 build100",
-  "content": [
-    "升级至 V1.0.0 正式版，versionCode 100",
-    "保留 test93 高性能定速发射核心，固定 CPS 更稳定",
-    "释放过程中显示预计剩余，释放完成显示耗时，例如 1.6s",
-    "过滤行为主卡片显示检测结果，不再显示多节点推断方法名",
-    "WiFi 运营商判断增加 ASN 在线校验，失败时回退 IPv6 前缀推断",
-    "继续保留 Ping 图表、失败区间文字、FD 32360 保护和顶部下载横幅"
-  ],
-  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.0.0-100/NetSessionTester-V1.0.0-build100-signed.apk",
-  "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/latest",
-  "force": false
+  "versionCode": 101,
+  "versionName": "V1.0.1",
+  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.0.1-101/NetSessionTester-V1.0.1-build101-signed.apk",
+  "changelog": "V1.0.1 build101 紧急修复：修复顶部版本号显示错误，统一释放完成通知为白色浮层，移除重复黑色提示，不改动核心会话测试逻辑。"
 }
