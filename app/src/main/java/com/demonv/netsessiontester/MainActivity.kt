@@ -27,6 +27,11 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.Canvas
 import androidx.compose.animation.core.animateFloatAsState
@@ -74,6 +79,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.Switch
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Article
@@ -251,19 +257,30 @@ private data class UpdateDownloadUi(
     val apkFilePath: String? = null
 )
 
+private enum class BottomNoticeTone { Info, Success, Warning, Error }
+
+private data class BottomNoticeUi(
+    val visible: Boolean = false,
+    val message: String = "",
+    val tone: BottomNoticeTone = BottomNoticeTone.Info,
+    val id: Long = 0L
+)
+
 private fun currentAppVersionCode(context: Context): Long = runCatching {
     val info = context.packageManager.getPackageInfo(context.packageName, 0)
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) info.longVersionCode else info.versionCode.toLong()
 }.getOrDefault(0L)
 
 private fun currentAppVersionName(context: Context): String = runCatching {
-    context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "V1.0.0"
-}.getOrDefault("V1.0.0")
+    BuildConfig.VERSION_NAME.ifBlank {
+        context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "V1.0.2"
+    }
+}.getOrDefault("V1.0.2")
 
 private fun displayVersionName(raw: String): String {
-    var clean = raw.trim()
-    while (clean.startsWith("v", ignoreCase = true)) clean = clean.drop(1)
-    return if (clean.isBlank()) "未知版本" else "v$clean"
+    val clean = raw.trim()
+    if (clean.isBlank()) return "未知版本"
+    return if (clean.startsWith("v", ignoreCase = true)) clean else "v$clean"
 }
 
 private fun formatVersionBuild(versionName: String, versionCode: Long): String =
@@ -1274,6 +1291,8 @@ private fun NetSessionTesterApp() {
     var downloadUi by remember { mutableStateOf(UpdateDownloadUi()) }
     var downloadJob by remember { mutableStateOf<Job?>(null) }
     var downloadRunId by remember { mutableStateOf(0L) }
+    var bottomNotice by remember { mutableStateOf(BottomNoticeUi()) }
+    var bottomNoticeJob by remember { mutableStateOf<Job?>(null) }
 
     BackHandler(enabled = showRunLogDetail) { showRunLogDetail = false }
 
@@ -1435,10 +1454,31 @@ private fun NetSessionTesterApp() {
         scope.launch { logStore.append(line); logSizeKb = logStore.sizeKb() }
     }
 
+    fun showBottomNotice(
+        message: String,
+        tone: BottomNoticeTone = BottomNoticeTone.Info,
+        durationMs: Long = 3_600L
+    ) {
+        bottomNoticeJob?.cancel()
+        val id = System.nanoTime()
+        bottomNotice = BottomNoticeUi(visible = true, message = message, tone = tone, id = id)
+        bottomNoticeJob = scope.launch {
+            delay(durationMs)
+            if (bottomNotice.id == id) {
+                bottomNotice = bottomNotice.copy(visible = false)
+            }
+        }
+    }
+
     fun notifyLocalReleased(prefix: String = "本机已释放") {
         val message = "$prefix，路由器会话表可能延迟数秒下降"
         appendLog(LogLine(level = LogLevel.WARN, text = message))
-        scope.launch { snackbarHostState.showSnackbar(message) }
+        bottomNoticeJob?.cancel()
+        bottomNotice = BottomNoticeUi()
+        scope.launch {
+            snackbarHostState.currentSnackbarData?.dismiss()
+            snackbarHostState.showSnackbar(message = message, duration = SnackbarDuration.Short)
+        }
     }
 
     fun openGithub(url: String = PROJECT_GITHUB_URL) {
@@ -1898,9 +1938,7 @@ private fun NetSessionTesterApp() {
                 ipv6Stats = baseIpv6.copy(activeSessions = 0, phase = if (baseIpv6.totalAttempts > 0) "已释放" else baseIpv6.phase)
             )
             notifyLocalReleased(if (reason == FinishReason.ForceRelease) "本机已释放" else "${reason.label}，本机已释放")
-            if (toast) {
-                runCatching { Toast.makeText(context, finalStatus, Toast.LENGTH_SHORT).show() }
-            }
+            // 释放完成通知统一走底部白色浮层，避免同时出现系统 Toast 和黑色 Snackbar。
             stopForegroundNotice(context)
             finishInProgress = false
         }
@@ -2199,7 +2237,7 @@ private fun NetSessionTesterApp() {
 
 
     Scaffold(
-        snackbarHost = { SnackbarHost(snackbarHostState) },
+        snackbarHost = { OneUiSnackbarHost(snackbarHostState) },
         bottomBar = {
             if (!showRunLogDetail) {
                 BottomNav(selectedTab = selectedTab, onSelect = {
@@ -2351,6 +2389,13 @@ private fun NetSessionTesterApp() {
                     onInstall = { installReadyApk() }
                 )
             }
+
+            BottomNoticeBanner(
+                state = bottomNotice,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(horizontal = 16.dp, vertical = 12.dp)
+            )
         }
     }
 }
@@ -2740,7 +2785,7 @@ private fun SettingsPage(
                     ParamField("目标会话（条）", successLimit, onSuccessLimitChange, Modifier.weight(1f))
                     Spacer(Modifier.weight(1f))
                 }
-                Text("V1.0.0：采用test93高性能定速发射核心，优化释放耗时显示、过滤行为结论和WiFi运营商判断。", color = Muted, fontSize = 12.sp, lineHeight = 16.sp)
+                Text("V1.0.2：修复版本徽标与释放完成通知重复问题，保留高性能定速发射核心。", color = Muted, fontSize = 12.sp, lineHeight = 16.sp)
             }
         }
         item {
@@ -3129,7 +3174,7 @@ private fun PageTitle(
                             .padding(horizontal = 7.dp, vertical = 3.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text("v0.9.9", color = Blue, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        Text(displayVersionName(currentAppVersionName(LocalContext.current)), color = Blue, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                         if (updateProgress != null) {
                             Spacer(Modifier.width(4.dp))
                             Text("${updateProgress}%", color = Purple, fontSize = 9.sp, fontWeight = FontWeight.Bold)
@@ -3175,9 +3220,9 @@ private fun VersionInfoDialog(
             Column(verticalArrangement = Arrangement.spacedBy(9.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("当前版本", color = Muted, fontSize = 12.sp, modifier = Modifier.weight(1f))
-                    StatusChip("V1.0.0", BlueSoft, Blue, compact = true)
+                    StatusChip(displayVersionName(currentAppVersionName(LocalContext.current)), BlueSoft, Blue, compact = true)
                 }
-                VersionLine("V1.0.0", "正式版：定速发射核心、释放耗时显示、过滤行为结论、WiFi运营商ASN校验。")
+                VersionLine(displayVersionName(currentAppVersionName(LocalContext.current)), "正式版：定速发射核心、释放耗时显示、过滤行为结论、WiFi运营商ASN校验。")
                 VersionLine("v0.9.8", "保留 0.9.7 高速测速核心，新增更新检测与后台下载。")
                 VersionLine("v0.9.7", "修复 FD 上限附近闪退；触发FD上限时优先释放本机连接并保存历史。")
                 VersionLine("v0.9.6", "修复停止按钮、通知跳转、新增批次被200锁死的问题。")
@@ -3356,6 +3401,120 @@ private fun UpdateDownloadDialog(
         },
         shape = ShapeL
     )
+}
+
+@Composable
+private fun OneUiSnackbarHost(hostState: SnackbarHostState) {
+    SnackbarHost(hostState = hostState) { data ->
+        Card(
+            modifier = Modifier
+                .padding(horizontal = 16.dp, vertical = 10.dp)
+                .fillMaxWidth(),
+            shape = RoundedCornerShape(18.dp),
+            colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.98f)),
+            elevation = CardDefaults.cardElevation(defaultElevation = 12.dp)
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp, vertical = 11.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    modifier = Modifier
+                        .width(32.dp)
+                        .height(32.dp)
+                        .background(BlueSoft, RoundedCornerShape(13.dp)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.CheckCircle,
+                        contentDescription = null,
+                        tint = Blue,
+                        modifier = Modifier.width(19.dp).height(19.dp)
+                    )
+                }
+                Spacer(Modifier.width(11.dp))
+                Text(
+                    text = data.visuals.message,
+                    color = TextDark,
+                    fontSize = 13.sp,
+                    lineHeight = 17.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun BottomNoticeBanner(
+    state: BottomNoticeUi,
+    modifier: Modifier = Modifier
+) {
+    AnimatedVisibility(
+        visible = state.visible && state.message.isNotBlank(),
+        modifier = modifier,
+        enter = fadeIn(animationSpec = tween(160)) + slideInVertically(animationSpec = tween(220)) { it / 2 },
+        exit = fadeOut(animationSpec = tween(180)) + slideOutVertically(animationSpec = tween(200)) { it / 2 }
+    ) {
+        val tint = when (state.tone) {
+            BottomNoticeTone.Success -> Green
+            BottomNoticeTone.Warning -> Orange
+            BottomNoticeTone.Error -> ErrorRed
+            BottomNoticeTone.Info -> Blue
+        }
+        val soft = when (state.tone) {
+            BottomNoticeTone.Success -> GreenSoft
+            BottomNoticeTone.Warning -> Color(0xFFFFF7ED)
+            BottomNoticeTone.Error -> RedSoft
+            BottomNoticeTone.Info -> BlueSoft
+        }
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 6.dp),
+            shape = RoundedCornerShape(18.dp),
+            colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.98f)),
+            elevation = CardDefaults.cardElevation(defaultElevation = 12.dp)
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp, vertical = 11.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    modifier = Modifier
+                        .width(30.dp)
+                        .height(30.dp)
+                        .background(soft, RoundedCornerShape(12.dp)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = if (state.tone == BottomNoticeTone.Error || state.tone == BottomNoticeTone.Warning) Icons.Filled.WarningAmber else Icons.Filled.CheckCircle,
+                        contentDescription = null,
+                        tint = tint,
+                        modifier = Modifier.width(18.dp).height(18.dp)
+                    )
+                }
+                Spacer(Modifier.width(10.dp))
+                Text(
+                    text = state.message,
+                    color = TextDark,
+                    fontSize = 13.sp,
+                    lineHeight = 17.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+        }
+    }
 }
 
 @Composable

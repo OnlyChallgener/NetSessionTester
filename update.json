@@ -1,6 +1,15 @@
 {
-  "versionCode": 101,
-  "versionName": "V1.0.1",
-  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.0.1-101/NetSessionTester-V1.0.1-build101-signed.apk",
-  "changelog": "V1.0.1 build101 紧急修复：修复顶部版本号显示错误，统一释放完成通知为白色浮层，移除重复黑色提示，不改动核心会话测试逻辑。"
+  "versionCode": 102,
+  "versionName": "V1.0.2",
+  "title": "发现新版本 V1.0.2 build102",
+  "content": [
+    "修复顶部版本徽标仍显示旧版本的问题",
+    "释放完成后只保留一个底部通知",
+    "释放完成通知改为白色 Material3 / OneUI 风格浮层",
+    "保留长提示内容：本机已释放，路由器会话表可能延迟数秒下降",
+    "不改动高性能定速发射核心、Ping 图表、FD 32360 保护"
+  ],
+  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.0.2-102/NetSessionTester-V1.0.2-build102-signed.apk",
+  "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/latest",
+  "force": false
 }

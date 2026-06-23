@@ -1,8 +1,16 @@
-# V1.0.0 发布版
+# NetSessionTester V1.0.2 build102
 
-- 升级 versionName 至 V1.0.0，versionCode 至 100。
-- 保留 test93 高性能 Token Bucket 定速发射核心。
-- 运行中显示：正在运行 · 定速发射 · UI/曲线每秒采样。
-- 释放过程中显示预计剩余；释放完成显示耗时，格式为 1.6s。
-- 过滤行为主卡片显示检测结论，不再显示“多节点推断”方法名。
-- WiFi 运营商判断增加 ASN 在线校验，失败时回退 IPv6 前缀推断。
+紧急修复版：
+
+- 修复顶部版本号仍显示旧版本的问题，版本徽标改为读取当前安装包 versionName。
+- 释放完成通知统一为底部白色 Material3 / OneUI 风格浮层。
+- 移除释放完成时的黑色 Snackbar 与系统 Toast 重复提示。
+- 保留长提示内容：本机已释放，路由器会话表可能延迟数秒下降。
+- 保留 V1.0.0 高性能定速发射核心、释放耗时显示、Ping 图表和 FD 32360 保护。
+
+发布信息：
+
+- versionName: V1.0.2
+- versionCode: 102
+- Tag: v1.0.1-102
+- APK: NetSessionTester-V1.0.2-build102-signed.apk
