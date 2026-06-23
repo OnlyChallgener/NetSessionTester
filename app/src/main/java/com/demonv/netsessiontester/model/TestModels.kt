@@ -59,10 +59,11 @@ data class SessionConfig(
         return copy(
             host = cleanHost,
             port = port.coerceIn(1, 65535),
-            // build85：batchSize 明确作为手动目标 CPS 使用，不再做自动放大/降速。
-            batchSize = batchSize.coerceIn(20, 2000),
-            intervalMs = intervalMs.coerceIn(300L, 2_000L),
-            timeoutMs = 3_000,
+            // batchSize 直接作为“目标 CPS”使用，不再做 128 动态调速。
+            batchSize = batchSize.coerceIn(20, 2_000),
+            // 调度间隔用于固定 CPS 发射：每个 tick 发起 batchSize * intervalMs / 1000 条。
+            intervalMs = intervalMs.coerceIn(20L, 1_000L),
+            timeoutMs = timeoutMs.coerceIn(300, 10_000),
             successLimit = successLimit.coerceIn(1, 70_000),
             failureLimit = failureLimit.coerceIn(1, 100_000)
         )

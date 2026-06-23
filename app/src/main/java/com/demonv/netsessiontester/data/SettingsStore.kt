@@ -9,11 +9,11 @@ data class SavedSettings(
     val host: String = "www.baidu.com",
     val port: String = "80",
     val mode: TestMode = TestMode.IPV4_THEN_IPV6,
-    val batchSize: String = "128",
-    val intervalMs: String = "500",
-    val timeoutMs: String = "3000",
+    val batchSize: String = "200",
+    val intervalMs: String = "100",
+    val timeoutMs: String = "1200",
     val successLimit: String = "65535",
-    val failureLimit: String = "1200",
+    val failureLimit: String = "600",
     val keepConnections: Boolean = true,
     val maskPrivacy: Boolean = false,
     val historyLimit: String = "30"
@@ -23,16 +23,39 @@ class SettingsStore(context: Context) {
     private val prefs = context.getSharedPreferences("net_session_settings_v6", Context.MODE_PRIVATE)
 
     suspend fun load(): SavedSettings = withContext(Dispatchers.IO) {
+        val savedBatchSize = prefs.getString(KEY_BATCH_SIZE, "200") ?: "200"
+        val migratedFix3 = prefs.getBoolean(KEY_PERF_FIX3_MIGRATED, false)
+        val migratedV86Failure = prefs.getBoolean(KEY_V86_FAILURE_MIGRATED, false)
+        val performanceBatchSize = when {
+            savedBatchSize.isBlank() -> "200"
+            savedBatchSize.trim() == "128" -> "200"
+            !migratedFix3 && savedBatchSize.trim() == "1000" -> "200"
+            else -> savedBatchSize
+        }
+        val savedFailureLimit = prefs.getString(KEY_FAILURE_LIMIT, "600") ?: "600"
+        val performanceFailureLimit = when {
+            savedFailureLimit.isBlank() -> "600"
+            !migratedV86Failure && savedFailureLimit.trim() == "1200" -> "600"
+            else -> savedFailureLimit
+        }
+        if (!migratedFix3 || !migratedV86Failure) {
+            prefs.edit()
+                .putBoolean(KEY_PERF_FIX3_MIGRATED, true)
+                .putBoolean(KEY_V86_FAILURE_MIGRATED, true)
+                .putString(KEY_BATCH_SIZE, performanceBatchSize)
+                .putString(KEY_FAILURE_LIMIT, performanceFailureLimit)
+                .apply()
+        }
         SavedSettings(
             host = prefs.getString(KEY_HOST, "www.baidu.com") ?: "www.baidu.com",
             port = prefs.getString(KEY_PORT, "80") ?: "80",
             mode = runCatching { TestMode.valueOf(prefs.getString(KEY_MODE, TestMode.IPV4_THEN_IPV6.name) ?: TestMode.IPV4_THEN_IPV6.name) }
                 .getOrDefault(TestMode.IPV4_THEN_IPV6),
-            batchSize = prefs.getString(KEY_BATCH_SIZE, "128") ?: "128",
-            intervalMs = prefs.getString(KEY_INTERVAL_MS, "500") ?: "500",
-            timeoutMs = prefs.getString(KEY_TIMEOUT_MS, "3000") ?: "3000",
+            batchSize = performanceBatchSize,
+            intervalMs = prefs.getString(KEY_INTERVAL_MS, "100") ?: "100",
+            timeoutMs = prefs.getString(KEY_TIMEOUT_MS, "1200") ?: "1200",
             successLimit = prefs.getString(KEY_SUCCESS_LIMIT, "65535") ?: "65535",
-            failureLimit = prefs.getString(KEY_FAILURE_LIMIT, "1200") ?: "1200",
+            failureLimit = performanceFailureLimit,
             keepConnections = prefs.getBoolean(KEY_KEEP_CONNECTIONS, true),
             maskPrivacy = prefs.getBoolean(KEY_MASK_PRIVACY, false),
             historyLimit = prefs.getString(KEY_HISTORY_LIMIT, "30") ?: "30"
@@ -67,5 +90,7 @@ class SettingsStore(context: Context) {
         private const val KEY_KEEP_CONNECTIONS = "keep_connections"
         private const val KEY_MASK_PRIVACY = "mask_privacy"
         private const val KEY_HISTORY_LIMIT = "history_limit"
+        private const val KEY_PERF_FIX3_MIGRATED = "perf_fix3_migrated"
+        private const val KEY_V86_FAILURE_MIGRATED = "v86_failure_migrated"
     }
 }

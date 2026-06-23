@@ -1,10 +1,9 @@
 # Changelog
 
-## v0.9.9 build85 local
+## v0.9.9-test91
 
-- 取消自动 CPS 放大/降速，新增值明确为目标 CPS。
-- 手动 CPS 按调度间隔换算每批新增量，不再把用户值当作每批新增。
-- TCP 超时固定 3000ms。
-- 数字、图表、日志按 1 秒快照刷新，避免活动数快速闪动。
-- FD / Socket 收尾线调整为 32360 附近，31800 后裁剪新增批次，避免超冲闪退。
-- 保留分段失败阈值：120 / 200 / 360 / 600。
+- Fixed target CPS scheduling: target CPS is no longer treated as per-tick batch size.
+- Re-enabled scheduler interval setting in the session parameters UI.
+- Replaced “智能调速” running label with fixed CPS wording.
+- Throttled stats/UI updates to 1 second to avoid flickering session counts.
+- Kept ping chart refresh, FD 32360 protection, and failure interval text.
