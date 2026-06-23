@@ -257,8 +257,8 @@ private fun currentAppVersionCode(context: Context): Long = runCatching {
 }.getOrDefault(0L)
 
 private fun currentAppVersionName(context: Context): String = runCatching {
-    context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "v0.9.9"
-}.getOrDefault("v0.9.9")
+    context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "V1.0.0"
+}.getOrDefault("V1.0.0")
 
 private fun displayVersionName(raw: String): String {
     var clean = raw.trim()
@@ -453,6 +453,11 @@ private data class NetworkProbeInfo(
     val refreshMode: String = "待检测"
 )
 
+private data class CarrierDetectionResult(
+    val carrier: String = "未知",
+    val source: String = "未知"
+)
+
 private data class StunProbeResult(
     val mappedIp: String,
     val mappedPort: Int,
@@ -556,14 +561,17 @@ private fun carrierFromMccMnc(code: String): String {
 }
 
 private fun normalizeCarrierName(name: String): String {
-    val value = name.trim().lowercase()
+    val raw = name.trim()
+    val value = raw.lowercase()
     return when {
-        value.isBlank() || value == "unknown" -> "未知"
-        "广电" in value || "cbn" in value || "broadcast" in value -> "中国广电"
-        "移动" in value || "china mobile" in value || "cmcc" in value -> "中国移动"
-        "联通" in value || "china unicom" in value || "unicom" in value -> "中国联通"
-        "电信" in value || "chinanet" in value || "china telecom" in value || "telecom" in value -> "中国电信"
-        else -> name.trim().takeIf { it.isNotBlank() } ?: "未知"
+        value.isBlank() || value == "unknown" || value == "null" -> "未知"
+        "广电" in value || "cbn" in value || "broadnet" in value || "broadcast" in value || "china radio" in value -> "中国广电"
+        "移动" in value || "china mobile" in value || "chinamobile" in value || "cmcc" in value || "cmnet" in value -> "中国移动"
+        "联通" in value || "china unicom" in value || "unicom" in value || "china169" in value || "cnc" in value -> "中国联通"
+        "电信" in value || "chinanet" in value || "china telecom" in value || "telecom" in value || "ctcc" in value -> "中国电信"
+        "cernet" in value || "教育网" in value -> "教育网"
+        "dr.peng" in value || "dr peng" in value || "鹏博士" in value -> "鹏博士"
+        else -> raw.takeIf { it.isNotBlank() } ?: "未知"
     }
 }
 
@@ -579,12 +587,50 @@ private fun inferCarrierFromIpv6Prefix(ipv6: String): String {
     }
 }
 
-private fun displayCarrierFromEnv(env: NetworkEnvironment, ipv4: String, ipv6: String): String {
+private fun detectCarrierFromAsn(ip: String): CarrierDetectionResult? {
+    val target = ip.trim()
+    if (!target.isUsableIpText()) return null
+    return runCatching {
+        val conn = (URL("https://ipwho.is/$target?fields=success,connection").openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = 1800
+            readTimeout = 2200
+            setRequestProperty("Accept", "application/json")
+            setRequestProperty("User-Agent", "NetSessionTester")
+        }
+        try {
+            if (conn.responseCode !in 200..299) return@runCatching null
+            val body = conn.inputStream.bufferedReader().use { it.readText() }
+            val obj = JSONObject(body)
+            if (!obj.optBoolean("success", false)) return@runCatching null
+            val connection = obj.optJSONObject("connection") ?: return@runCatching null
+            val samples = listOf(
+                connection.optString("isp", ""),
+                connection.optString("org", ""),
+                connection.optString("asn", "")
+            )
+            val carrier = samples.asSequence()
+                .map { normalizeCarrierName(it) }
+                .firstOrNull { it != "未知" }
+                ?: "未知"
+            carrier.takeIf { it != "未知" }?.let { CarrierDetectionResult(it, "ASN") }
+        } finally {
+            conn.disconnect()
+        }
+    }.getOrNull()
+}
+
+private fun displayCarrierFromEnv(env: NetworkEnvironment, ipv4: String, ipv6: String, full: Boolean): String {
     val prefixCarrier = inferCarrierFromIpv6Prefix(ipv6)
+    val asnCarrier = if (full && env.hasWifi && !env.hasVpn) {
+        detectCarrierFromAsn(ipv6).takeIf { it?.carrier != "未知" }
+            ?: detectCarrierFromAsn(ipv4).takeIf { it?.carrier != "未知" }
+    } else null
     return when {
-        env.hasCellular && env.carrierName.isNotBlank() && env.carrierName != "未知" -> env.carrierName
-        prefixCarrier != "未知" -> prefixCarrier
         env.hasVpn -> "VPN/代理"
+        env.hasCellular && env.carrierName.isNotBlank() && env.carrierName != "未知" -> env.carrierName
+        asnCarrier != null -> asnCarrier.carrier
+        prefixCarrier != "未知" -> prefixCarrier
         env.hasWifi -> "WiFi出口未知"
         ipv4.isUsableIpText() || ipv6.isUsableIpText() -> "出口未知"
         else -> "未知"
@@ -693,9 +739,10 @@ private fun buildNetworkProbeInfo(
 
     val filtering = when {
         env.hasVpn -> "无法准确判断"
-        isDirectPublicV4 -> "无明显限制"
-        stun != null -> "多节点推断"
-        publicV4 != null && full -> "过滤待确认"
+        isDirectPublicV4 -> "开放"
+        strongSymmetric -> "端口受限"
+        stun != null -> "端口受限"
+        publicV4 != null && full -> "待确认"
         stun == null && full -> "UDP回包失败"
         else -> "待检测"
     }
@@ -740,7 +787,7 @@ private fun buildNetworkProbeInfo(
         else -> "网络信息已更新。"
     }
 
-    val carrierText = displayCarrierFromEnv(env, publicV4 ?: publicIpResult.ipv4, publicIpResult.ipv6)
+    val carrierText = displayCarrierFromEnv(env, publicV4 ?: publicIpResult.ipv4, publicIpResult.ipv6, full)
 
     return NetworkProbeInfo(
         localIp = localIpv4 ?: localIpv6 ?: "不可用",
@@ -2693,7 +2740,7 @@ private fun SettingsPage(
                     ParamField("目标会话（条）", successLimit, onSuccessLimitChange, Modifier.weight(1f))
                     Spacer(Modifier.weight(1f))
                 }
-                Text("test95：基于test93高性能核心；运行中文案更新；释放完成显示耗时并优化进度动画。", color = Muted, fontSize = 12.sp, lineHeight = 16.sp)
+                Text("V1.0.0：采用test93高性能定速发射核心，优化释放耗时显示、过滤行为结论和WiFi运营商判断。", color = Muted, fontSize = 12.sp, lineHeight = 16.sp)
             }
         }
         item {
@@ -3128,9 +3175,9 @@ private fun VersionInfoDialog(
             Column(verticalArrangement = Arrangement.spacedBy(9.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("当前版本", color = Muted, fontSize = 12.sp, modifier = Modifier.weight(1f))
-                    StatusChip("v0.9.9 test95", BlueSoft, Blue, compact = true)
+                    StatusChip("V1.0.0", BlueSoft, Blue, compact = true)
                 }
-                VersionLine("v0.9.9 test95", "基于test93性能核心；释放完成显示耗时，进度动画更平滑。")
+                VersionLine("V1.0.0", "正式版：定速发射核心、释放耗时显示、过滤行为结论、WiFi运营商ASN校验。")
                 VersionLine("v0.9.8", "保留 0.9.7 高速测速核心，新增更新检测与后台下载。")
                 VersionLine("v0.9.7", "修复 FD 上限附近闪退；触发FD上限时优先释放本机连接并保存历史。")
                 VersionLine("v0.9.6", "修复停止按钮、通知跳转、新增批次被200锁死的问题。")

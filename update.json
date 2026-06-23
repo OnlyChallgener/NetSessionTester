@@ -1,16 +1,16 @@
 {
-  "versionCode": 88,
-  "versionName": "v0.9.9",
-  "title": "发现新版本 v0.9.9 build88",
+  "versionCode": 100,
+  "versionName": "V1.0.0",
+  "title": "发现新版本 V1.0.0 build100",
   "content": [
-    "versionCode 升至 88，build87 用户可检测到更新",
-    "TCP 发射核心改为流水线持续发射，避免整批 awaitAll 被慢连接拖住",
-    "6000 以上会话失败上限改为 360，减少 9000-10000 区间误杀",
-    "继续取消失败小曲线和低会话 3s/5s 无增长终止",
-    "测试结束/已释放后 CPS 卡片显示平均CPS，避免最后一秒显示 0/s",
-    "保留默认目标CPS 200/s、Ping 图表刷新、FD 32360 保护和顶部下载横幅"
+    "升级至 V1.0.0 正式版，versionCode 100",
+    "保留 test93 高性能定速发射核心，固定 CPS 更稳定",
+    "释放过程中显示预计剩余，释放完成显示耗时，例如 1.6s",
+    "过滤行为主卡片显示检测结果，不再显示多节点推断方法名",
+    "WiFi 运营商判断增加 ASN 在线校验，失败时回退 IPv6 前缀推断",
+    "继续保留 Ping 图表、失败区间文字、FD 32360 保护和顶部下载横幅"
   ],
-  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v0.9.9-88/NetSessionTester-v0.9.9-build88-signed.apk",
+  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.0.0-100/NetSessionTester-V1.0.0-build100-signed.apk",
   "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/latest",
   "force": false
 }
