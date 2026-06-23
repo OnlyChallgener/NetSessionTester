@@ -1,9 +1,7 @@
-# V1.0.2 build102 hotfix test notes
+# V1.0.3 build103 hotfix test notes
 
-重点自测：
-
-1. 安装后顶部版本徽标显示 V1.0.2，不再显示 v0.9.9。
-2. 手动停止 / 强制释放 / FD保护释放完成后，底部只出现一个白色浮层。
-3. 不再同时出现黑色 Snackbar 和系统 Toast。
-4. 白色浮层内容为长文案：本机已释放，路由器会话表可能延迟数秒下降。
-5. 高性能定速发射核心不变，CPS 精度应与 test93/test95 一致。
+1. GitHub Actions 可通过 compileReleaseKotlin。
+2. 安装后顶部版本徽标显示 V1.0.3。
+3. 手动停止/自动释放完成后，底部只出现一个白色浮层通知。
+4. 不再同时出现黑色 Snackbar。
+5. 定速发射核心、Ping 图表、FD 32360 保护不变。

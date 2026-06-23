@@ -1,15 +1,15 @@
 {
-  "versionCode": 102,
-  "versionName": "V1.0.2",
-  "title": "发现新版本 V1.0.2 build102",
+  "versionCode": 103,
+  "versionName": "V1.0.3",
+  "title": "发现新版本 V1.0.3 build103",
   "content": [
-    "修复顶部版本徽标仍显示旧版本的问题",
-    "释放完成后只保留一个底部通知",
-    "释放完成通知改为白色 Material3 / OneUI 风格浮层",
-    "保留长提示内容：本机已释放，路由器会话表可能延迟数秒下降",
+    "修复 V1.0.2 中 BuildConfig 导致的编译失败",
+    "顶部版本徽标改为读取系统安装包版本，避免继续显示旧版本",
+    "释放完成后只保留一个底部白色浮层通知",
+    "移除释放完成时重复出现的黑色 Snackbar 提示",
     "不改动高性能定速发射核心、Ping 图表、FD 32360 保护"
   ],
-  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.0.2-102/NetSessionTester-V1.0.2-build102-signed.apk",
+  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.0.3-103/NetSessionTester-V1.0.3-build103-signed.apk",
   "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/latest",
   "force": false
 }

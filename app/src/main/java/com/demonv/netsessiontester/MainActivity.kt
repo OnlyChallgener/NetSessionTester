@@ -271,11 +271,12 @@ private fun currentAppVersionCode(context: Context): Long = runCatching {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) info.longVersionCode else info.versionCode.toLong()
 }.getOrDefault(0L)
 
-private fun currentAppVersionName(context: Context): String = runCatching {
-    BuildConfig.VERSION_NAME.ifBlank {
-        context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "V1.0.2"
-    }
-}.getOrDefault("V1.0.2")
+private fun currentAppVersionName(context: Context): String {
+    return runCatching {
+        val pkg = context.packageManager.getPackageInfo(context.packageName, 0)
+        pkg.versionName?.takeIf { it.isNotBlank() } ?: "V1.0.3"
+    }.getOrDefault("V1.0.3")
+}
 
 private fun displayVersionName(raw: String): String {
     val clean = raw.trim()
@@ -1473,12 +1474,8 @@ private fun NetSessionTesterApp() {
     fun notifyLocalReleased(prefix: String = "本机已释放") {
         val message = "$prefix，路由器会话表可能延迟数秒下降"
         appendLog(LogLine(level = LogLevel.WARN, text = message))
-        bottomNoticeJob?.cancel()
-        bottomNotice = BottomNoticeUi()
-        scope.launch {
-            snackbarHostState.currentSnackbarData?.dismiss()
-            snackbarHostState.showSnackbar(message = message, duration = SnackbarDuration.Short)
-        }
+        scope.launch { snackbarHostState.currentSnackbarData?.dismiss() }
+        showBottomNotice(message = message, tone = BottomNoticeTone.Success, durationMs = 3_800L)
     }
 
     fun openGithub(url: String = PROJECT_GITHUB_URL) {
@@ -2785,7 +2782,7 @@ private fun SettingsPage(
                     ParamField("目标会话（条）", successLimit, onSuccessLimitChange, Modifier.weight(1f))
                     Spacer(Modifier.weight(1f))
                 }
-                Text("V1.0.2：修复版本徽标与释放完成通知重复问题，保留高性能定速发射核心。", color = Muted, fontSize = 12.sp, lineHeight = 16.sp)
+                Text("V1.0.3：修复版本徽标编译问题，释放完成通知统一为白色浮层。", color = Muted, fontSize = 12.sp, lineHeight = 16.sp)
             }
         }
         item {
