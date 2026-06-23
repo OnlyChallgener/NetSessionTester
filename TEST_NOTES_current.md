@@ -1,4 +1,4 @@
-# NetSessionTester v0.9.9-test91 自测说明
+# NetSessionTester v0.9.9-test92 自测说明
 
 本包为自测包，不用于发布。
 
@@ -16,5 +16,5 @@
 
 ## 重要说明
 
-当前包 versionCode = 91，versionName = v0.9.9-test91。
+当前包 versionCode = 91，versionName = v0.9.9-test92。
 update.json 暂时保持 build88，避免自测版没有 Release 时触发 404。

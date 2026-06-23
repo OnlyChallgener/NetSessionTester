@@ -1515,10 +1515,16 @@ private fun NetSessionTesterApp() {
         val terminal = stats.phase.contains("完成") || stats.phase.contains("释放") || stats.phase.contains("中断") || stats.phase.contains("上限")
         if (!terminal && now - last < 1_000L) return
         val elapsed = ((now - currentStartedAt) / 1_000L).toInt().coerceAtLeast(0)
+        val previousPeak = chartPoints.filter { it.protocol == stats.protocol }.maxOfOrNull { it.active } ?: 0
+        val displayActive = if (terminal && stats.activeSessions == 0) {
+            maxOf(previousPeak, stats.maxStableSessions, stats.totalSuccess)
+        } else {
+            stats.activeSessions
+        }
         val point = ChartPoint(
             protocol = stats.protocol,
             elapsedSec = elapsed,
-            active = stats.activeSessions,
+            active = displayActive,
             failure = stats.totalFailure,
             total = stats.totalAttempts,
             cps = stats.cps,
@@ -2674,7 +2680,7 @@ private fun SettingsPage(
                     ParamField("目标会话（条）", successLimit, onSuccessLimitChange, Modifier.weight(1f))
                     Spacer(Modifier.weight(1f))
                 }
-                Text("test91：固定CPS=目标CPS×调度间隔换算发射；默认200/s、100ms；取消智能调速、CPS曲线和失败曲线；UI/曲线每秒采样。", color = Muted, fontSize = 12.sp, lineHeight = 16.sp)
+                Text("test92：固定CPS校准；新增低会话质量判定；高会话缩短有效超时提速；UI/曲线每秒采样。", color = Muted, fontSize = 12.sp, lineHeight = 16.sp)
             }
         }
         item {
@@ -3091,9 +3097,9 @@ private fun VersionInfoDialog(
             Column(verticalArrangement = Arrangement.spacedBy(9.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("当前版本", color = Muted, fontSize = 12.sp, modifier = Modifier.weight(1f))
-                    StatusChip("v0.9.9 test91", BlueSoft, Blue, compact = true)
+                    StatusChip("v0.9.9 test92", BlueSoft, Blue, compact = true)
                 }
-                VersionLine("v0.9.9 test91", "修复目标CPS误当批量窗口；恢复调度间隔；UI/曲线每秒稳定采样。")
+                VersionLine("v0.9.9 test92", "低会话质量判定 + 高会话有效超时优化；保留固定CPS和调度间隔。")
                 VersionLine("v0.9.8", "保留 0.9.7 高速测速核心，新增更新检测与后台下载。")
                 VersionLine("v0.9.7", "修复 FD 上限附近闪退；触发FD上限时优先释放本机连接并保存历史。")
                 VersionLine("v0.9.6", "修复停止按钮、通知跳转、新增批次被200锁死的问题。")

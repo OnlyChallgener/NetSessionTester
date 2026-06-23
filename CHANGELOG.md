@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.9.9-test91
+## v0.9.9-test92
 
 - Fixed target CPS scheduling: target CPS is no longer treated as per-tick batch size.
 - Re-enabled scheduler interval setting in the session parameters UI.

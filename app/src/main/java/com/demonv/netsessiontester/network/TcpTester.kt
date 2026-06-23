@@ -33,10 +33,11 @@ import java.util.Collections
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * v0.9.9-test91：固定 CPS 校准自测核心。
+ * v0.9.9-test92：低会话判定 + 高会话提速自测核心。
  *
- * 修复 test90 把“目标CPS”误当成“每 tick 批量窗口”的问题。
- * 现在严格按：每 tick 发起 = 目标CPS * 调度间隔 / 1000。
+ * 延续 test91 固定 CPS 校准：每 tick 发起 = 目标CPS * 调度间隔 / 1000。
+ * 新增低会话质量判定：尝试数 + 失败数 / 成功率，避免低会话坏链路拖太久。
+ * 高会话阶段缩短有效 connect timeout，提升批次推进速度。
  *
  * 规则：
  * - 不恢复智能 CPS/动态调速；
@@ -120,7 +121,7 @@ class TcpTester {
         val schedulerIntervalMs = config.intervalMs.coerceIn(20L, 1_000L)
         val batchPerTick = ((targetCps.toLong() * schedulerIntervalMs + 999L) / 1000L).toInt().coerceIn(1, 2_000)
         onLog(LogLine(level = LogLevel.SUCCESS, text = "${protocol.label} 解析成功：${addressText.joinToString(" / ")}"))
-        onLog(LogLine(level = LogLevel.INFO, text = "${protocol.label} 使用 test91 固定 CPS 核心：目标 ${targetCps}/s，调度 ${schedulerIntervalMs}ms，每 tick ${batchPerTick} 条，多地址轮询，FD 32360。"))
+        onLog(LogLine(level = LogLevel.INFO, text = "${protocol.label} 使用 test92 固定CPS核心：目标 ${targetCps}/s，调度 ${schedulerIntervalMs}ms，每 tick ${batchPerTick} 条，多地址轮询，低会话质量判定，FD 32360。"))
 
         var totalSuccess = 0
         var totalFailure = 0
@@ -152,8 +153,10 @@ class TcpTester {
 
             val softLimit = failureSoftLimitFor(maxStable)
             val hardLimit = failureHardLimitFor(maxStable, config.failureLimit)
-            if (shouldStopByFailure(totalFailure, softLimit, hardLimit, maxStable, weakAfterSoftLimit)) {
-                onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 达到失败收尾条件：失败 $totalFailure，软阈值 $softLimit，硬阈值 $hardLimit，峰值 $maxStable"))
+            val lowQualityStop = shouldStopByLowQuality(totalSuccess, totalFailure, totalAttempts, maxStable)
+            if (lowQualityStop || shouldStopByFailure(totalFailure, softLimit, hardLimit, maxStable, weakAfterSoftLimit)) {
+                val reason = if (lowQualityStop) "低会话质量判定" else "失败收尾条件"
+                onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 达到${reason}：成功 $totalSuccess，失败 $totalFailure，总计 $totalAttempts，软阈值 $softLimit，硬阈值 $hardLimit，峰值 $maxStable"))
                 break
             }
 
@@ -246,14 +249,20 @@ class TcpTester {
             }
 
             val stopByFd = maxStable >= fdSafeStop || totalSuccess >= fdSafeStop || maxStable >= fdEmergencyStop || totalSuccess >= fdEmergencyStop || errors.containsKey("FD上限")
+            val stopByLowQuality = shouldStopByLowQuality(totalSuccess, totalFailure, totalAttempts, maxStable)
             val stopByFailure = shouldStopByFailure(totalFailure, failureSoftLimitFor(maxStable), failureHardLimitFor(maxStable, config.failureLimit), maxStable, weakAfterSoftLimit)
-            if (stopByFd || stopByFailure || totalSuccess >= config.successLimit) {
+            if (stopByFd || stopByLowQuality || stopByFailure || totalSuccess >= config.successLimit) {
                 when {
                     stopByFd -> {
                         errors["FD上限"] = (errors["FD上限"] ?: 0) + 1
                         stats = stats.copy(phase = "FD上限", errorSummary = errors.toMap(), maxStableSessions = maxStable)
                         onStats(stats)
                         onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 触发 Android FD/Socket 上限保护：峰值 $maxStable，活动 $totalSuccess，停止新增并释放"))
+                    }
+                    stopByLowQuality -> {
+                        stats = stats.copy(phase = "低会话失败", errorSummary = errors.toMap(), maxStableSessions = maxStable)
+                        onStats(stats)
+                        onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} 低会话质量判定收尾：成功 $totalSuccess，失败 $totalFailure，总计 $totalAttempts，停止新增并释放"))
                     }
                     stopByFailure -> {
                         stats = stats.copy(phase = "失败上限", errorSummary = errors.toMap(), maxStableSessions = maxStable)
@@ -277,6 +286,7 @@ class TcpTester {
         val finalHardLimit = failureHardLimitFor(finalPeak, config.failureLimit)
         val finalPhase = when {
             finalPeak >= fdSafeStop || stats.errorSummary.containsKey("FD上限") || stats.phase == "FD上限" -> "FD上限"
+            stats.phase == "低会话失败" -> "低会话失败"
             totalFailure >= finalHardLimit || stats.phase == "失败上限" -> "失败上限"
             totalFailure > 0 -> "出现失败"
             totalSuccess >= config.successLimit -> "测试完成"
@@ -338,6 +348,17 @@ class TcpTester {
         return true
     }
 
+    private fun shouldStopByLowQuality(success: Int, failure: Int, attempts: Int, peak: Int): Boolean {
+        if (peak >= 1_000) return false
+        if (attempts < 500) return false
+        if (peak < 500 && failure >= 120) return true
+        if (attempts >= 800) {
+            val successRate = success.toFloat() / attempts.toFloat()
+            if (successRate < 0.60f && failure >= 120) return true
+        }
+        return false
+    }
+
     private fun weakGrowthThreshold(peak: Int, targetWindow: Int): Int {
         val ratio = when {
             peak < 8_000 -> 0.10f
@@ -349,9 +370,11 @@ class TcpTester {
 
     private fun effectiveTimeoutMs(configTimeoutMs: Int, peak: Int): Int {
         return when {
-            peak < 6_000 -> configTimeoutMs
-            peak < 12_000 -> configTimeoutMs.coerceAtMost(900)
-            else -> configTimeoutMs.coerceAtMost(750)
+            peak < 500 -> configTimeoutMs.coerceAtMost(800)
+            peak < 1_000 -> configTimeoutMs.coerceAtMost(1_000)
+            peak < 6_000 -> configTimeoutMs.coerceAtMost(1_200)
+            peak < 12_000 -> configTimeoutMs.coerceAtMost(800)
+            else -> configTimeoutMs.coerceAtMost(650)
         }.coerceAtLeast(300)
     }
 
