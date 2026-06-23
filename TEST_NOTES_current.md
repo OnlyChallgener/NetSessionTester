@@ -1,20 +1,18 @@
-# NetSessionTester v0.9.9-test92 自测说明
+# v0.9.9-test93 自测说明
 
-本包为自测包，不用于发布。
+目标：验证非阻塞流水线发射是否提升高 CPS 性能，并改善释放速度。
 
-## 修复点
+关键变化：
+- 去掉 openBatch/awaitAll 整批等待。
+- Token Bucket 按真实时间补发固定 CPS。
+- pending 窗口 = CPS × 4，限制 1000..8000。
+- 停止时立即切 releaseEpoch 并取消 pending scope，未完成连接后续自关闭。
+- close 使用 SO_LINGER(0)，释放更快。
+- 保留调度间隔 ms。
+- 继续不发布，update.json 保持 build88。
 
-- 修复 test90 把“目标CPS”误当成“每 tick 批量窗口”的问题。
-- 目标 CPS 现在按公式发射：每 tick 数量 = 目标CPS × 调度间隔ms / 1000。
-  - 例如目标 100/s、调度 100ms => 每 tick 10 条，平均约 100/s。
-  - 例如目标 200/s、调度 100ms => 每 tick 20 条，平均约 200/s。
-- 恢复设置页“调度间隔ms”。
-- 测试控制文案改为“固定CPS”，不再显示“智能调速”。
-- UI/曲线刷新改为 1 秒节流，活动数视觉上更稳定。
-- 继续保留 Ping 图表刷新、FD 32360 保护、失败区间文字。
-- 继续取消 CPS 曲线、失败曲线、3s/5s 无增长检测。
-
-## 重要说明
-
-当前包 versionCode = 91，versionName = v0.9.9-test92。
-update.json 暂时保持 build88，避免自测版没有 Release 时触发 404。
+建议测试：
+- 200 CPS / 100ms
+- 500 CPS / 100ms
+- 1000 CPS / 100ms
+- 1000 CPS / 50ms
