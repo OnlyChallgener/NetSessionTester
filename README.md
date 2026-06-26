@@ -1,24 +1,18 @@
 # NetSessionTester
 
-当前版本：V1.0.6-internal build106
+当前版本：V1.0.7 build107
 
-NetSessionTester 是一款 Android TCP 会话测试、NAT 诊断、Ping 质量监控工具。
+宽带会话测试器：支持 TCP 会话测试、IPv4/IPv6 分别测试、NAT/STUN 诊断、独立 Ping、Ping 响应日志、网络信息检测与更新检测。
 
-## 本版自测重点
+## V1.0.7 重点修复
 
-- 设置页目标与模式合并，减少卡片数量。
-- 网络信息卡支持折叠，减少首页空间占用。
-- Ping 日志支持持久化保存最近 5 次测试。
-- Ping 日志弹窗采用 OneUI 卡片式汇总与折叠记录。
-- NAT 检测采用更清晰的兼容口径：多节点端口保持显示 NAT1 / 全锥形，同时保留过滤行为验证状态。
-- 首页和设置页卡片支持长按拖动排序。
+- 修复运营商识别误显示 `No. 1, Jin Rong Street` 等地址字段的问题。
+- 收紧 NAT1 / 全锥形判定，避免端口保持就全部判为 NAT1。
+- 版本信息弹窗补齐 V1.0.x 日志。
+- Ping 参数卡去掉多余标题，保留独立 Ping 简介和开关。
+- 协议选择框统一为输入框样式，与间隔、超时、次数保持一致。
+- 优化卡片长按拖动排序节奏，降低闪跳、重叠和视觉突变风险。
 
-## 构建产物
+## GitHub Actions 产物
 
-GitHub Actions 生成：
-
-```text
-NetSessionTester-V1.0.6-internal-build106-signed.apk
-```
-
-此版本为自测版，不建议作为正式 Release 推送给普通用户。
+`NetSessionTester-V1.0.7-build107-signed.apk`

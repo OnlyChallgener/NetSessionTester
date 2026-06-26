@@ -381,8 +381,8 @@ private fun currentAppVersionCode(context: Context): Long = runCatching {
 private fun currentAppVersionName(context: Context): String {
     return runCatching {
         val pkg = context.packageManager.getPackageInfo(context.packageName, 0)
-        pkg.versionName?.takeIf { it.isNotBlank() } ?: "V1.0.6-internal"
-    }.getOrDefault("V1.0.6-internal")
+        pkg.versionName?.takeIf { it.isNotBlank() } ?: "V1.0.7"
+    }.getOrDefault("V1.0.7")
 }
 
 private fun displayVersionName(raw: String): String {
@@ -696,7 +696,11 @@ private fun normalizeCarrierName(name: String): String {
         "电信" in value || "chinanet" in value || "china telecom" in value || "telecom" in value || "ctcc" in value -> "中国电信"
         "cernet" in value || "教育网" in value -> "教育网"
         "dr.peng" in value || "dr peng" in value || "鹏博士" in value -> "鹏博士"
-        else -> raw.takeIf { it.isNotBlank() } ?: "未知"
+        // ASN/IP接口有时会把地址字段误放到 org/isp，例如 “No. 1, Jin Rong Street”。
+        // 运营商卡片只显示明确识别到的运营商，避免把街道/公司地址当成运营商。
+        value.contains("street") || value.contains("road") || value.contains("building") || value.contains("floor") -> "未知"
+        value.contains("jin rong") || value.contains("no. 1") || value.contains("address") -> "未知"
+        else -> "未知"
     }
 }
 
@@ -841,16 +845,17 @@ private fun buildNetworkProbeInfo(
 
     val strongSymmetric = stunSuccess && !stun!!.portStable && multiStun >= 3
     val weakPortChange = stunSuccess && !stun!!.portStable && multiStun < 3
-    val compatibleNat1 = stunSuccess && stun!!.portStable && stun.ipStable && stun.roundStable && multiStun >= 4
+    val strictNat1 = stunSuccess && stun!!.portStable && stun.ipStable && stun.roundStable && stun.successCount == stun.totalCount && stun.totalCount >= 6 && stun.roundCount >= 2
     val stableMapping = stunSuccess && stun!!.portStable && stun.ipStable && multiStun >= 3
 
     val natType = when {
         env.hasVpn -> "代理环境"
         isDirectPublicV4 -> "NAT1 / 开放"
+        strictNat1 -> "NAT1 / 全锥形"
         strongSymmetric -> "NAT4 / 对称型"
-        compatibleNat1 || stableMapping -> "NAT1 / 全锥形"
+        stableMapping -> "NAT3 / 端口保持型"
         stunSuccess -> "NAT3 / 受限型"
-        publicV4 != null && full -> "NAT3 / 待确认"
+        publicV4 != null && full -> "NAT类型待确认"
         publicV4 == null && full -> "UDP受限 / 无法判断"
         else -> "待检测"
     }
@@ -868,8 +873,8 @@ private fun buildNetworkProbeInfo(
     val filtering = when {
         env.hasVpn -> "无法准确判断"
         isDirectPublicV4 -> "开放型"
-        compatibleNat1 || stableMapping -> "未验证"
-        strongSymmetric -> "端口受限"
+        strictNat1 || stableMapping -> "未验证"
+        strongSymmetric -> "未验证"
         stun != null -> "未完成检测"
         publicV4 != null && full -> "待确认"
         stun == null && full -> "UDP回包失败"
@@ -879,10 +884,11 @@ private fun buildNetworkProbeInfo(
     val confidence = when {
         env.hasVpn -> "低"
         !full -> "低"
+        strictNat1 -> "高"
         strongSymmetric && stun!!.ipStable && stun.roundStable && multiStun >= 5 -> "高"
         strongSymmetric && stun!!.ipStable && multiStun >= 4 -> "中高"
-        stun != null && multiStun >= 5 && stun.ipStable && stun.roundStable -> "高"
-        stun != null && multiStun >= 4 && stun.roundStable -> "中高"
+        stun != null && stableMapping && multiStun >= 5 && stun.roundStable -> "中高"
+        stun != null && multiStun >= 4 && stun.roundStable -> "中"
         stun != null && multiStun >= 3 -> "中"
         stun != null -> "低"
         publicV4 != null -> "低"
@@ -907,12 +913,13 @@ private fun buildNetworkProbeInfo(
         !dns.systemHasAaaa && dns.domesticHasAaaa -> "系统DNS未返回IPv6，国内备用DNS可解析，可能被AdGuard/代理/路由器策略过滤。"
         !dns.systemHasAaaa && dns.globalHasAaaa -> "系统和国内备用DNS未返回IPv6，国外备用DNS可解析，可能存在地区DNS差异或本地DNS策略影响。"
         natType.startsWith("NAT4 / 对称") -> "${stunNodeText}多个可用STUN目标返回的外部端口不一致，当前按对称型/NAT4理解，P2P/游戏联机可能受影响。"
+        natType.startsWith("NAT3 / 端口保持") -> "${stunNodeText}多节点端口保持，但未满足6/6节点与2轮稳定条件，当前按端口保持型受限网络显示；完整过滤行为需RFC5780/自建节点验证。"
         natType.startsWith("NAT3 / 受限") && weakPortChange -> "${stunNodeText}UDP基础探测可用，但可用节点不足以确认对称型，当前按受限型理解，建议换网络或再次刷新复测。"
         natType.startsWith("NAT3 / 受限") -> "${stunNodeText}UDP基础探测可用，过滤行为未完成RFC5780验证；完整过滤行为需RFC5780/自建节点验证。"
-        natType.startsWith("NAT3 / 待确认") -> "公网IPv4可用，但STUN基础探测未成功，NAT类型暂按待确认处理。"
+        natType.startsWith("NAT类型待确认") -> "公网IPv4可用，但STUN基础探测未成功，NAT类型暂按待确认处理。"
         natType.startsWith("UDP") -> "多个STUN基础请求均失败，当前仅能判断为UDP受限/无法判断，可能是UDP被防火墙、代理或运营商限制。"
         natType.startsWith("NAT2") -> "UDP映射较稳定，普通联机能力中等。"
-        natType.startsWith("NAT1") -> "${stunNodeText}多节点端口保持，按兼容口径判定为 NAT1；完整过滤行为需 RFC5780 / 自建节点验证。"
+        natType.startsWith("NAT1") -> "${stunNodeText}6/6节点与2轮复测均保持同一公网端口，按兼容口径判定为 NAT1；完整过滤行为需 RFC5780 / 自建节点验证。"
         else -> "网络信息已更新。"
     }
 
@@ -3262,10 +3269,11 @@ private fun ReorderableCardItem(
     var draggingId by remember { mutableStateOf<String?>(null) }
     var dragOffsetY by remember { mutableStateOf(0f) }
     val density = LocalDensity.current
-    val thresholdPx = with(density) { 118.dp.toPx() }
+    val thresholdPx = with(density) { 170.dp.toPx() }
+    var lastReorderAt by remember { mutableStateOf(0L) }
     val isDragging = draggingId == id
-    val scale by animateFloatAsState(if (isDragging) 1.018f else 1f, tween(150), label = "dragScale")
-    val elevation by animateFloatAsState(if (isDragging) 18f else 0f, tween(150), label = "dragElevation")
+    val scale by animateFloatAsState(if (isDragging) 1.014f else 1f, tween(220), label = "dragScale")
+    val elevation by animateFloatAsState(if (isDragging) 20f else 0f, tween(220), label = "dragElevation")
 
     Box(
         modifier = modifier
@@ -3295,17 +3303,22 @@ private fun ReorderableCardItem(
                         if (draggingId != id) return@detectDragGesturesAfterLongPress
                         dragOffsetY += dragAmount.y
                         if (abs(dragOffsetY) >= thresholdPx) {
-                            val from = order.indexOf(id)
-                            if (from >= 0) {
-                                val to = (from + if (dragOffsetY > 0) 1 else -1).coerceIn(0, order.lastIndex)
-                                if (to != from) {
-                                    val next = order.toMutableList()
-                                    next.removeAt(from)
-                                    next.add(to, id)
-                                    onOrderChange(next)
+                            val now = System.currentTimeMillis()
+                            if (now - lastReorderAt >= 240L) {
+                                val from = order.indexOf(id)
+                                if (from >= 0) {
+                                    val direction = if (dragOffsetY > 0) 1 else -1
+                                    val to = (from + direction).coerceIn(0, order.lastIndex)
+                                    if (to != from) {
+                                        val next = order.toMutableList()
+                                        next.removeAt(from)
+                                        next.add(to, id)
+                                        onOrderChange(next)
+                                        dragOffsetY -= direction * thresholdPx
+                                        lastReorderAt = now
+                                    }
                                 }
                             }
-                            dragOffsetY = 0f
                         }
                     }
                 )
@@ -3421,10 +3434,9 @@ private fun SettingsPage(
                             ParamField("目标会话（条）", successLimit, onSuccessLimitChange, Modifier.weight(1f), leadingMark = "count")
                             Spacer(Modifier.weight(1f))
                         }
-                        Text("V1.0.6 内测：目标与模式合并、卡片长按拖动、Ping日志持久化。", color = Muted, fontSize = 12.sp, lineHeight = 16.sp)
+                        Text("V1.0.7 正式版：NAT判定收紧、运营商识别修复、Ping与拖动体验优化。", color = Muted, fontSize = 12.sp, lineHeight = 16.sp)
                     }
                     "ping" -> SoftCard {
-                        SectionTitle("∿", "Ping 参数", Blue)
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             MarkBox("ping", BlueSoft, Blue)
                             Spacer(Modifier.width(10.dp))
@@ -3948,11 +3960,12 @@ private fun VersionInfoDialog(
                     Text("当前版本", color = Muted, fontSize = 12.sp, modifier = Modifier.weight(1f))
                     StatusChip(displayVersionName(currentAppVersionName(LocalContext.current)), BlueSoft, Blue, compact = true)
                 }
-                VersionLine(displayVersionName(currentAppVersionName(LocalContext.current)), "正式版：定速发射核心、释放耗时显示、过滤行为结论、WiFi运营商ASN校验。")
-                VersionLine("v0.9.8", "保留 0.9.7 高速测速核心，新增更新检测与后台下载。")
-                VersionLine("v0.9.7", "修复 FD 上限附近闪退；触发FD上限时优先释放本机连接并保存历史。")
-                VersionLine("v0.9.6", "修复停止按钮、通知跳转、新增批次被200锁死的问题。")
-                VersionLine("v0.9.5", "优化运行日志、历史记录保存、详情展示与备注。")
+                VersionLine(displayVersionName(currentAppVersionName(LocalContext.current)), "正式版：修复运营商误识别，收紧NAT1判定，优化Ping参数与卡片拖动动画。")
+                VersionLine("V1.0.6", "目标与模式合并，网络信息折叠，Ping日志持久化，卡片长按拖动排序。")
+                VersionLine("V1.0.5", "Ping采集和界面展示分离，图表按秒聚合，日志弹窗分组优化。")
+                VersionLine("V1.0.4", "新增独立Ping、Ping参数、响应日志与NAT兼容判定。")
+                VersionLine("V1.0.3", "修复版本显示、释放通知重复和底部通知样式。")
+                VersionLine("V1.0.0", "正式版：定速发射核心、释放耗时、网络检测与更新流程。")
                 HorizontalDivider(color = Border)
                 Button(
                     onClick = onCheckUpdate,
@@ -4407,23 +4420,20 @@ private fun SelectField(
     modifier: Modifier = Modifier,
     onClick: () -> Unit
 ) {
-    Column(modifier) {
-        FieldLabel(label)
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(52.dp)
-                .background(Color.White, ShapeM)
-                .border(1.dp, Border, ShapeM)
-                .clickable(onClick = onClick)
-                .padding(horizontal = 13.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Icon(iconFor(leadingMark), contentDescription = null, tint = Blue, modifier = Modifier.width(18.dp).height(18.dp))
-            Spacer(Modifier.width(10.dp))
-            Text(value, color = TextDark, fontSize = 13.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-            Text("⌄", color = Muted, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-        }
+    Box(modifier = modifier.height(56.dp)) {
+        OutlinedTextField(
+            value = value,
+            onValueChange = {},
+            readOnly = true,
+            label = { Text(label, maxLines = 1, fontSize = 11.sp) },
+            singleLine = true,
+            leadingIcon = { Icon(iconFor(leadingMark), contentDescription = null, tint = Blue, modifier = Modifier.width(16.dp).height(16.dp)) },
+            trailingIcon = { Text("⌄", color = Muted, fontSize = 18.sp, fontWeight = FontWeight.Bold) },
+            textStyle = MaterialTheme.typography.bodyMedium.copy(fontSize = 13.sp),
+            shape = ShapeM,
+            modifier = Modifier.fillMaxWidth().height(56.dp)
+        )
+        Box(Modifier.matchParentSize().clickable(onClick = onClick))
     }
 }
 
