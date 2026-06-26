@@ -182,6 +182,9 @@ import java.net.InetSocketAddress
 import java.net.NetworkInterface
 import java.net.Socket
 import java.net.URL
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import java.util.concurrent.Callable
 import java.util.concurrent.ExecutorCompletionService
 import java.util.concurrent.Executors
@@ -230,6 +233,24 @@ private data class PingPoint(
     val timeEpochMs: Long = System.currentTimeMillis()
 )
 
+private enum class PingProtocolMode(val label: String) {
+    AUTO("自动"), IPV4("IPv4"), IPV6("IPv6")
+}
+
+private data class PingLogEntry(
+    val timeEpochMs: Long = System.currentTimeMillis(),
+    val target: String,
+    val protocol: String,
+    val latencyMs: Int?,
+    val status: String,
+    val note: String = ""
+) {
+    val timeText: String
+        get() = DateTimeFormatter.ofPattern("HH:mm:ss")
+            .withZone(ZoneId.systemDefault())
+            .format(Instant.ofEpochMilli(timeEpochMs))
+}
+
 
 private const val UPDATE_JSON_URL = "https://raw.githubusercontent.com/OnlyChallgener/NetSessionTester/main/update.json"
 private const val PROJECT_GITHUB_URL = "https://github.com/OnlyChallgener/NetSessionTester"
@@ -274,14 +295,14 @@ private fun currentAppVersionCode(context: Context): Long = runCatching {
 private fun currentAppVersionName(context: Context): String {
     return runCatching {
         val pkg = context.packageManager.getPackageInfo(context.packageName, 0)
-        pkg.versionName?.takeIf { it.isNotBlank() } ?: "V1.0.3"
-    }.getOrDefault("V1.0.3")
+        pkg.versionName?.takeIf { it.isNotBlank() } ?: "V1.0.4-internal"
+    }.getOrDefault("V1.0.4-internal")
 }
 
 private fun displayVersionName(raw: String): String {
     val clean = raw.trim()
     if (clean.isBlank()) return "未知版本"
-    return if (clean.startsWith("v", ignoreCase = true)) clean else "v$clean"
+    return clean
 }
 
 private fun formatVersionBuild(versionName: String, versionCode: Long): String =
@@ -734,12 +755,15 @@ private fun buildNetworkProbeInfo(
 
     val strongSymmetric = stunSuccess && !stun!!.portStable && multiStun >= 3
     val weakPortChange = stunSuccess && !stun!!.portStable && multiStun < 3
+    val compatibleNat1 = stunSuccess && stun!!.portStable && stun.ipStable && stun.roundStable && multiStun >= 4
+    val stableMapping = stunSuccess && stun!!.portStable && stun.ipStable && multiStun >= 3
 
     val natType = when {
         env.hasVpn -> "代理环境"
         isDirectPublicV4 -> "NAT1 / 开放"
         strongSymmetric -> "NAT4 / 对称型"
-        stunSuccess -> "NAT3 / 端口受限型"
+        compatibleNat1 || stableMapping -> "NAT1 / 全锥形"
+        stunSuccess -> "NAT3 / 受限型"
         publicV4 != null && full -> "NAT3 / 待确认"
         publicV4 == null && full -> "UDP受限 / 无法判断"
         else -> "待检测"
@@ -757,9 +781,10 @@ private fun buildNetworkProbeInfo(
 
     val filtering = when {
         env.hasVpn -> "无法准确判断"
-        isDirectPublicV4 -> "开放"
+        isDirectPublicV4 -> "开放型"
+        compatibleNat1 || stableMapping -> "开放型"
         strongSymmetric -> "端口受限"
-        stun != null -> "端口受限"
+        stun != null -> "未完成检测"
         publicV4 != null && full -> "待确认"
         stun == null && full -> "UDP回包失败"
         else -> "待检测"
@@ -795,13 +820,13 @@ private fun buildNetworkProbeInfo(
         dns.fakeIpDetected -> "检测到Fake-IP，DNS可能被代理工具接管。"
         !dns.systemHasAaaa && dns.domesticHasAaaa -> "系统DNS未返回IPv6，国内备用DNS可解析，可能被AdGuard/代理/路由器策略过滤。"
         !dns.systemHasAaaa && dns.globalHasAaaa -> "系统和国内备用DNS未返回IPv6，国外备用DNS可解析，可能存在地区DNS差异或本地DNS策略影响。"
-        natType.startsWith("NAT4 / 对称") -> "${stunNodeText}多个可用STUN目标返回的外部端口不一致，当前可按对称型/NAT4理解，P2P/游戏联机可能受影响。"
-        natType.startsWith("NAT3 / 端口受限") && weakPortChange -> "${stunNodeText}UDP基础探测可用，但可用节点不足以确认对称型，当前按端口受限型理解，建议换网络或再次刷新复测。"
-        natType.startsWith("NAT3 / 端口受限") -> "${stunNodeText}UDP基础探测可用，过滤行为为公共STUN多节点推断；如需完全确认，需要RFC5780/自建服务器复测。"
-        natType.startsWith("NAT3 / 待确认") -> "公网IPv4可用，但STUN基础探测未成功，NAT类型暂按严格/待确认处理。"
+        natType.startsWith("NAT4 / 对称") -> "${stunNodeText}多个可用STUN目标返回的外部端口不一致，当前按对称型/NAT4理解，P2P/游戏联机可能受影响。"
+        natType.startsWith("NAT3 / 受限") && weakPortChange -> "${stunNodeText}UDP基础探测可用，但可用节点不足以确认对称型，当前按受限型理解，建议换网络或再次刷新复测。"
+        natType.startsWith("NAT3 / 受限") -> "${stunNodeText}UDP基础探测可用，过滤行为未完成RFC5780验证；完整过滤行为需RFC5780/自建节点验证。"
+        natType.startsWith("NAT3 / 待确认") -> "公网IPv4可用，但STUN基础探测未成功，NAT类型暂按待确认处理。"
         natType.startsWith("UDP") -> "多个STUN基础请求均失败，当前仅能判断为UDP受限/无法判断，可能是UDP被防火墙、代理或运营商限制。"
         natType.startsWith("NAT2") -> "UDP映射较稳定，普通联机能力中等。"
-        natType.startsWith("NAT1") -> "IPv4可能具备公网直连能力。"
+        natType.startsWith("NAT1") -> "${stunNodeText}多节点端口保持，按兼容口径判定为 NAT1；完整过滤行为需 RFC5780 / 自建节点验证。"
         else -> "网络信息已更新。"
     }
 
@@ -1198,11 +1223,25 @@ private fun currentNetworkSignature(context: Context): String {
     return "${network}|$transports"
 }
 
-private suspend fun tcpPingMs(host: String, port: Int): Int? = withContext(Dispatchers.IO) {
+private suspend fun icmpPingMs(host: String, timeoutMs: Int, protocol: PingProtocolMode): Int? = withContext(Dispatchers.IO) {
     runCatching {
-        val start = System.nanoTime()
-        Socket().use { socket -> socket.connect(InetSocketAddress(host, port.coerceIn(1, 65535)), 1200) }
-        ((System.nanoTime() - start) / 1_000_000L).toInt().coerceAtLeast(1)
+        val timeoutSec = ((timeoutMs.coerceIn(300, 10_000) + 999) / 1000).coerceAtLeast(1)
+        val command = when (protocol) {
+            PingProtocolMode.IPV6 -> listOf("ping6", "-c", "1", "-W", timeoutSec.toString(), host)
+            PingProtocolMode.IPV4 -> listOf("ping", "-4", "-c", "1", "-W", timeoutSec.toString(), host)
+            PingProtocolMode.AUTO -> listOf("ping", "-c", "1", "-W", timeoutSec.toString(), host)
+        }
+        val startedAt = System.nanoTime()
+        val process = ProcessBuilder(command).redirectErrorStream(true).start()
+        val finished = process.waitFor((timeoutMs + 800).toLong(), TimeUnit.MILLISECONDS)
+        if (!finished) {
+            process.destroyForcibly()
+            return@runCatching null
+        }
+        val output = process.inputStream.bufferedReader().use { it.readText() }
+        val regex = Regex("time[=<]([0-9.]+)\\s*ms")
+        val parsed = regex.find(output)?.groupValues?.getOrNull(1)?.toDoubleOrNull()?.roundToInt()
+        parsed ?: if (process.exitValue() == 0) ((System.nanoTime() - startedAt) / 1_000_000L).toInt().coerceAtLeast(1) else null
     }.getOrNull()
 }
 
@@ -1252,6 +1291,12 @@ private fun NetSessionTesterApp() {
     var keepConnections by remember { mutableStateOf(true) }
     var maskPrivacy by remember { mutableStateOf(false) }
     var historyLimit by remember { mutableStateOf("30") }
+    var pingEnabled by remember { mutableStateOf(true) }
+    var pingTarget by remember { mutableStateOf("223.5.5.5") }
+    var pingIntervalSetting by remember { mutableStateOf("1000") }
+    var pingCountSetting by remember { mutableStateOf("无限") }
+    var pingTimeoutSetting by remember { mutableStateOf("1000") }
+    var pingProtocolSetting by remember { mutableStateOf(PingProtocolMode.AUTO) }
     var historyPeriod by remember { mutableStateOf("WEEK") }
     var logSizeKb by remember { mutableStateOf(0) }
     var historySizeKb by remember { mutableStateOf(0) }
@@ -1268,7 +1313,9 @@ private fun NetSessionTesterApp() {
     var lastChartSampleAt by remember { mutableStateOf<Map<IpProtocol, Long>>(emptyMap()) }
     var pingPoints by remember { mutableStateOf<List<PingPoint>>(emptyList()) }
     var pingJob by remember { mutableStateOf<Job?>(null) }
-    var pingIntervalLabel by remember { mutableStateOf("AUTO") }
+    var pingIntervalLabel by remember { mutableStateOf("停止") }
+    var pingRunning by remember { mutableStateOf(false) }
+    var pingLogs by remember { mutableStateOf<List<PingLogEntry>>(emptyList()) }
     var networkWatchJob by remember { mutableStateOf<Job?>(null) }
     var testNetworkSignature by remember { mutableStateOf("") }
     var lastNetworkInfoSignature by remember { mutableStateOf("") }
@@ -1404,6 +1451,12 @@ private fun NetSessionTesterApp() {
         keepConnections = saved.keepConnections
         maskPrivacy = saved.maskPrivacy
         historyLimit = if (saved.historyLimit in listOf("10", "30", "100")) saved.historyLimit else "30"
+        pingEnabled = saved.pingEnabled
+        pingTarget = saved.pingTarget.ifBlank { "223.5.5.5" }
+        pingIntervalSetting = saved.pingIntervalMs
+        pingCountSetting = saved.pingCount.ifBlank { "无限" }
+        pingTimeoutSetting = saved.pingTimeoutMs
+        pingProtocolSetting = runCatching { PingProtocolMode.valueOf(saved.pingProtocol) }.getOrDefault(PingProtocolMode.AUTO)
         state = state.copy(history = historyStore.load(historyPeriod, historyLimit.toIntOrNull()?.coerceIn(10, 100) ?: 30))
         historySavedCount = historyStore.count()
         historyCounts = historyStore.counts()
@@ -1429,7 +1482,8 @@ private fun NetSessionTesterApp() {
 
     LaunchedEffect(
         settingsLoaded, host, port, mode, batchSize, intervalMs, timeoutMs,
-        successLimit, failureLimit, keepConnections, maskPrivacy, historyLimit
+        successLimit, failureLimit, keepConnections, maskPrivacy, historyLimit,
+        pingEnabled, pingTarget, pingIntervalSetting, pingCountSetting, pingTimeoutSetting, pingProtocolSetting
     ) {
         if (settingsLoaded) {
             settingsStore.save(
@@ -1444,7 +1498,13 @@ private fun NetSessionTesterApp() {
                     failureLimit = failureLimit,
                     keepConnections = keepConnections,
                     maskPrivacy = maskPrivacy,
-                    historyLimit = historyLimit
+                    historyLimit = historyLimit,
+                    pingEnabled = pingEnabled,
+                    pingTarget = pingTarget.ifBlank { "223.5.5.5" },
+                    pingIntervalMs = pingIntervalSetting,
+                    pingCount = pingCountSetting,
+                    pingTimeoutMs = pingTimeoutSetting,
+                    pingProtocol = pingProtocolSetting.name
                 )
             )
         }
@@ -1600,7 +1660,7 @@ private fun NetSessionTesterApp() {
     fun resetCurrentCharts() {
         chartPoints = emptyList()
         lastChartSampleAt = emptyMap()
-        pingPoints = emptyList()
+        // Ping 独立运行，不随会话曲线清空。
     }
 
     fun recordChartPoint(stats: ProtocolStats) {
@@ -1649,43 +1709,78 @@ private fun NetSessionTesterApp() {
         }
     }
 
-    fun autoPingIntervalMs(startedAt: Long): Long {
-        val now = System.currentTimeMillis()
-        val activeSessions = state.ipv4Stats.activeSessions + state.ipv6Stats.activeSessions
-        return when {
-            finishInProgress -> 1_000L
-            now - startedAt <= 5_000L -> 200L
-            activeSessions >= 5_000 -> 1_000L
-            else -> 500L
+    fun safePingIntervalMs(): Long = pingIntervalSetting.toLongOrNull()?.coerceIn(200L, 60_000L) ?: 1_000L
+
+    fun safePingTimeoutMs(): Int = pingTimeoutSetting.toIntOrNull()?.coerceIn(300, 10_000) ?: 1_000
+
+    fun safePingCount(): Int? {
+        val clean = pingCountSetting.trim()
+        if (clean.isBlank() || clean == "无限") return null
+        return clean.toIntOrNull()?.coerceIn(1, 100_000)
+    }
+
+    fun appendPingLog(entry: PingLogEntry) {
+        pingLogs = (pingLogs + entry).takeLast(300)
+    }
+
+    fun appendPingPoint(sec: Int, latencyMs: Int?) {
+        pingPoints = (pingPoints.filterNot { it.elapsedSec == sec } + PingPoint(elapsedSec = sec, latencyMs = latencyMs))
+            .sortedBy { it.elapsedSec }
+            .takeLast(360)
+    }
+
+    fun startPingMonitor(reset: Boolean = false) {
+        val target = pingTarget.trim().ifBlank { host.ifBlank { "223.5.5.5" } }
+        val interval = safePingIntervalMs()
+        val timeout = safePingTimeoutMs()
+        val maxCount = safePingCount()
+        val protocol = pingProtocolSetting
+        pingJob?.cancel()
+        if (reset) {
+            pingPoints = emptyList()
+            pingLogs = emptyList()
+        }
+        pingRunning = true
+        pingIntervalLabel = "${protocol.label} · ${interval}ms"
+        appendPingLog(PingLogEntry(target = target, protocol = protocol.label, latencyMs = null, status = "开始", note = "间隔${interval}ms · 超时${timeout}ms"))
+        pingJob = scope.launch {
+            val startedAt = System.currentTimeMillis()
+            var sent = 0
+            try {
+                while (currentCoroutineContext().isActive && (maxCount == null || sent < maxCount)) {
+                    val loopStart = System.currentTimeMillis()
+                    val elapsed = ((loopStart - startedAt) / 1_000L).toInt().coerceAtLeast(0)
+                    val latency = icmpPingMs(target, timeout, protocol)
+                    sent++
+                    appendPingPoint(elapsed, latency)
+                    val status = when {
+                        latency == null -> "超时"
+                        latency >= 100 -> "高延迟"
+                        else -> "成功"
+                    }
+                    appendPingLog(PingLogEntry(target = target, protocol = protocol.label, latencyMs = latency, status = status, note = if (latency == null) "timeout" else ""))
+                    val cost = System.currentTimeMillis() - loopStart
+                    delay((interval - cost).coerceAtLeast(0L))
+                }
+            } finally {
+                pingRunning = false
+                pingIntervalLabel = if (sent > 0) "已停止 · ${sent}次" else "停止"
+                appendPingLog(PingLogEntry(target = target, protocol = protocol.label, latencyMs = null, status = "停止", note = "共${sent}次"))
+            }
         }
     }
 
-    fun startPingMonitor(config: SessionConfig, startedAt: Long) {
+    fun stopPingMonitor() {
         pingJob?.cancel()
+        pingJob = null
+        pingRunning = false
+        pingIntervalLabel = "已停止"
+    }
+
+    fun clearPingData() {
         pingPoints = emptyList()
-        pingIntervalLabel = "AUTO · 500ms"
-        pingJob = scope.launch {
-            var bucketSec = -1
-            val bucketSamples = mutableListOf<Int?>()
-            while (currentStartedAt == startedAt && !finishInProgress) {
-                val loopStart = System.currentTimeMillis()
-                val elapsed = ((loopStart - startedAt) / 1_000L).toInt().coerceAtLeast(0)
-                if (bucketSec < 0) bucketSec = elapsed
-                if (elapsed != bucketSec) {
-                    appendPingSecond(bucketSec, bucketSamples.toList())
-                    bucketSamples.clear()
-                    bucketSec = elapsed
-                }
-                bucketSamples.add(tcpPingMs(config.host, config.port))
-                val cost = System.currentTimeMillis() - loopStart
-                val interval = autoPingIntervalMs(startedAt)
-                pingIntervalLabel = "AUTO · ${interval}ms"
-                delay((interval - cost).coerceAtLeast(0L))
-            }
-            if (bucketSec >= 0 && bucketSamples.isNotEmpty()) {
-                appendPingSecond(bucketSec, bucketSamples.toList())
-            }
-        }
+        pingLogs = emptyList()
+        pingIntervalLabel = if (pingRunning) "${pingProtocolSetting.label} · ${safePingIntervalMs()}ms" else "停止"
     }
 
     fun ensureNotificationPermission() {
@@ -1999,8 +2094,8 @@ private fun NetSessionTesterApp() {
             error = null
         )
         appendLog(LogLine(level = LogLevel.INFO, text = "目标：${config.host}:${config.port} | 模式：${config.mode.label} | 目标CPS：${config.batchSize}/s | 调度间隔：${config.intervalMs}ms | 固定CPS核心"))
-        // 发布版保留 Ping 图表刷新：独立协程 + 秒级聚合，不参与会话发射调度。
-        startPingMonitor(config, startedAt)
+        // Ping 已独立运行：如果用户开启 Ping 且当前未运行，则启动；会话测试不再重置 Ping 数据。
+        if (pingEnabled && pingJob?.isActive != true) startPingMonitor(reset = false)
         startNetworkWatch(startedAt, testNetworkSignature)
 
         runningJob = scope.launch {
@@ -2295,6 +2390,18 @@ private fun NetSessionTesterApp() {
                     onSuccessLimitChange = { successLimit = it },
                     failureLimit = failureLimit,
                     onFailureLimitChange = { failureLimit = it },
+                    pingEnabled = pingEnabled,
+                    onPingEnabledChange = { pingEnabled = it },
+                    pingTarget = pingTarget,
+                    onPingTargetChange = { pingTarget = it },
+                    pingIntervalMs = pingIntervalSetting,
+                    onPingIntervalMsChange = { pingIntervalSetting = it },
+                    pingCount = pingCountSetting,
+                    onPingCountChange = { pingCountSetting = it },
+                    pingTimeoutMs = pingTimeoutSetting,
+                    onPingTimeoutMsChange = { pingTimeoutSetting = it },
+                    pingProtocol = pingProtocolSetting,
+                    onPingProtocolChange = { pingProtocolSetting = it },
                     updateBadge = updateAvailable || downloadUi.active || downloadUi.finished,
                     updateProgress = if (downloadUi.active) downloadUi.progress else null,
                     onVersionClick = { showVersionDialog = true },
@@ -2303,6 +2410,7 @@ private fun NetSessionTesterApp() {
                         host = "www.baidu.com"; port = "80"; mode = TestMode.IPV4_THEN_IPV6
                         batchSize = "200"; intervalMs = "100"; timeoutMs = "1200"
                         successLimit = "65535"; failureLimit = "600"; keepConnections = true; maskPrivacy = false; historyLimit = "30"
+                        pingEnabled = true; pingTarget = "223.5.5.5"; pingIntervalSetting = "1000"; pingCountSetting = "无限"; pingTimeoutSetting = "1000"; pingProtocolSetting = PingProtocolMode.AUTO
                     }
                 )
 
@@ -2317,6 +2425,14 @@ private fun NetSessionTesterApp() {
                     chartPoints = chartPoints,
                     pingPoints = pingPoints,
                     pingIntervalLabel = pingIntervalLabel,
+                    pingRunning = pingRunning,
+                    pingLogs = pingLogs,
+                    onStartPing = { startPingMonitor(reset = true) },
+                    onStopPing = { stopPingMonitor() },
+                    onClearPing = { clearPingData() },
+                    onShowPingLog = {
+                        showDetail("Ping 响应日志", pingLogDetailLines(pingLogs))
+                    },
                     isAdding = state.isAdding,
                     runPhase = state.runPhase,
                     releaseUi = state.releaseUi,
@@ -2636,6 +2752,23 @@ private fun isAbnormalSummary(summary: SessionSummary): Boolean = listOfNotNull(
     !isFd && (isAbnormalPhase(s.phase) || s.errorSummary.keys.any { it.contains("中断") || it.contains("地址丢失") || it.contains("异常") })
 }
 
+
+private fun pingLogDetailLines(logs: List<PingLogEntry>): List<String> {
+    if (logs.isEmpty()) return listOf("暂无 Ping 响应日志。")
+    val success = logs.count { it.status == "成功" || it.status == "高延迟" }
+    val timeout = logs.count { it.status == "超时" }
+    val avg = logs.mapNotNull { it.latencyMs }.takeIf { it.isNotEmpty() }?.average()?.roundToInt()
+    return buildList {
+        add("总记录：${logs.size}  成功：$success  超时：$timeout  平均：${avg?.let { "${it}ms" } ?: "—"}")
+        add("时间        协议   延迟     状态     目标/备注")
+        logs.takeLast(300).asReversed().forEach { item ->
+            val latency = item.latencyMs?.let { "${it}ms" } ?: "—"
+            val note = item.note.ifBlank { item.target }
+            add("${item.timeText}  ${item.protocol.padEnd(4)}  ${latency.padEnd(7)}  ${item.status.padEnd(4)}  $note")
+        }
+    }
+}
+
 private fun historyConclusion(summary: SessionSummary): String {
     val abnormal = isAbnormalSummary(summary)
     val v4 = summary.ipv4Stats
@@ -2706,6 +2839,18 @@ private fun SettingsPage(
     onSuccessLimitChange: (String) -> Unit,
     failureLimit: String,
     onFailureLimitChange: (String) -> Unit,
+    pingEnabled: Boolean,
+    onPingEnabledChange: (Boolean) -> Unit,
+    pingTarget: String,
+    onPingTargetChange: (String) -> Unit,
+    pingIntervalMs: String,
+    onPingIntervalMsChange: (String) -> Unit,
+    pingCount: String,
+    onPingCountChange: (String) -> Unit,
+    pingTimeoutMs: String,
+    onPingTimeoutMsChange: (String) -> Unit,
+    pingProtocol: PingProtocolMode,
+    onPingProtocolChange: (PingProtocolMode) -> Unit,
     updateBadge: Boolean,
     updateProgress: Int?,
     onVersionClick: () -> Unit,
@@ -2782,7 +2927,43 @@ private fun SettingsPage(
                     ParamField("目标会话（条）", successLimit, onSuccessLimitChange, Modifier.weight(1f))
                     Spacer(Modifier.weight(1f))
                 }
-                Text("V1.0.3：修复版本徽标编译问题，释放完成通知统一为白色浮层。", color = Muted, fontSize = 12.sp, lineHeight = 16.sp)
+                Text("V1.0.4 内测：NAT 兼容判定 + 独立 Ping 与响应日志。", color = Muted, fontSize = 12.sp, lineHeight = 16.sp)
+            }
+        }
+        item {
+            SoftCard {
+                SectionTitle("∿", "Ping 参数", Blue)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    MarkBox("P", BlueSoft, Blue)
+                    Spacer(Modifier.width(10.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text("独立 Ping", fontWeight = FontWeight.Bold, color = TextDark, fontSize = 13.sp)
+                        Text("可独立启动/停止，支持响应日志", color = Muted, fontSize = 12.sp, maxLines = 1)
+                    }
+                    Switch(checked = pingEnabled, onCheckedChange = onPingEnabledChange)
+                }
+                FieldLabel("Ping 目标")
+                CleanField(pingTarget, onPingTargetChange, "223.5.5.5")
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    ParamField("间隔ms", pingIntervalMs, { onPingIntervalMsChange(it.onlyDigits()) }, Modifier.weight(1f))
+                    ParamField("超时ms", pingTimeoutMs, { onPingTimeoutMsChange(it.onlyDigits()) }, Modifier.weight(1f))
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    ParamField("次数", pingCount, onPingCountChange, Modifier.weight(1f))
+                    Column(Modifier.weight(1f)) {
+                        FieldLabel("协议")
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            PingProtocolMode.values().forEach { option ->
+                                FilterChip(
+                                    selected = pingProtocol == option,
+                                    onClick = { onPingProtocolChange(option) },
+                                    label = { Text(option.label, fontSize = 11.sp) }
+                                )
+                            }
+                        }
+                    }
+                }
+                Text("会话测试期间 Ping 仍可独立运行；高频 Ping 建议间隔不低于 1000ms。", color = Muted, fontSize = 12.sp, lineHeight = 16.sp)
             }
         }
         item {
@@ -2811,6 +2992,12 @@ private fun TestPage(
     chartPoints: List<ChartPoint>,
     pingPoints: List<PingPoint>,
     pingIntervalLabel: String,
+    pingRunning: Boolean,
+    pingLogs: List<PingLogEntry>,
+    onStartPing: () -> Unit,
+    onStopPing: () -> Unit,
+    onClearPing: () -> Unit,
+    onShowPingLog: () -> Unit,
     isAdding: Boolean,
     runPhase: RunPhase,
     releaseUi: ReleaseUiState,
@@ -2886,7 +3073,18 @@ private fun TestPage(
             }
         }
         if (releaseUi.visible || releaseBusy) item { ReleaseProgressCard(releaseUi) }
-        item { PingCompactChartCard(pingPoints = pingPoints, intervalLabel = pingIntervalLabel) }
+        item {
+            PingCompactChartCard(
+                pingPoints = pingPoints,
+                intervalLabel = pingIntervalLabel,
+                running = pingRunning,
+                logCount = pingLogs.size,
+                onStart = onStartPing,
+                onStop = onStopPing,
+                onClear = onClearPing,
+                onLog = onShowPingLog
+            )
+        }
         if (showIpv4) item { SessionStatsCard("IPv4 会话", ipv4Stats, maskPrivacy, chartPoints.filter { it.protocol == IpProtocol.IPV4 }, chartMode, onChartModeChange) }
         if (showIpv6) item { SessionStatsCard("IPv6 会话", ipv6Stats, maskPrivacy, chartPoints.filter { it.protocol == IpProtocol.IPV6 }, chartMode, onChartModeChange) }
         item { DiagnosisAdviceInlineCard(mode, ipv4Stats, ipv6Stats) }
@@ -4047,7 +4245,16 @@ private fun InfoMetricTile(
 }
 
 @Composable
-private fun PingCompactChartCard(pingPoints: List<PingPoint>, intervalLabel: String = "AUTO") {
+private fun PingCompactChartCard(
+    pingPoints: List<PingPoint>,
+    intervalLabel: String = "停止",
+    running: Boolean,
+    logCount: Int,
+    onStart: () -> Unit,
+    onStop: () -> Unit,
+    onClear: () -> Unit,
+    onLog: () -> Unit
+) {
     val successes = pingPoints.mapNotNull { it.latencyMs }
     val current = successes.lastOrNull()
     val avg = successes.takeIf { it.isNotEmpty() }?.average()?.roundToInt()
@@ -4058,7 +4265,7 @@ private fun PingCompactChartCard(pingPoints: List<PingPoint>, intervalLabel: Str
         Row(verticalAlignment = Alignment.CenterVertically) {
             SectionTitle("∿", "Ping 测试", Blue)
             Spacer(Modifier.width(8.dp))
-            StatusChip(intervalLabel, BlueSoft, Blue, compact = true)
+            StatusChip(if (running) "运行中" else intervalLabel, if (running) GreenSoft else BlueSoft, if (running) Green else Blue, compact = true)
             Spacer(Modifier.weight(1f))
             StatusChip(if (loss == 0) "● 正常" else "丢包 $loss%", if (loss == 0) GreenSoft else RedSoft, if (loss == 0) Green else ErrorRed, compact = true)
         }
@@ -4070,6 +4277,28 @@ private fun PingCompactChartCard(pingPoints: List<PingPoint>, intervalLabel: Str
             MiniMetric("丢包", "$loss%", if (loss == 0) Muted else ErrorRed, Modifier.weight(1f))
         }
         PingLineChart(pingPoints)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            Button(
+                onClick = if (running) onStop else onStart,
+                modifier = Modifier.weight(1f).height(38.dp),
+                shape = ShapeM,
+                colors = if (running) ButtonDefaults.buttonColors(containerColor = RedSoft, contentColor = ErrorRed) else ButtonDefaults.buttonColors()
+            ) {
+                Icon(if (running) Icons.Filled.Stop else Icons.Filled.PlayArrow, contentDescription = null, modifier = Modifier.width(16.dp).height(16.dp))
+                Spacer(Modifier.width(4.dp))
+                Text(if (running) "停止 Ping" else "开始 Ping", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            }
+            OutlinedButton(onClick = onLog, modifier = Modifier.weight(0.8f).height(38.dp), shape = ShapeM) {
+                Icon(Icons.Filled.Article, contentDescription = null, modifier = Modifier.width(16.dp).height(16.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("日志 $logCount", fontSize = 12.sp)
+            }
+            OutlinedButton(onClick = onClear, modifier = Modifier.weight(0.65f).height(38.dp), shape = ShapeM) {
+                Icon(Icons.Filled.DeleteOutline, contentDescription = null, modifier = Modifier.width(16.dp).height(16.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("清空", fontSize = 12.sp)
+            }
+        }
     }
 }
 
