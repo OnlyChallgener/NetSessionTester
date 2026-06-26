@@ -3169,7 +3169,7 @@ private fun TargetAndModeCard(
             }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-            SelectField(
+            SettingChoiceCard(
                 label = "测试模式",
                 value = mode.label,
                 leadingMark = "mode",
@@ -3960,7 +3960,7 @@ private fun VersionInfoDialog(
                     Text("当前版本", color = Muted, fontSize = 12.sp, modifier = Modifier.weight(1f))
                     StatusChip(displayVersionName(currentAppVersionName(LocalContext.current)), BlueSoft, Blue, compact = true)
                 }
-                VersionLine(displayVersionName(currentAppVersionName(LocalContext.current)), "正式版：修复运营商误识别，收紧NAT1判定，优化Ping参数与卡片拖动动画。")
+                VersionLine(displayVersionName(currentAppVersionName(LocalContext.current)), "正式版：补强目标与模式样式、独立Ping标题和长时间Ping曲线滚动显示。")
                 VersionLine("V1.0.6", "目标与模式合并，网络信息折叠，Ping日志持久化，卡片长按拖动排序。")
                 VersionLine("V1.0.5", "Ping采集和界面展示分离，图表按秒聚合，日志弹窗分组优化。")
                 VersionLine("V1.0.4", "新增独立Ping、Ping参数、响应日志与NAT兼容判定。")
@@ -4434,6 +4434,34 @@ private fun SelectField(
             modifier = Modifier.fillMaxWidth().height(56.dp)
         )
         Box(Modifier.matchParentSize().clickable(onClick = onClick))
+    }
+}
+
+@Composable
+private fun SettingChoiceCard(
+    label: String,
+    value: String,
+    leadingMark: String,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    Column(modifier = modifier) {
+        FieldLabel(label)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(52.dp)
+                .background(Color.White, ShapeM)
+                .border(1.dp, Border, ShapeM)
+                .clickable(onClick = onClick)
+                .padding(horizontal = 13.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(iconFor(leadingMark), contentDescription = null, tint = Blue, modifier = Modifier.width(18.dp).height(18.dp))
+            Spacer(Modifier.width(10.dp))
+            Text(value, color = TextDark, fontSize = 13.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+            Text("⌄", color = Muted, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+        }
     }
 }
 
@@ -4935,11 +4963,14 @@ private fun MiniMetric(label: String, value: String, color: Color, modifier: Mod
 
 @Composable
 private fun PingLineChart(points: List<PingPoint>) {
-    val sorted = points.sortedBy { it.elapsedSec }
+    val allPoints = points.sortedBy { it.elapsedSec }
+    val windowEnd = maxOf(1, allPoints.lastOrNull()?.elapsedSec ?: 1)
+    val windowStart = if (windowEnd > 120) windowEnd - 120 else 0
+    val sorted = allPoints.filter { it.elapsedSec in windowStart..windowEnd }
     val values = sorted.mapNotNull { it.latencyMs }
     val maxY = pingYAxisMax(values.maxOrNull() ?: 0)
-    val minX = 0
-    val maxX = maxOf(1, sorted.lastOrNull()?.elapsedSec ?: 1)
+    val minX = windowStart
+    val maxX = maxOf(minX + 1, windowEnd)
     val ticks = pingTimeLabels(minX, maxX)
     Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
         Text("延迟(ms)", color = Muted, fontSize = 10.sp)
@@ -4976,7 +5007,7 @@ private fun PingLineChart(points: List<PingPoint>) {
                             previous = p
                         } else {
                             val gap = previous?.let { p.elapsedSec - it.elapsedSec } ?: 0
-                            if (gap > 5 && current.isNotEmpty()) {
+                            if (gap > 3 && current.isNotEmpty()) {
                                 segments.add(current)
                                 current = mutableListOf()
                             }
