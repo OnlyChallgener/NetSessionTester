@@ -33,11 +33,13 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.Canvas
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.animateIntAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -135,6 +137,8 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.zIndex
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
@@ -168,6 +172,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import org.json.JSONArray
 import java.io.BufferedInputStream
 import java.io.File
 import java.io.FileOutputStream
@@ -190,6 +195,7 @@ import java.util.concurrent.ExecutorCompletionService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import kotlin.math.roundToInt
+import kotlin.math.abs
 
 private enum class MainTab(val label: String, val mark: String) {
     SETTINGS("设置", "settings"),
@@ -255,6 +261,82 @@ private data class PingLogEntry(
             .format(Instant.ofEpochMilli(timeEpochMs))
 }
 
+private fun trimPingLogSessions(
+    logs: List<PingLogEntry>,
+    maxSessions: Int = 5,
+    maxEntriesPerSession: Int = 300
+): List<PingLogEntry> {
+    if (logs.isEmpty()) return emptyList()
+    return logs
+        .groupBy { if (it.sessionId != 0L) it.sessionId else it.timeEpochMs }
+        .entries
+        .sortedByDescending { entry -> entry.value.minOfOrNull { it.timeEpochMs } ?: entry.key }
+        .take(maxSessions)
+        .flatMap { (_, entries) ->
+            val sorted = entries.sortedBy { it.timeEpochMs }
+            val start = sorted.firstOrNull { it.status == "开始" }
+            val tail = sorted.filter { it.status != "开始" }.takeLast(maxEntriesPerSession - if (start != null) 1 else 0)
+            listOfNotNull(start) + tail
+        }
+        .sortedBy { it.timeEpochMs }
+}
+
+private fun savePingLogs(context: Context, logs: List<PingLogEntry>) {
+    runCatching {
+        val arr = JSONArray()
+        trimPingLogSessions(logs).forEach { item ->
+            arr.put(JSONObject().apply {
+                put("timeEpochMs", item.timeEpochMs)
+                put("target", item.target)
+                put("protocol", item.protocol)
+                if (item.latencyMs != null) put("latencyMs", item.latencyMs) else put("latencyMs", JSONObject.NULL)
+                put("status", item.status)
+                put("note", item.note)
+                put("sessionId", item.sessionId)
+            })
+        }
+        context.getSharedPreferences("ping_log_store", Context.MODE_PRIVATE)
+            .edit()
+            .putString("ping_logs_v1", arr.toString())
+            .apply()
+    }
+}
+
+private fun loadPingLogs(context: Context): List<PingLogEntry> {
+    return runCatching {
+        val raw = context.getSharedPreferences("ping_log_store", Context.MODE_PRIVATE)
+            .getString("ping_logs_v1", "[]") ?: "[]"
+        val arr = JSONArray(raw)
+        buildList {
+            for (i in 0 until arr.length()) {
+                val obj = arr.optJSONObject(i) ?: continue
+                add(PingLogEntry(
+                    timeEpochMs = obj.optLong("timeEpochMs", System.currentTimeMillis()),
+                    target = obj.optString("target", ""),
+                    protocol = obj.optString("protocol", "AUTO"),
+                    latencyMs = if (obj.isNull("latencyMs")) null else obj.optInt("latencyMs"),
+                    status = obj.optString("status", "成功"),
+                    note = obj.optString("note", ""),
+                    sessionId = obj.optLong("sessionId", 0L)
+                ))
+            }
+        }
+    }.getOrDefault(emptyList())
+}
+
+private fun loadCardOrder(context: Context, key: String, defaults: List<String>): List<String> {
+    val raw = context.getSharedPreferences("layout_order_store", Context.MODE_PRIVATE).getString(key, null)
+    val saved = raw?.split(",")?.map { it.trim() }?.filter { it.isNotBlank() }.orEmpty()
+    return (saved.filter { it in defaults } + defaults.filterNot { it in saved }).distinct()
+}
+
+private fun saveCardOrder(context: Context, key: String, order: List<String>) {
+    context.getSharedPreferences("layout_order_store", Context.MODE_PRIVATE)
+        .edit()
+        .putString(key, order.joinToString(","))
+        .apply()
+}
+
 
 private const val UPDATE_JSON_URL = "https://raw.githubusercontent.com/OnlyChallgener/NetSessionTester/main/update.json"
 private const val PROJECT_GITHUB_URL = "https://github.com/OnlyChallgener/NetSessionTester"
@@ -299,8 +381,8 @@ private fun currentAppVersionCode(context: Context): Long = runCatching {
 private fun currentAppVersionName(context: Context): String {
     return runCatching {
         val pkg = context.packageManager.getPackageInfo(context.packageName, 0)
-        pkg.versionName?.takeIf { it.isNotBlank() } ?: "V1.0.5-internal"
-    }.getOrDefault("V1.0.5-internal")
+        pkg.versionName?.takeIf { it.isNotBlank() } ?: "V1.0.6-internal"
+    }.getOrDefault("V1.0.6-internal")
 }
 
 private fun displayVersionName(raw: String): String {
@@ -786,7 +868,7 @@ private fun buildNetworkProbeInfo(
     val filtering = when {
         env.hasVpn -> "无法准确判断"
         isDirectPublicV4 -> "开放型"
-        compatibleNat1 || stableMapping -> "开放型"
+        compatibleNat1 || stableMapping -> "未验证"
         strongSymmetric -> "端口受限"
         stun != null -> "未完成检测"
         publicV4 != null && full -> "待确认"
@@ -1440,6 +1522,7 @@ private fun NetSessionTesterApp() {
 
     LaunchedEffect(Unit) {
         state = state.copy(history = historyStore.load(historyPeriod, 30), logs = logStore.load())
+        pingLogs = loadPingLogs(context.applicationContext)
         logSizeKb = logStore.sizeKb()
         historySizeKb = historyStore.sizeKb()
         historySavedCount = historyStore.count()
@@ -1733,12 +1816,16 @@ private fun NetSessionTesterApp() {
     }
 
     fun appendPingLog(entry: PingLogEntry) {
-        pingLogs = (pingLogs + entry).takeLast(600)
+        val next = trimPingLogSessions(pingLogs + entry)
+        pingLogs = next
+        savePingLogs(context.applicationContext, next)
     }
 
     fun appendPingLogs(entries: List<PingLogEntry>) {
         if (entries.isEmpty()) return
-        pingLogs = (pingLogs + entries).takeLast(600)
+        val next = trimPingLogSessions(pingLogs + entries)
+        pingLogs = next
+        savePingLogs(context.applicationContext, next)
     }
 
     fun appendPingPoint(sec: Int, latencyMs: Int?) {
@@ -1838,6 +1925,7 @@ private fun NetSessionTesterApp() {
     fun clearPingData() {
         pingPoints = emptyList()
         pingLogs = emptyList()
+        savePingLogs(context.applicationContext, emptyList())
         pingIntervalLabel = if (pingRunning) "${pingProtocolSetting.label} · ${safePingIntervalMs()}ms" else "停止"
     }
 
@@ -2853,7 +2941,7 @@ private fun formatPingLogGroupTitle(group: PingLogGroup): String {
 
 @Composable
 private fun PingLogDialog(logs: List<PingLogEntry>, onDismiss: () -> Unit) {
-    val groups = buildPingLogGroups(logs)
+    val groups = buildPingLogGroups(logs).take(5)
     val latest = groups.firstOrNull()
     val latestEntries = latest?.entries.orEmpty().filter { it.status != "开始" }
     val success = latestEntries.count { it.status == "成功" || it.status == "高延迟" }
@@ -2861,6 +2949,7 @@ private fun PingLogDialog(logs: List<PingLogEntry>, onDismiss: () -> Unit) {
     val avg = latestEntries.mapNotNull { it.latencyMs }.takeIf { it.isNotEmpty() }?.average()?.roundToInt()
     val high = latestEntries.mapNotNull { it.latencyMs }.maxOrNull()
     val low = latestEntries.mapNotNull { it.latencyMs }.minOrNull()
+    var expandedSession by remember(groups.firstOrNull()?.sessionId) { mutableStateOf(groups.firstOrNull()?.sessionId) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -2872,7 +2961,7 @@ private fun PingLogDialog(logs: List<PingLogEntry>, onDismiss: () -> Unit) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(max = 520.dp),
+                    .heightIn(max = 560.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 if (latest == null) {
@@ -2880,34 +2969,36 @@ private fun PingLogDialog(logs: List<PingLogEntry>, onDismiss: () -> Unit) {
                 } else {
                     Card(
                         shape = ShapeM,
-                        colors = CardDefaults.cardColors(containerColor = Color(0xFFF8FAFC)),
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFFFAF7FF)),
                         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Text("最近一次 · ${latest.target} · ${latest.protocol}", color = TextDark, fontSize = 13.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text("总数 ${latestEntries.size} · 成功 $success · 超时 $timeout · 平均 ${avg?.let { "${it}ms" } ?: "—"}", color = Muted, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text("最高 ${high?.let { "${it}ms" } ?: "—"} · 最低 ${low?.let { "${it}ms" } ?: "—"} · 已保留最近 ${logs.size} 条", color = Muted, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                            Text("最近一次", color = Purple, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            Text("${latest.target} · ${latest.protocol}", color = TextDark, fontSize = 14.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                StatusChip("总数 ${latestEntries.size}", BlueSoft, Blue, compact = true)
+                                StatusChip("成功 $success", GreenSoft, Green, compact = true)
+                                StatusChip("超时 $timeout", if (timeout == 0) Color(0xFFF8FAFC) else RedSoft, if (timeout == 0) Muted else ErrorRed, compact = true)
+                                StatusChip("平均 ${avg?.let { "${it}ms" } ?: "—"}", Color(0xFFF8FAFC), Navy, compact = true)
+                                StatusChip("最高 ${high?.let { "${it}ms" } ?: "—"}", Color(0xFFFFF3E0), Orange, compact = true)
+                                StatusChip("最低 ${low?.let { "${it}ms" } ?: "—"}", GreenSoft, Green, compact = true)
+                            }
                         }
                     }
+                    Text("最近 5 次记录", color = TextDark, fontSize = 13.sp, fontWeight = FontWeight.Bold)
                     LazyColumn(
-                        modifier = Modifier.fillMaxWidth().height(360.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                        modifier = Modifier.fillMaxWidth().heightIn(max = 380.dp),
+                        verticalArrangement = Arrangement.spacedBy(7.dp)
                     ) {
                         groups.forEach { group ->
-                            item(key = "header-${group.sessionId}") {
-                                Text(
-                                    formatPingLogGroupTitle(group),
-                                    color = Blue,
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    maxLines = 2,
-                                    overflow = TextOverflow.Ellipsis,
-                                    modifier = Modifier.padding(top = 4.dp)
+                            item(key = "session-${group.sessionId}") {
+                                val expanded = expandedSession == group.sessionId
+                                PingLogSessionCard(
+                                    group = group,
+                                    expanded = expanded,
+                                    onToggle = { expandedSession = if (expanded) null else group.sessionId }
                                 )
-                            }
-                            items(group.entries.asReversed().take(100)) { entry ->
-                                if (entry.status != "开始") PingLogRow(entry)
                             }
                         }
                     }
@@ -2916,6 +3007,44 @@ private fun PingLogDialog(logs: List<PingLogEntry>, onDismiss: () -> Unit) {
         }
     )
 }
+
+@Composable
+private fun PingLogSessionCard(
+    group: PingLogGroup,
+    expanded: Boolean,
+    onToggle: () -> Unit
+) {
+    val items = group.entries.filter { it.status != "开始" }
+    val success = items.count { it.status == "成功" || it.status == "高延迟" }
+    val timeout = items.count { it.status == "超时" }
+    val avg = items.mapNotNull { it.latencyMs }.takeIf { it.isNotEmpty() }?.average()?.roundToInt()
+    val loss = if (items.isNotEmpty()) ((timeout * 100f) / items.size).roundToInt() else 0
+    Card(
+        shape = ShapeM,
+        colors = CardDefaults.cardColors(containerColor = Color.White),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+        modifier = Modifier.fillMaxWidth().border(1.dp, Border.copy(alpha = 0.8f), ShapeM)
+    ) {
+        Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth().clickable(onClick = onToggle),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(formatPingLogGroupTitle(group), color = TextDark, fontSize = 12.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text("${items.size}次 · 成功$success · 平均${avg?.let { "${it}ms" } ?: "—"} · 丢包$loss%", color = Muted, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                Text(if (expanded) "⌃" else "⌄", color = Blue, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+            }
+            AnimatedVisibility(visible = expanded) {
+                Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                    items.asReversed().take(100).forEach { entry -> PingLogRow(entry) }
+                }
+            }
+        }
+    }
+}
+
 
 @Composable
 private fun PingLogRow(entry: PingLogEntry) {
@@ -3004,6 +3133,189 @@ private fun historyAdvice(summary: SessionSummary): List<String> {
 
 
 @Composable
+private fun TargetAndModeCard(
+    host: String,
+    onHostChange: (String) -> Unit,
+    port: String,
+    onPortChange: (String) -> Unit,
+    result: com.demonv.netsessiontester.model.ResolveResult,
+    maskPrivacy: Boolean,
+    onMaskPrivacyChange: (Boolean) -> Unit,
+    onResolve: () -> Unit,
+    mode: TestMode,
+    onModeChange: (TestMode) -> Unit
+) {
+    var modeMenuOpen by remember { mutableStateOf(false) }
+    SoftCard {
+        SectionTitle("◎", "目标与模式", Blue)
+        FieldLabel("地址")
+        CleanField(host, onHostChange, "www.baidu.com", leadingMark = "host")
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.Bottom) {
+            Column(Modifier.weight(1f)) {
+                FieldLabel("端口")
+                CleanField(port, { onPortChange(it.onlyDigits()) }, "80", keyboardType = KeyboardType.Number, leadingMark = "port")
+            }
+            OutlinedButton(onClick = onResolve, shape = ShapeM, modifier = Modifier.height(52.dp).width(104.dp)) {
+                Icon(Icons.Filled.Search, contentDescription = null, modifier = Modifier.width(15.dp).height(15.dp))
+                Spacer(Modifier.width(3.dp))
+                Text("解析", fontSize = 12.sp)
+            }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+            SelectField(
+                label = "测试模式",
+                value = mode.label,
+                leadingMark = "mode",
+                modifier = Modifier.weight(1f),
+                onClick = { modeMenuOpen = true }
+            )
+            Column(Modifier.weight(1f)) {
+                FieldLabel("隐私模式")
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(52.dp)
+                        .background(Color.White, ShapeM)
+                        .border(1.dp, Border, ShapeM)
+                        .padding(horizontal = 13.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(iconFor("privacy"), contentDescription = null, tint = Blue, modifier = Modifier.width(18.dp).height(18.dp))
+                    Spacer(Modifier.width(10.dp))
+                    Text("隐私", color = TextDark, fontSize = 13.sp, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
+                    Switch(checked = maskPrivacy, onCheckedChange = onMaskPrivacyChange)
+                }
+            }
+        }
+        if (modeMenuOpen) {
+            AlertDialog(
+                onDismissRequest = { modeMenuOpen = false },
+                confirmButton = {},
+                title = { Text("测试模式", fontWeight = FontWeight.Bold) },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf(TestMode.IPV4_ONLY, TestMode.IPV6_ONLY, TestMode.IPV4_THEN_IPV6).forEach { option ->
+                            TextButton(
+                                onClick = {
+                                    onModeChange(option)
+                                    modeMenuOpen = false
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(option.label, fontWeight = if (mode == option) FontWeight.Bold else FontWeight.Medium)
+                            }
+                        }
+                    }
+                }
+            )
+        }
+        if (result.ipv4.isNotEmpty() || result.ipv6.isNotEmpty() || result.error != null) {
+            HorizontalDivider(color = Border)
+            InfoLine("IPv4", displayIpList(result.ipv4, maskPrivacy))
+            InfoLine("IPv6", displayIpList(result.ipv6, maskPrivacy))
+            result.error?.let { InfoLine("错误", it, ErrorRed) }
+        }
+    }
+}
+
+@Composable
+private fun ProtocolPickDialog(
+    title: String,
+    current: PingProtocolMode,
+    onDismiss: () -> Unit,
+    onPick: (PingProtocolMode) -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = {},
+        title = { Text(title, fontWeight = FontWeight.Bold) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                PingProtocolMode.values().forEach { option ->
+                    TextButton(
+                        onClick = { onPick(option) },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            when (option) {
+                                PingProtocolMode.AUTO -> "自动 IPv4/IPv6"
+                                PingProtocolMode.IPV4 -> "仅 IPv4"
+                                PingProtocolMode.IPV6 -> "仅 IPv6"
+                            },
+                            fontWeight = if (current == option) FontWeight.Bold else FontWeight.Medium
+                        )
+                    }
+                }
+            }
+        }
+    )
+}
+
+@Composable
+private fun ReorderableCardItem(
+    id: String,
+    order: List<String>,
+    onOrderChange: (List<String>) -> Unit,
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit
+) {
+    var draggingId by remember { mutableStateOf<String?>(null) }
+    var dragOffsetY by remember { mutableStateOf(0f) }
+    val density = LocalDensity.current
+    val thresholdPx = with(density) { 118.dp.toPx() }
+    val isDragging = draggingId == id
+    val scale by animateFloatAsState(if (isDragging) 1.018f else 1f, tween(150), label = "dragScale")
+    val elevation by animateFloatAsState(if (isDragging) 18f else 0f, tween(150), label = "dragElevation")
+
+    Box(
+        modifier = modifier
+            .zIndex(if (isDragging) 20f else 0f)
+            .graphicsLayer {
+                translationY = if (isDragging) dragOffsetY else 0f
+                scaleX = scale
+                scaleY = scale
+                shadowElevation = elevation
+            }
+            .pointerInput(id, order) {
+                detectDragGesturesAfterLongPress(
+                    onDragStart = {
+                        draggingId = id
+                        dragOffsetY = 0f
+                    },
+                    onDragEnd = {
+                        draggingId = null
+                        dragOffsetY = 0f
+                    },
+                    onDragCancel = {
+                        draggingId = null
+                        dragOffsetY = 0f
+                    },
+                    onDrag = { change, dragAmount ->
+                        change.consume()
+                        if (draggingId != id) return@detectDragGesturesAfterLongPress
+                        dragOffsetY += dragAmount.y
+                        if (abs(dragOffsetY) >= thresholdPx) {
+                            val from = order.indexOf(id)
+                            if (from >= 0) {
+                                val to = (from + if (dragOffsetY > 0) 1 else -1).coerceIn(0, order.lastIndex)
+                                if (to != from) {
+                                    val next = order.toMutableList()
+                                    next.removeAt(from)
+                                    next.add(to, id)
+                                    onOrderChange(next)
+                                }
+                            }
+                            dragOffsetY = 0f
+                        }
+                    }
+                )
+            }
+    ) {
+        content()
+    }
+}
+
+@Composable
 private fun SettingsPage(
     host: String,
     onHostChange: (String) -> Unit,
@@ -3050,6 +3362,15 @@ private fun SettingsPage(
     onSave: () -> Unit,
     onRestoreDefault: () -> Unit
 ) {
+    val context = LocalContext.current
+    val defaultCards = listOf("target", "network", "session", "ping")
+    var settingsCardOrder by remember { mutableStateOf(loadCardOrder(context.applicationContext, "settings_card_order_v2", defaultCards)) }
+    fun updateSettingsOrder(next: List<String>) {
+        val clean = (next.filter { it in defaultCards } + defaultCards.filterNot { it in next }).distinct()
+        settingsCardOrder = clean
+        saveCardOrder(context.applicationContext, "settings_card_order_v2", clean)
+    }
+
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -3057,146 +3378,102 @@ private fun SettingsPage(
         verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
         item { PageTitle("宽带会话测试器", "TCP 会话测试 · IPv4 / IPv6 分别测试", updateBadge, updateProgress, onVersionClick) }
-        item {
-            SoftCard {
-                SectionTitle("◎", "目标设置", Blue)
-                FieldLabel("地址")
-                CleanField(host, onHostChange, "www.baidu.com")
-                FieldLabel("端口")
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                    CleanField(port, { onPortChange(it.onlyDigits()) }, "80", Modifier.weight(1f), KeyboardType.Number)
-                    OutlinedButton(onClick = onResolve, shape = ShapeM, modifier = Modifier.height(44.dp).width(104.dp)) {
-                        Icon(Icons.Filled.Search, contentDescription = null, modifier = Modifier.width(15.dp).height(15.dp)); Spacer(Modifier.width(3.dp)); Text("解析", fontSize = 12.sp)
+        items(settingsCardOrder, key = { it }) { cardId ->
+            ReorderableCardItem(
+                id = cardId,
+                order = settingsCardOrder,
+                onOrderChange = ::updateSettingsOrder
+            ) {
+                when (cardId) {
+                    "target" -> TargetAndModeCard(
+                        host = host,
+                        onHostChange = onHostChange,
+                        port = port,
+                        onPortChange = onPortChange,
+                        result = result,
+                        maskPrivacy = maskPrivacy,
+                        onMaskPrivacyChange = onMaskPrivacyChange,
+                        onResolve = onResolve,
+                        mode = mode,
+                        onModeChange = onModeChange
+                    )
+                    "network" -> NetworkEnvironmentSettingsCard(
+                        env = networkEnvironment,
+                        publicIpResult = publicIpResult,
+                        probeInfo = networkProbeInfo,
+                        publicIpLoading = publicIpLoading,
+                        maskPrivacy = maskPrivacy,
+                        onRefresh = onRefreshPublicIp,
+                        onCopyPublicIpv4 = onCopyPublicIpv4,
+                        onCopyPublicIpv6 = onCopyPublicIpv6
+                    )
+                    "session" -> SoftCard {
+                        SectionTitle("≡", "会话参数", Green)
+                        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            ParamField("目标CPS", batchSize, onBatchSizeChange, Modifier.weight(1f), leadingMark = "count")
+                            ParamField("调度间隔ms", intervalMs, onIntervalMsChange, Modifier.weight(1f), leadingMark = "time")
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            ParamField("超时（ms）", timeoutMs, onTimeoutMsChange, Modifier.weight(1f), leadingMark = "time")
+                            ParamField("失败兜底", failureLimit, onFailureLimitChange, Modifier.weight(1f), leadingMark = "!")
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            ParamField("目标会话（条）", successLimit, onSuccessLimitChange, Modifier.weight(1f), leadingMark = "count")
+                            Spacer(Modifier.weight(1f))
+                        }
+                        Text("V1.0.6 内测：目标与模式合并、卡片长按拖动、Ping日志持久化。", color = Muted, fontSize = 12.sp, lineHeight = 16.sp)
                     }
-                }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    MarkBox("□", Color(0xFFEFF6FF), Blue)
-                    Spacer(Modifier.width(10.dp))
-                    Column(Modifier.weight(1f)) {
-                        Text("打码", fontWeight = FontWeight.Bold, color = TextDark, fontSize = 13.sp)
-                        Text("隐藏 IP / 公网地址显示和导出", color = Muted, fontSize = 12.sp, maxLines = 1)
-                    }
-                    Switch(checked = maskPrivacy, onCheckedChange = onMaskPrivacyChange)
-                }
-                if (result.ipv4.isNotEmpty() || result.ipv6.isNotEmpty() || result.error != null) {
-                    HorizontalDivider(color = Border)
-                    InfoLine("IPv4", displayIpList(result.ipv4, maskPrivacy))
-                    InfoLine("IPv6", displayIpList(result.ipv6, maskPrivacy))
-                    result.error?.let { InfoLine("错误", it, ErrorRed) }
-                }
-            }
-        }
-        item {
-            NetworkEnvironmentSettingsCard(
-                env = networkEnvironment,
-                publicIpResult = publicIpResult,
-                probeInfo = networkProbeInfo,
-                publicIpLoading = publicIpLoading,
-                maskPrivacy = maskPrivacy,
-                onRefresh = onRefreshPublicIp,
-                onCopyPublicIpv4 = onCopyPublicIpv4,
-                onCopyPublicIpv6 = onCopyPublicIpv6
-            )
-        }
-        item {
-            SoftCard {
-                SectionTitle("∿", "测试模式", Purple)
-                ModeSelector(mode, onModeChange)
-                Text("同时对 IPv4 与 IPv6 分别进行会话保持测试", color = Muted, fontSize = 12.sp, maxLines = 1)
-            }
-        }
-        item {
-            SoftCard {
-                SectionTitle("≡", "会话参数", Green)
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    ParamField("目标CPS", batchSize, onBatchSizeChange, Modifier.weight(1f))
-                    ParamField("调度间隔ms", intervalMs, onIntervalMsChange, Modifier.weight(1f))
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    ParamField("超时（ms）", timeoutMs, onTimeoutMsChange, Modifier.weight(1f))
-                    ParamField("失败兜底", failureLimit, onFailureLimitChange, Modifier.weight(1f))
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    ParamField("目标会话（条）", successLimit, onSuccessLimitChange, Modifier.weight(1f))
-                    Spacer(Modifier.weight(1f))
-                }
-                Text("V1.0.5 内测：Ping 图表聚合、日志分组和协议下拉优化。", color = Muted, fontSize = 12.sp, lineHeight = 16.sp)
-            }
-        }
-        item {
-            SoftCard {
-                SectionTitle("∿", "Ping 参数", Blue)
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    MarkBox("P", BlueSoft, Blue)
-                    Spacer(Modifier.width(10.dp))
-                    Column(Modifier.weight(1f)) {
-                        Text("独立 Ping", fontWeight = FontWeight.Bold, color = TextDark, fontSize = 13.sp)
-                        Text("可独立启动/停止，支持响应日志", color = Muted, fontSize = 12.sp, maxLines = 1)
-                    }
-                    Switch(checked = pingEnabled, onCheckedChange = onPingEnabledChange)
-                }
-                FieldLabel("Ping 目标")
-                CleanField(pingTarget, onPingTargetChange, "223.5.5.5")
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    ParamField("间隔ms", pingIntervalMs, { onPingIntervalMsChange(it.onlyDigits()) }, Modifier.weight(1f))
-                    ParamField("超时ms", pingTimeoutMs, { onPingTimeoutMsChange(it.onlyDigits()) }, Modifier.weight(1f))
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    ParamField("次数", pingCount, onPingCountChange, Modifier.weight(1f))
-                    Column(Modifier.weight(1f)) {
-                        FieldLabel("协议")
-                        var protocolMenuOpen by remember { mutableStateOf(false) }
-                        Box {
-                            OutlinedButton(
-                                onClick = { protocolMenuOpen = true },
-                                modifier = Modifier.fillMaxWidth().height(50.dp),
-                                shape = ShapeM
-                            ) {
-                                Text(
-                                    when (pingProtocol) {
-                                        PingProtocolMode.AUTO -> "自动 IPv4/IPv6"
-                                        PingProtocolMode.IPV4 -> "仅 IPv4"
-                                        PingProtocolMode.IPV6 -> "仅 IPv6"
-                                    },
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
+                    "ping" -> SoftCard {
+                        SectionTitle("∿", "Ping 参数", Blue)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            MarkBox("ping", BlueSoft, Blue)
+                            Spacer(Modifier.width(10.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text("独立 Ping", fontWeight = FontWeight.Bold, color = TextDark, fontSize = 13.sp)
+                                Text("可独立启动/停止，支持响应日志", color = Muted, fontSize = 12.sp, maxLines = 1)
                             }
+                            Switch(checked = pingEnabled, onCheckedChange = onPingEnabledChange)
+                        }
+                        FieldLabel("Ping 目标")
+                        CleanField(pingTarget, onPingTargetChange, "223.5.5.5", leadingMark = "target")
+                        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            ParamField("间隔ms", pingIntervalMs, { onPingIntervalMsChange(it.onlyDigits()) }, Modifier.weight(1f), leadingMark = "time")
+                            ParamField("超时ms", pingTimeoutMs, { onPingTimeoutMsChange(it.onlyDigits()) }, Modifier.weight(1f), leadingMark = "time")
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            ParamField("次数", pingCount, onPingCountChange, Modifier.weight(1f), leadingMark = "count")
+                            var protocolMenuOpen by remember { mutableStateOf(false) }
+                            SelectField(
+                                label = "协议",
+                                value = when (pingProtocol) {
+                                    PingProtocolMode.AUTO -> "自动 IPv4/IPv6"
+                                    PingProtocolMode.IPV4 -> "仅 IPv4"
+                                    PingProtocolMode.IPV6 -> "仅 IPv6"
+                                },
+                                leadingMark = "privacy",
+                                modifier = Modifier.weight(1f),
+                                onClick = { protocolMenuOpen = true }
+                            )
                             if (protocolMenuOpen) {
-                                AlertDialog(
-                                    onDismissRequest = { protocolMenuOpen = false },
-                                    confirmButton = {},
-                                    title = { Text("协议模式", fontWeight = FontWeight.Bold) },
-                                    text = {
-                                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                            PingProtocolMode.values().forEach { option ->
-                                                TextButton(
-                                                    onClick = {
-                                                        onPingProtocolChange(option)
-                                                        protocolMenuOpen = false
-                                                    },
-                                                    modifier = Modifier.fillMaxWidth()
-                                                ) {
-                                                    Text(
-                                                        when (option) {
-                                                            PingProtocolMode.AUTO -> "自动 IPv4/IPv6"
-                                                            PingProtocolMode.IPV4 -> "仅 IPv4"
-                                                            PingProtocolMode.IPV6 -> "仅 IPv6"
-                                                        },
-                                                        fontWeight = if (pingProtocol == option) FontWeight.Bold else FontWeight.Medium
-                                                    )
-                                                }
-                                            }
-                                        }
+                                ProtocolPickDialog(
+                                    title = "Ping 协议",
+                                    current = pingProtocol,
+                                    onDismiss = { protocolMenuOpen = false },
+                                    onPick = {
+                                        onPingProtocolChange(it)
+                                        protocolMenuOpen = false
                                     }
                                 )
                             }
                         }
+                        Text(
+                            if ((pingIntervalMs.toIntOrNull() ?: 1000) < 1000) "高频 Ping 已启用，界面将按秒聚合显示。" else "会话测试期间 Ping 仍可独立运行；高频 Ping 建议间隔不低于 1000ms。",
+                            color = Muted,
+                            fontSize = 12.sp,
+                            lineHeight = 16.sp
+                        )
                     }
                 }
-                Text("会话测试期间 Ping 仍可独立运行；高频 Ping 建议间隔不低于 1000ms。", color = Muted, fontSize = 12.sp, lineHeight = 16.sp)
             }
         }
         item {
@@ -3212,6 +3489,7 @@ private fun SettingsPage(
         item { Spacer(Modifier.height(70.dp)) }
     }
 }
+
 
 @Composable
 private fun TestPage(
@@ -3250,6 +3528,7 @@ private fun TestPage(
     onMoreLogs: () -> Unit,
     onMoreFailure: () -> Unit
 ) {
+    val context = LocalContext.current
     val startEnabled = runPhase == RunPhase.Idle || runPhase == RunPhase.Finished || runPhase == RunPhase.Failed
     val stopEnabled = isAdding && (runPhase == RunPhase.Running || runPhase == RunPhase.TopConfirm)
     val releaseBusy = runPhase == RunPhase.Stopping || runPhase == RunPhase.Releasing
@@ -3258,6 +3537,23 @@ private fun TestPage(
         isAdding && runPhase == RunPhase.TopConfirm -> "● 顶部确认"
         isAdding -> "● 运行中"
         else -> status
+    }
+    val defaultCards = listOf("control", "release", "ping", "ipv4", "ipv6", "diagnosis", "logs")
+    var testCardOrder by remember { mutableStateOf(loadCardOrder(context.applicationContext, "test_card_order_v2", defaultCards)) }
+    val visibleIds = buildList {
+        add("control")
+        if (releaseUi.visible || releaseBusy) add("release")
+        add("ping")
+        if (showIpv4) add("ipv4")
+        if (showIpv6) add("ipv6")
+        add("diagnosis")
+        add("logs")
+    }
+    val visibleOrder = (testCardOrder.filter { it in visibleIds } + visibleIds.filterNot { it in testCardOrder }).distinct()
+    fun updateTestOrder(nextVisible: List<String>) {
+        val merged = (nextVisible + testCardOrder.filterNot { it in nextVisible } + defaultCards.filterNot { it in nextVisible || it in testCardOrder }).distinct()
+        testCardOrder = merged
+        saveCardOrder(context.applicationContext, "test_card_order_v2", merged)
     }
 
     LazyColumn(
@@ -3274,54 +3570,56 @@ private fun TestPage(
                 StatusChip("◎ 目标 $target", Color.White, TextDark)
             }
         }
-        item {
-            SoftCard {
-                SectionTitle("∿", "测试控制", Blue)
-                Text(
-                    when {
-                        releaseBusy -> "正在释放连接，完成后会自动恢复开始按钮"
-                        isAdding -> "正在运行 · 定速发射 · UI/曲线每秒采样"
-                        else -> "状态：$status"
-                    },
-                    color = if (isAdding) Green else if (releaseBusy) Orange else Muted,
-                    fontWeight = FontWeight.Medium,
-                    fontSize = 12.sp
-                )
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Button(onClick = onStart, enabled = startEnabled, modifier = Modifier.weight(1f).height(40.dp), shape = ShapeM) {
-                        Icon(Icons.Filled.PlayArrow, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("开始", fontSize = 13.sp)
+        items(visibleOrder, key = { it }) { cardId ->
+            ReorderableCardItem(id = cardId, order = visibleOrder, onOrderChange = ::updateTestOrder) {
+                when (cardId) {
+                    "control" -> SoftCard {
+                        SectionTitle("∿", "测试控制", Blue)
+                        Text(
+                            when {
+                                releaseBusy -> "正在释放连接，完成后会自动恢复开始按钮"
+                                isAdding -> "正在运行 · 定速发射 · UI/曲线每秒采样"
+                                else -> "状态：$status"
+                            },
+                            color = if (isAdding) Green else if (releaseBusy) Orange else Muted,
+                            fontWeight = FontWeight.Medium,
+                            fontSize = 12.sp
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            Button(onClick = onStart, enabled = startEnabled, modifier = Modifier.weight(1f).height(40.dp), shape = ShapeM) {
+                                Icon(Icons.Filled.PlayArrow, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("开始", fontSize = 13.sp)
+                            }
+                            Button(
+                                onClick = onStopAdding,
+                                enabled = stopEnabled,
+                                colors = ButtonDefaults.buttonColors(containerColor = RedSoft, contentColor = ErrorRed),
+                                modifier = Modifier.weight(1f).height(38.dp),
+                                shape = ShapeM
+                            ) { Icon(Icons.Filled.Stop, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("停止", fontSize = 13.sp) }
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            OutlinedButton(onClick = onRelease, enabled = !releaseBusy, modifier = Modifier.weight(1f).height(38.dp), shape = ShapeM) { Icon(Icons.Filled.DeleteOutline, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("强制释放", fontSize = 13.sp) }
+                            OutlinedButton(onClick = onExport, modifier = Modifier.weight(1f).height(38.dp), shape = ShapeM) { Icon(Icons.Filled.Download, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("导出", fontSize = 13.sp) }
+                        }
                     }
-                    Button(
-                        onClick = onStopAdding,
-                        enabled = stopEnabled,
-                        colors = ButtonDefaults.buttonColors(containerColor = RedSoft, contentColor = ErrorRed),
-                        modifier = Modifier.weight(1f).height(38.dp),
-                        shape = ShapeM
-                    ) { Icon(Icons.Filled.Stop, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("停止", fontSize = 13.sp) }
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    OutlinedButton(onClick = onRelease, enabled = !releaseBusy, modifier = Modifier.weight(1f).height(38.dp), shape = ShapeM) { Icon(Icons.Filled.DeleteOutline, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("强制释放", fontSize = 13.sp) }
-                    OutlinedButton(onClick = onExport, modifier = Modifier.weight(1f).height(38.dp), shape = ShapeM) { Icon(Icons.Filled.Download, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("导出", fontSize = 13.sp) }
+                    "release" -> ReleaseProgressCard(releaseUi)
+                    "ping" -> PingCompactChartCard(
+                        pingPoints = pingPoints,
+                        intervalLabel = pingIntervalLabel,
+                        running = pingRunning,
+                        logCount = pingLogs.size,
+                        onStart = onStartPing,
+                        onStop = onStopPing,
+                        onClear = onClearPing,
+                        onLog = onShowPingLog
+                    )
+                    "ipv4" -> SessionStatsCard("IPv4 会话", ipv4Stats, maskPrivacy, chartPoints.filter { it.protocol == IpProtocol.IPV4 }, chartMode, onChartModeChange)
+                    "ipv6" -> SessionStatsCard("IPv6 会话", ipv6Stats, maskPrivacy, chartPoints.filter { it.protocol == IpProtocol.IPV6 }, chartMode, onChartModeChange)
+                    "diagnosis" -> DiagnosisAdviceInlineCard(mode, ipv4Stats, ipv6Stats)
+                    "logs" -> RecentLogCard(logs, maskPrivacy, onMoreLogs)
                 }
             }
         }
-        if (releaseUi.visible || releaseBusy) item { ReleaseProgressCard(releaseUi) }
-        item {
-            PingCompactChartCard(
-                pingPoints = pingPoints,
-                intervalLabel = pingIntervalLabel,
-                running = pingRunning,
-                logCount = pingLogs.size,
-                onStart = onStartPing,
-                onStop = onStopPing,
-                onClear = onClearPing,
-                onLog = onShowPingLog
-            )
-        }
-        if (showIpv4) item { SessionStatsCard("IPv4 会话", ipv4Stats, maskPrivacy, chartPoints.filter { it.protocol == IpProtocol.IPV4 }, chartMode, onChartModeChange) }
-        if (showIpv6) item { SessionStatsCard("IPv6 会话", ipv6Stats, maskPrivacy, chartPoints.filter { it.protocol == IpProtocol.IPV6 }, chartMode, onChartModeChange) }
-        item { DiagnosisAdviceInlineCard(mode, ipv4Stats, ipv6Stats) }
-        item { RecentLogCard(logs, maskPrivacy, onMoreLogs) }
         item { Spacer(Modifier.height(70.dp)) }
     }
 }
@@ -4060,13 +4358,17 @@ private fun CleanField(
     onValueChange: (String) -> Unit,
     placeholder: String,
     modifier: Modifier = Modifier,
-    keyboardType: KeyboardType = KeyboardType.Text
+    keyboardType: KeyboardType = KeyboardType.Text,
+    leadingMark: String? = null
 ) {
     OutlinedTextField(
         value = value,
         onValueChange = onValueChange,
         placeholder = { Text(placeholder, fontSize = 12.sp) },
         singleLine = true,
+        leadingIcon = leadingMark?.let { mark ->
+            { Icon(iconFor(mark), contentDescription = null, tint = Blue, modifier = Modifier.width(18.dp).height(18.dp)) }
+        },
         textStyle = MaterialTheme.typography.bodyMedium.copy(fontSize = 13.sp),
         shape = ShapeM,
         keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
@@ -4075,17 +4377,54 @@ private fun CleanField(
 }
 
 @Composable
-private fun ParamField(label: String, value: String, onValueChange: (String) -> Unit, modifier: Modifier = Modifier) {
+private fun ParamField(
+    label: String,
+    value: String,
+    onValueChange: (String) -> Unit,
+    modifier: Modifier = Modifier,
+    leadingMark: String? = null
+) {
     OutlinedTextField(
         value = value,
         onValueChange = { onValueChange(it.onlyDigits()) },
         label = { Text(label, maxLines = 1, fontSize = 11.sp) },
         singleLine = true,
+        leadingIcon = leadingMark?.let { mark ->
+            { Icon(iconFor(mark), contentDescription = null, tint = Blue, modifier = Modifier.width(16.dp).height(16.dp)) }
+        },
         textStyle = MaterialTheme.typography.bodyMedium.copy(fontSize = 13.sp),
         shape = ShapeM,
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
         modifier = modifier.height(56.dp)
     )
+}
+
+@Composable
+private fun SelectField(
+    label: String,
+    value: String,
+    leadingMark: String,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    Column(modifier) {
+        FieldLabel(label)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(52.dp)
+                .background(Color.White, ShapeM)
+                .border(1.dp, Border, ShapeM)
+                .clickable(onClick = onClick)
+                .padding(horizontal = 13.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(iconFor(leadingMark), contentDescription = null, tint = Blue, modifier = Modifier.width(18.dp).height(18.dp))
+            Spacer(Modifier.width(10.dp))
+            Text(value, color = TextDark, fontSize = 13.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+            Text("⌄", color = Muted, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+        }
+    }
 }
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -4415,11 +4754,29 @@ private fun NetworkEnvironmentSettingsCard(
     onCopyPublicIpv4: () -> Unit,
     onCopyPublicIpv6: () -> Unit
 ) {
+    var expanded by remember { mutableStateOf(true) }
     SoftCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
             SectionTitle("i", "网络信息", Purple)
             Spacer(Modifier.weight(1f))
             TextButton(onClick = onRefresh) { Text(if (publicIpLoading) "检测中" else "刷新", fontSize = 12.sp) }
+            IconButton(onClick = { expanded = !expanded }, modifier = Modifier.width(32.dp).height(32.dp)) {
+                Text(if (expanded) "⌃" else "⌄", color = TextDark, fontSize = 19.sp, fontWeight = FontWeight.Bold)
+            }
+        }
+        if (!expanded) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                val ipv4Text = if (maskPrivacy) maskIpText(publicIpResult.ipv4) else publicIpResult.ipv4
+                val ipv6Text = if (maskPrivacy) maskIpText(publicIpResult.ipv6) else publicIpResult.ipv6
+                InfoMetricTile("◎", "IPv4", ipv4Text, BlueSoft, Blue, Modifier.weight(1f), onClick = onCopyPublicIpv4)
+                InfoMetricTile("✓", "IPv6", ipv6Text, GreenSoft, Green, Modifier.weight(1f), onClick = onCopyPublicIpv6)
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                InfoMetricTile("N", "NAT", probeInfo.natType, Color(0xFFFFE4E6), ErrorRed, Modifier.weight(1f))
+                InfoMetricTile("C", "运营商", probeInfo.carrier, Color(0xFFF3E8FF), Purple, Modifier.weight(1f))
+            }
+            Text("点击右上角展开查看 STUN、DNS、映射和过滤详情。", color = Muted, fontSize = 11.sp, modifier = Modifier.fillMaxWidth(), maxLines = 1, overflow = TextOverflow.Ellipsis)
+            return@SoftCard
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
             InfoMetricTile("⌂", "本地IP", if (maskPrivacy) maskIpText(probeInfo.localIp) else probeInfo.localIp, Color(0xFFE0F7FA), Color(0xFF00A7C6), Modifier.weight(1f))
@@ -4431,16 +4788,21 @@ private fun NetworkEnvironmentSettingsCard(
             InfoMetricTile("✓", "公网IPv6", if (maskPrivacy) maskIpText(ipv6Display) else ipv6Display, GreenSoft, Green, Modifier.weight(1f), onClick = onCopyPublicIpv6)
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            val mapped = if (publicIpResult.ipv4.isUsableIpText() && probeInfo.portText != "不可用" && probeInfo.portText != "待检测") "${publicIpResult.ipv4}:${probeInfo.portText}" else probeInfo.portText
+            InfoMetricTile("M", "公网映射", if (maskPrivacy) maskIpText(mapped) else mapped, Color(0xFFE0F2FE), Blue, Modifier.weight(1f))
             InfoMetricTile("N", "NAT类型", probeInfo.natType, Color(0xFFFFE4E6), ErrorRed, Modifier.weight(1f))
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
             InfoMetricTile("↕", "优先级", probeInfo.priority, Color(0xFFFFF3E0), Orange, Modifier.weight(1f))
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
             InfoMetricTile("M", "映射行为", probeInfo.mappingBehavior, Color(0xFFE0F2FE), Blue, Modifier.weight(1f))
-            InfoMetricTile("F", "过滤行为", probeInfo.filterBehavior, Color(0xFFFCE7F3), Color(0xFFD946EF), Modifier.weight(1f))
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            InfoMetricTile("F", "过滤行为", probeInfo.filterBehavior, Color(0xFFFCE7F3), Color(0xFFD946EF), Modifier.weight(1f))
             InfoMetricTile("D", "DNS诊断", probeInfo.dnsStatus, Color(0xFFF3E8FF), Purple, Modifier.weight(1f))
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
             InfoMetricTile("C", "NAT置信度", probeInfo.confidence, Color(0xFFF8FAFC), Muted, Modifier.weight(1f))
+            InfoMetricTile("C", "运营商", probeInfo.carrier, Color(0xFFF3E8FF), Purple, Modifier.weight(1f))
         }
         Text(
             probeInfo.diagnosis,
@@ -4991,12 +5353,17 @@ private fun StatusChip(text: String, bg: Color, fg: Color, compact: Boolean = fa
 
 @Composable
 private fun iconFor(mark: String) = when (mark) {
-    "◎" -> Icons.Filled.Assessment
-    "∿" -> Icons.Filled.SignalCellularAlt
-    "≡" -> Icons.Filled.Tune
-    "□" -> Icons.Filled.Article
+    "◎", "target" -> Icons.Filled.Assessment
+    "∿", "ping" -> Icons.Filled.SignalCellularAlt
+    "≡", "mode" -> Icons.Filled.Tune
+    "□", "log" -> Icons.Filled.Article
     "▮" -> Icons.Filled.SignalCellularAlt
     "!" -> Icons.Filled.WarningAmber
+    "host" -> Icons.Filled.Search
+    "port" -> Icons.Filled.Tune
+    "privacy" -> Icons.Filled.Shield
+    "count" -> Icons.Filled.Refresh
+    "time" -> Icons.Filled.History
     else -> Icons.Filled.Info
 }
 
