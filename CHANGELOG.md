@@ -1,22 +1,14 @@
 # Changelog
 
-## V1.0.7 build107
+## V1.0.8 build108
 
-正式修复版。
-
-- versionName 更新为 V1.0.7。
-- versionCode 更新为 107。
-- 修复运营商 ASN 识别把地址字段显示为运营商的问题。
-- NAT1 判定收紧：需 6/6 STUN 节点、2轮稳定、公网IP和端口一致。
-- 端口保持但验证不足时显示 NAT3 / 端口保持型，不再全部判为 NAT1。
-- 版本信息弹窗补齐 V1.0.x 日志。
-- Ping 参数卡去掉多余标题。
-- 协议框统一为 OutlinedTextField 风格。
-- 卡片拖动排序增加更高阈值和节流，减少一闪即逝的跳动。
-
-
-### V1.0.7 same-version replacement
-
-- 目标与模式卡片中“测试模式”改成与“隐私模式”一致的 OneUI 卡片样式。
-- 设置页独立 Ping 保持卡片标题与右侧开关，减少重复标题。
-- 修复 Ping 图表长时间运行后曲线可能消失的问题，改为最近 120 秒滚动窗口显示，X 轴最多 6 个刻度。
+- versionName 更新为 V1.0.8。
+- versionCode 更新为 108。
+- 修复 Ping IPv4 模式在部分 Android ROM 中全程 timeout 的问题。
+- IPv4 Ping 改为先解析 A 记录/IPv4 literal，再使用普通 ping，不再使用 `ping -4`。
+- IPv6 Ping 优先使用 ping6，必要时回退 ping -6。
+- 自动 Ping 会先解析地址，明确显示 AUTO · IPv6 或 AUTO · IPv4。
+- 修复 Ping 失败时可能显示 0ms 的问题，失败统一显示为空值/失败原因。
+- Ping 图表显示当前目标、实际协议与最近 120 秒窗口。
+- 目标与模式地址栏、Ping 目标地址栏新增最近 5 条历史，可点选和删除。
+- 保持 V1.0.7 的 NAT 判定、运营商识别、卡片拖动排序和高性能定速发射核心不变。

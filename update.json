@@ -1,15 +1,15 @@
 {
-  "versionCode": 107,
-  "versionName": "V1.0.7",
-  "title": "发现新版本 V1.0.7 build107",
+  "versionCode": 108,
+  "versionName": "V1.0.8",
+  "title": "发现新版本 V1.0.8 build108",
   "content": [
-    "修复运营商识别误显示地址字段的问题",
-    "收紧 NAT1 / 全锥形判定，避免端口保持就全部判为 NAT1",
-    "版本信息补齐 V1.0.x 更新日志",
-    "Ping 参数卡去掉多余标题，协议框统一为输入框样式",
-    "优化卡片长按拖动排序的节奏，降低闪跳和重叠风险"
+    "修复 Ping 仅 IPv4 模式在部分 Android ROM 全程超时的问题",
+    "自动 Ping 明确解析并显示实际协议，避免异常 0ms 显示",
+    "Ping 图表显示当前目标和实际协议",
+    "目标地址和 Ping 地址增加最近 5 条历史，可点选和删除",
+    "保持 V1.0.7 的 NAT 判定、运营商识别和高性能定速发射核心"
   ],
-  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.0.7-107/NetSessionTester-V1.0.7-build107-signed.apk",
+  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.0.8-108/NetSessionTester-V1.0.8-build108-signed.apk",
   "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/latest",
   "force": false
 }

@@ -337,6 +337,31 @@ private fun saveCardOrder(context: Context, key: String, order: List<String>) {
         .apply()
 }
 
+private fun cleanTargetText(value: String): String = value.trim().trimEnd('/')
+
+private fun loadTargetHistory(context: Context, key: String): List<String> {
+    val raw = context.getSharedPreferences("target_history_store", Context.MODE_PRIVATE).getString(key, "") ?: ""
+    return raw.split("
+").map { it.trim() }.filter { it.isNotBlank() }.distinct().take(5)
+}
+
+private fun saveTargetHistory(context: Context, key: String, items: List<String>) {
+    val clean = items.map { cleanTargetText(it) }.filter { it.isNotBlank() }.distinct().take(5)
+    context.getSharedPreferences("target_history_store", Context.MODE_PRIVATE)
+        .edit()
+        .putString(key, clean.joinToString("
+"))
+        .apply()
+}
+
+private fun rememberTargetHistoryItem(context: Context, key: String, target: String): List<String> {
+    val clean = cleanTargetText(target)
+    if (clean.isBlank()) return loadTargetHistory(context, key)
+    val next = listOf(clean) + loadTargetHistory(context, key).filterNot { it.equals(clean, ignoreCase = true) }
+    saveTargetHistory(context, key, next)
+    return next.take(5)
+}
+
 
 private const val UPDATE_JSON_URL = "https://raw.githubusercontent.com/OnlyChallgener/NetSessionTester/main/update.json"
 private const val PROJECT_GITHUB_URL = "https://github.com/OnlyChallgener/NetSessionTester"
@@ -381,8 +406,8 @@ private fun currentAppVersionCode(context: Context): Long = runCatching {
 private fun currentAppVersionName(context: Context): String {
     return runCatching {
         val pkg = context.packageManager.getPackageInfo(context.packageName, 0)
-        pkg.versionName?.takeIf { it.isNotBlank() } ?: "V1.0.7"
-    }.getOrDefault("V1.0.7")
+        pkg.versionName?.takeIf { it.isNotBlank() } ?: "V1.0.8"
+    }.getOrDefault("V1.0.8")
 }
 
 private fun displayVersionName(raw: String): String {
@@ -1316,26 +1341,108 @@ private fun currentNetworkSignature(context: Context): String {
     return "${network}|$transports"
 }
 
-private suspend fun icmpPingMs(host: String, timeoutMs: Int, protocol: PingProtocolMode): Int? = withContext(Dispatchers.IO) {
+
+private fun looksLikeIpv4Literal(value: String): Boolean {
+    val parts = value.split('.')
+    return parts.size == 4 && parts.all { it.toIntOrNull()?.let { n -> n in 0..255 } == true }
+}
+
+private fun looksLikeIpv6Literal(value: String): Boolean = value.contains(':')
+
+private data class ResolvedPingTarget(
+    val address: String,
+    val protocol: PingProtocolMode,
+    val displayProtocol: String,
+    val error: String? = null
+)
+
+private data class PingCommandResult(
+    val latencyMs: Int?,
+    val failure: String? = null
+)
+
+private suspend fun resolvePingTarget(host: String, protocol: PingProtocolMode): ResolvedPingTarget = withContext(Dispatchers.IO) {
+    val target = host.trim().trim('[', ']').ifBlank { "223.5.5.5" }
     runCatching {
-        val timeoutSec = ((timeoutMs.coerceIn(300, 10_000) + 999) / 1000).coerceAtLeast(1)
-        val command = when (protocol) {
-            PingProtocolMode.IPV6 -> listOf("ping6", "-c", "1", "-W", timeoutSec.toString(), host)
-            PingProtocolMode.IPV4 -> listOf("ping", "-4", "-c", "1", "-W", timeoutSec.toString(), host)
-            PingProtocolMode.AUTO -> listOf("ping", "-c", "1", "-W", timeoutSec.toString(), host)
+        if (looksLikeIpv4Literal(target)) {
+            val literal = InetAddress.getByName(target) as? Inet4Address
+            return@withContext when {
+                literal == null -> ResolvedPingTarget(target, PingProtocolMode.IPV4, "IPv4", "IPv4解析失败")
+                protocol == PingProtocolMode.IPV6 -> ResolvedPingTarget(target, PingProtocolMode.IPV6, "IPv6", "IPv6解析失败")
+                else -> ResolvedPingTarget(literal.hostAddress ?: target, PingProtocolMode.IPV4, if (protocol == PingProtocolMode.AUTO) "AUTO · IPv4" else "IPv4")
+            }
         }
-        val startedAt = System.nanoTime()
-        val process = ProcessBuilder(command).redirectErrorStream(true).start()
-        val finished = process.waitFor((timeoutMs + 800).toLong(), TimeUnit.MILLISECONDS)
-        if (!finished) {
-            process.destroyForcibly()
-            return@runCatching null
+        if (looksLikeIpv6Literal(target)) {
+            val literal = InetAddress.getByName(target) as? Inet6Address
+            return@withContext when {
+                literal == null -> ResolvedPingTarget(target, PingProtocolMode.IPV6, "IPv6", "IPv6解析失败")
+                protocol == PingProtocolMode.IPV4 -> ResolvedPingTarget(target, PingProtocolMode.IPV4, "IPv4", "IPv4解析失败")
+                else -> ResolvedPingTarget(literal.hostAddress ?: target, PingProtocolMode.IPV6, if (protocol == PingProtocolMode.AUTO) "AUTO · IPv6" else "IPv6")
+            }
         }
-        val output = process.inputStream.bufferedReader().use { it.readText() }
-        val regex = Regex("time[=<]([0-9.]+)\\s*ms")
-        val parsed = regex.find(output)?.groupValues?.getOrNull(1)?.toDoubleOrNull()?.roundToInt()
-        parsed ?: if (process.exitValue() == 0) ((System.nanoTime() - startedAt) / 1_000_000L).toInt().coerceAtLeast(1) else null
-    }.getOrNull()
+        val all = InetAddress.getAllByName(target).filterNot { it.isLoopbackAddress }
+        val v4 = all.firstOrNull { it is Inet4Address }
+        val v6 = all.firstOrNull { it is Inet6Address }
+        when (protocol) {
+            PingProtocolMode.IPV4 -> if (v4 != null) {
+                ResolvedPingTarget(v4.hostAddress ?: target, PingProtocolMode.IPV4, "IPv4")
+            } else {
+                ResolvedPingTarget(target, PingProtocolMode.IPV4, "IPv4", "IPv4解析失败")
+            }
+            PingProtocolMode.IPV6 -> if (v6 != null) {
+                ResolvedPingTarget(v6.hostAddress ?: target, PingProtocolMode.IPV6, "IPv6")
+            } else {
+                ResolvedPingTarget(target, PingProtocolMode.IPV6, "IPv6", "IPv6解析失败")
+            }
+            PingProtocolMode.AUTO -> when {
+                v6 != null -> ResolvedPingTarget(v6.hostAddress ?: target, PingProtocolMode.IPV6, "AUTO · IPv6")
+                v4 != null -> ResolvedPingTarget(v4.hostAddress ?: target, PingProtocolMode.IPV4, "AUTO · IPv4")
+                else -> ResolvedPingTarget(target, PingProtocolMode.AUTO, "AUTO", "解析失败")
+            }
+        }
+    }.getOrElse {
+        ResolvedPingTarget(target, protocol, protocol.label, "解析失败")
+    }
+}
+
+private suspend fun icmpPingResolved(address: String, timeoutMs: Int, protocol: PingProtocolMode): PingCommandResult = withContext(Dispatchers.IO) {
+    val timeoutSec = ((timeoutMs.coerceIn(300, 10_000) + 999) / 1000).coerceAtLeast(1)
+    fun runCommand(command: List<String>): PingCommandResult {
+        return runCatching {
+            val startedAt = System.nanoTime()
+            val process = ProcessBuilder(command).redirectErrorStream(true).start()
+            val finished = process.waitFor((timeoutMs + 900).toLong(), TimeUnit.MILLISECONDS)
+            if (!finished) {
+                process.destroyForcibly()
+                return@runCatching PingCommandResult(null, "超时")
+            }
+            val output = process.inputStream.bufferedReader().use { it.readText() }
+            val parsed = Regex("time[=<]([0-9.]+)\\s*ms")
+                .find(output)
+                ?.groupValues
+                ?.getOrNull(1)
+                ?.toDoubleOrNull()
+                ?.roundToInt()
+                ?.coerceAtLeast(1)
+            when {
+                parsed != null -> PingCommandResult(parsed, null)
+                process.exitValue() == 0 -> PingCommandResult(((System.nanoTime() - startedAt) / 1_000_000L).toInt().coerceAtLeast(1), null)
+                output.contains("unknown host", ignoreCase = true) -> PingCommandResult(null, "解析失败")
+                output.contains("unreachable", ignoreCase = true) -> PingCommandResult(null, "不可达")
+                else -> PingCommandResult(null, "超时")
+            }
+        }.getOrElse {
+            PingCommandResult(null, "命令失败")
+        }
+    }
+    when (protocol) {
+        PingProtocolMode.IPV4 -> runCommand(listOf("ping", "-c", "1", "-W", timeoutSec.toString(), address))
+        PingProtocolMode.IPV6 -> {
+            val primary = runCommand(listOf("ping6", "-c", "1", "-W", timeoutSec.toString(), address))
+            if (primary.failure == "命令失败") runCommand(listOf("ping", "-6", "-c", "1", "-W", timeoutSec.toString(), address)) else primary
+        }
+        PingProtocolMode.AUTO -> runCommand(listOf("ping", "-c", "1", "-W", timeoutSec.toString(), address))
+    }
 }
 
 class MainActivity : ComponentActivity() {
@@ -1407,8 +1514,11 @@ private fun NetSessionTesterApp() {
     var pingPoints by remember { mutableStateOf<List<PingPoint>>(emptyList()) }
     var pingJob by remember { mutableStateOf<Job?>(null) }
     var pingIntervalLabel by remember { mutableStateOf("停止") }
+    var pingActiveTargetLabel by remember { mutableStateOf("") }
     var pingRunning by remember { mutableStateOf(false) }
     var pingLogs by remember { mutableStateOf<List<PingLogEntry>>(emptyList()) }
+    var hostHistory by remember { mutableStateOf<List<String>>(emptyList()) }
+    var pingTargetHistory by remember { mutableStateOf<List<String>>(emptyList()) }
     var networkWatchJob by remember { mutableStateOf<Job?>(null) }
     var testNetworkSignature by remember { mutableStateOf("") }
     var lastNetworkInfoSignature by remember { mutableStateOf("") }
@@ -1530,6 +1640,8 @@ private fun NetSessionTesterApp() {
     LaunchedEffect(Unit) {
         state = state.copy(history = historyStore.load(historyPeriod, 30), logs = logStore.load())
         pingLogs = loadPingLogs(context.applicationContext)
+        hostHistory = loadTargetHistory(context.applicationContext, "tcp_target_history_v1")
+        pingTargetHistory = loadTargetHistory(context.applicationContext, "ping_target_history_v1")
         logSizeKb = logStore.sizeKb()
         historySizeKb = historyStore.sizeKb()
         historySavedCount = historyStore.count()
@@ -1851,24 +1963,36 @@ private fun NetSessionTesterApp() {
         val interval = safePingIntervalMs()
         val timeout = safePingTimeoutMs()
         val maxCount = safePingCount()
-        val protocol = pingProtocolSetting
+        val requestedProtocol = pingProtocolSetting
         pingJob?.cancel()
         if (reset) {
             pingPoints = emptyList()
         }
         pingRunning = true
-        pingIntervalLabel = "${protocol.label} · ${interval}ms"
+        pingIntervalLabel = "解析中"
+        pingActiveTargetLabel = target
+        pingTargetHistory = rememberTargetHistoryItem(context.applicationContext, "ping_target_history_v1", target)
         val sessionId = System.currentTimeMillis()
         appendPingLog(PingLogEntry(
             timeEpochMs = sessionId,
             target = target,
-            protocol = protocol.label,
+            protocol = requestedProtocol.label,
             latencyMs = null,
             status = "开始",
             note = "间隔${interval}ms · 超时${timeout}ms",
             sessionId = sessionId
         ))
         pingJob = scope.launch {
+            val resolved = resolvePingTarget(target, requestedProtocol)
+            if (resolved.error != null) {
+                pingRunning = false
+                pingIntervalLabel = resolved.error
+                pingActiveTargetLabel = "$target · ${resolved.displayProtocol}"
+                appendPingLog(PingLogEntry(target = target, protocol = resolved.displayProtocol, latencyMs = null, status = resolved.error, note = "未开始", sessionId = sessionId))
+                return@launch
+            }
+            pingIntervalLabel = "${resolved.displayProtocol} · ${interval}ms"
+            pingActiveTargetLabel = "$target · ${resolved.displayProtocol}"
             val startedAt = System.currentTimeMillis()
             var sent = 0
             var currentSec = 0
@@ -1894,20 +2018,21 @@ private fun NetSessionTesterApp() {
                         flushSecond(currentSec)
                         currentSec = elapsed
                     }
-                    val latency = icmpPingMs(target, timeout, protocol)
+                    val result = icmpPingResolved(resolved.address, timeout, resolved.protocol)
+                    val latency = result.latencyMs
                     sent++
                     secSamples.add(latency)
                     val status = when {
-                        latency == null -> "超时"
+                        latency == null -> result.failure ?: "超时"
                         latency >= 100 -> "高延迟"
                         else -> "成功"
                     }
                     pendingLogs.add(PingLogEntry(
                         target = target,
-                        protocol = protocol.label,
+                        protocol = resolved.displayProtocol,
                         latencyMs = latency,
                         status = status,
-                        note = if (latency == null) "timeout" else "",
+                        note = if (latency == null) (result.failure ?: "timeout") else "",
                         sessionId = sessionId
                     ))
                     val cost = System.currentTimeMillis() - loopStart
@@ -1917,7 +2042,7 @@ private fun NetSessionTesterApp() {
                 flushSecond(currentSec)
                 pingRunning = false
                 pingIntervalLabel = if (sent > 0) "已停止 · ${sent}次" else "停止"
-                appendPingLog(PingLogEntry(target = target, protocol = protocol.label, latencyMs = null, status = "停止", note = "共${sent}次", sessionId = sessionId))
+                appendPingLog(PingLogEntry(target = target, protocol = resolved.displayProtocol, latencyMs = null, status = "停止", note = "共${sent}次", sessionId = sessionId))
             }
         }
     }
@@ -2224,6 +2349,7 @@ private fun NetSessionTesterApp() {
 
     fun startTest() {
         val config = buildConfig() ?: return
+        hostHistory = rememberTargetHistoryItem(context.applicationContext, "tcp_target_history_v1", config.host)
         ensureNotificationPermission()
         runningJob?.cancel()
         selectedTab = MainTab.TEST
@@ -2522,6 +2648,13 @@ private fun NetSessionTesterApp() {
                 MainTab.SETTINGS -> SettingsPage(
                     host = host,
                     onHostChange = { host = it },
+                    hostHistory = hostHistory,
+                    onPickHostHistory = { host = it },
+                    onDeleteHostHistory = { item ->
+                        val next = hostHistory.filterNot { it == item }
+                        hostHistory = next
+                        saveTargetHistory(context.applicationContext, "tcp_target_history_v1", next)
+                    },
                     port = port,
                     onPortChange = { port = it },
                     result = state.resolveResult,
@@ -2534,7 +2667,10 @@ private fun NetSessionTesterApp() {
                     onCopyPublicIpv6 = { copyText(publicIpResult.ipv6, "IPv6出口地址") },
                     maskPrivacy = maskPrivacy,
                     onMaskPrivacyChange = { maskPrivacy = it },
-                    onResolve = { resolve() },
+                    onResolve = {
+                        hostHistory = rememberTargetHistoryItem(context.applicationContext, "tcp_target_history_v1", host)
+                        resolve()
+                    },
                     mode = mode,
                     onModeChange = { mode = it },
                     batchSize = batchSize,
@@ -2551,6 +2687,13 @@ private fun NetSessionTesterApp() {
                     onPingEnabledChange = { pingEnabled = it },
                     pingTarget = pingTarget,
                     onPingTargetChange = { pingTarget = it },
+                    pingTargetHistory = pingTargetHistory,
+                    onPickPingTargetHistory = { pingTarget = it },
+                    onDeletePingTargetHistory = { item ->
+                        val next = pingTargetHistory.filterNot { it == item }
+                        pingTargetHistory = next
+                        saveTargetHistory(context.applicationContext, "ping_target_history_v1", next)
+                    },
                     pingIntervalMs = pingIntervalSetting,
                     onPingIntervalMsChange = { pingIntervalSetting = it },
                     pingCount = pingCountSetting,
@@ -2562,7 +2705,11 @@ private fun NetSessionTesterApp() {
                     updateBadge = updateAvailable || downloadUi.active || downloadUi.finished,
                     updateProgress = if (downloadUi.active) downloadUi.progress else null,
                     onVersionClick = { showVersionDialog = true },
-                    onSave = { scope.launch { snackbarHostState.showSnackbar("参数已保存") } },
+                    onSave = {
+                        hostHistory = rememberTargetHistoryItem(context.applicationContext, "tcp_target_history_v1", host)
+                        pingTargetHistory = rememberTargetHistoryItem(context.applicationContext, "ping_target_history_v1", pingTarget)
+                        scope.launch { snackbarHostState.showSnackbar("参数已保存") }
+                    },
                     onRestoreDefault = {
                         host = "www.baidu.com"; port = "80"; mode = TestMode.IPV4_THEN_IPV6
                         batchSize = "200"; intervalMs = "100"; timeoutMs = "1200"
@@ -2582,6 +2729,7 @@ private fun NetSessionTesterApp() {
                     chartPoints = chartPoints,
                     pingPoints = pingPoints,
                     pingIntervalLabel = pingIntervalLabel,
+                    pingActiveTargetLabel = pingActiveTargetLabel.ifBlank { pingTarget },
                     pingRunning = pingRunning,
                     pingLogs = pingLogs,
                     onStartPing = { startPingMonitor(reset = true) },
@@ -3143,6 +3291,9 @@ private fun historyAdvice(summary: SessionSummary): List<String> {
 private fun TargetAndModeCard(
     host: String,
     onHostChange: (String) -> Unit,
+    hostHistory: List<String>,
+    onPickHostHistory: (String) -> Unit,
+    onDeleteHostHistory: (String) -> Unit,
     port: String,
     onPortChange: (String) -> Unit,
     result: com.demonv.netsessiontester.model.ResolveResult,
@@ -3156,7 +3307,15 @@ private fun TargetAndModeCard(
     SoftCard {
         SectionTitle("◎", "目标与模式", Blue)
         FieldLabel("地址")
-        CleanField(host, onHostChange, "www.baidu.com", leadingMark = "host")
+        HistoryTextField(
+            value = host,
+            onValueChange = onHostChange,
+            placeholder = "www.baidu.com",
+            history = hostHistory,
+            onPick = onPickHostHistory,
+            onDelete = onDeleteHostHistory,
+            leadingMark = "host"
+        )
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.Bottom) {
             Column(Modifier.weight(1f)) {
                 FieldLabel("端口")
@@ -3332,6 +3491,9 @@ private fun ReorderableCardItem(
 private fun SettingsPage(
     host: String,
     onHostChange: (String) -> Unit,
+    hostHistory: List<String>,
+    onPickHostHistory: (String) -> Unit,
+    onDeleteHostHistory: (String) -> Unit,
     port: String,
     onPortChange: (String) -> Unit,
     result: com.demonv.netsessiontester.model.ResolveResult,
@@ -3361,6 +3523,9 @@ private fun SettingsPage(
     onPingEnabledChange: (Boolean) -> Unit,
     pingTarget: String,
     onPingTargetChange: (String) -> Unit,
+    pingTargetHistory: List<String>,
+    onPickPingTargetHistory: (String) -> Unit,
+    onDeletePingTargetHistory: (String) -> Unit,
     pingIntervalMs: String,
     onPingIntervalMsChange: (String) -> Unit,
     pingCount: String,
@@ -3401,6 +3566,9 @@ private fun SettingsPage(
                     "target" -> TargetAndModeCard(
                         host = host,
                         onHostChange = onHostChange,
+                        hostHistory = hostHistory,
+                        onPickHostHistory = onPickHostHistory,
+                        onDeleteHostHistory = onDeleteHostHistory,
                         port = port,
                         onPortChange = onPortChange,
                         result = result,
@@ -3434,7 +3602,7 @@ private fun SettingsPage(
                             ParamField("目标会话（条）", successLimit, onSuccessLimitChange, Modifier.weight(1f), leadingMark = "count")
                             Spacer(Modifier.weight(1f))
                         }
-                        Text("V1.0.7 正式版：NAT判定收紧、运营商识别修复、Ping与拖动体验优化。", color = Muted, fontSize = 12.sp, lineHeight = 16.sp)
+                        Text("V1.0.8 正式版：修复 Ping IPv4/AUTO 解析、目标历史、图表目标显示。", color = Muted, fontSize = 12.sp, lineHeight = 16.sp)
                     }
                     "ping" -> SoftCard {
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -3447,7 +3615,15 @@ private fun SettingsPage(
                             Switch(checked = pingEnabled, onCheckedChange = onPingEnabledChange)
                         }
                         FieldLabel("Ping 目标")
-                        CleanField(pingTarget, onPingTargetChange, "223.5.5.5", leadingMark = "target")
+                        HistoryTextField(
+                            value = pingTarget,
+                            onValueChange = onPingTargetChange,
+                            placeholder = "223.5.5.5",
+                            history = pingTargetHistory,
+                            onPick = onPickPingTargetHistory,
+                            onDelete = onDeletePingTargetHistory,
+                            leadingMark = "target"
+                        )
                         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                             ParamField("间隔ms", pingIntervalMs, { onPingIntervalMsChange(it.onlyDigits()) }, Modifier.weight(1f), leadingMark = "time")
                             ParamField("超时ms", pingTimeoutMs, { onPingTimeoutMsChange(it.onlyDigits()) }, Modifier.weight(1f), leadingMark = "time")
@@ -3515,6 +3691,7 @@ private fun TestPage(
     chartPoints: List<ChartPoint>,
     pingPoints: List<PingPoint>,
     pingIntervalLabel: String,
+    pingActiveTargetLabel: String,
     pingRunning: Boolean,
     pingLogs: List<PingLogEntry>,
     onStartPing: () -> Unit,
@@ -3618,6 +3795,7 @@ private fun TestPage(
                     "ping" -> PingCompactChartCard(
                         pingPoints = pingPoints,
                         intervalLabel = pingIntervalLabel,
+                        activeTargetLabel = pingActiveTargetLabel,
                         running = pingRunning,
                         logCount = pingLogs.size,
                         onStart = onStartPing,
@@ -3960,7 +4138,7 @@ private fun VersionInfoDialog(
                     Text("当前版本", color = Muted, fontSize = 12.sp, modifier = Modifier.weight(1f))
                     StatusChip(displayVersionName(currentAppVersionName(LocalContext.current)), BlueSoft, Blue, compact = true)
                 }
-                VersionLine(displayVersionName(currentAppVersionName(LocalContext.current)), "正式版：补强目标与模式样式、独立Ping标题和长时间Ping曲线滚动显示。")
+                VersionLine(displayVersionName(currentAppVersionName(LocalContext.current)), "正式版：修复 Ping IPv4/AUTO 解析、0ms异常、目标历史与图表目标显示。")
                 VersionLine("V1.0.6", "目标与模式合并，网络信息折叠，Ping日志持久化，卡片长按拖动排序。")
                 VersionLine("V1.0.5", "Ping采集和界面展示分离，图表按秒聚合，日志弹窗分组优化。")
                 VersionLine("V1.0.4", "新增独立Ping、Ping参数、响应日志与NAT兼容判定。")
@@ -4387,6 +4565,66 @@ private fun CleanField(
         keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
         modifier = modifier.fillMaxWidth().height(52.dp)
     )
+}
+
+@Composable
+private fun HistoryTextField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    placeholder: String,
+    history: List<String>,
+    onPick: (String) -> Unit,
+    onDelete: (String) -> Unit,
+    leadingMark: String? = null
+) {
+    var open by remember { mutableStateOf(false) }
+    Box {
+        OutlinedTextField(
+            value = value,
+            onValueChange = onValueChange,
+            placeholder = { Text(placeholder, fontSize = 12.sp) },
+            singleLine = true,
+            leadingIcon = leadingMark?.let { mark ->
+                { Icon(iconFor(mark), contentDescription = null, tint = Blue, modifier = Modifier.width(18.dp).height(18.dp)) }
+            },
+            trailingIcon = {
+                TextButton(onClick = { if (history.isNotEmpty()) open = true }) { Text("⌄", color = Muted, fontSize = 16.sp, fontWeight = FontWeight.Bold) }
+            },
+            textStyle = MaterialTheme.typography.bodyMedium.copy(fontSize = 13.sp),
+            shape = ShapeM,
+            modifier = Modifier.fillMaxWidth().height(52.dp)
+        )
+    }
+    if (open) {
+        AlertDialog(
+            onDismissRequest = { open = false },
+            confirmButton = {},
+            title = { Text("最近使用", fontWeight = FontWeight.Bold, color = TextDark) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                    history.take(5).forEach { item ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(Color(0xFFF8FAFC), ShapeM)
+                                .clickable {
+                                    onPick(item)
+                                    open = false
+                                }
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(item, color = TextDark, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                            IconButton(onClick = { onDelete(item) }, modifier = Modifier.width(32.dp).height(32.dp)) {
+                                Icon(Icons.Filled.Close, contentDescription = null, tint = Muted, modifier = Modifier.width(16.dp).height(16.dp))
+                            }
+                        }
+                    }
+                }
+            },
+            shape = ShapeL
+        )
+    }
 }
 
 @Composable
@@ -4897,6 +5135,7 @@ private fun InfoMetricTile(
 private fun PingCompactChartCard(
     pingPoints: List<PingPoint>,
     intervalLabel: String = "停止",
+    activeTargetLabel: String = "",
     running: Boolean,
     logCount: Int,
     onStart: () -> Unit,
@@ -4925,7 +5164,7 @@ private fun PingCompactChartCard(
             MiniMetric("最低", min?.let { "${it}ms" } ?: "—", Green, Modifier.weight(1f))
             MiniMetric("丢包", "$loss%", if (loss == 0) Muted else ErrorRed, Modifier.weight(1f))
         }
-        PingLineChart(pingPoints)
+        PingLineChart(pingPoints, activeTargetLabel)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
             Button(
                 onClick = if (running) onStop else onStart,
@@ -4962,7 +5201,7 @@ private fun MiniMetric(label: String, value: String, color: Color, modifier: Mod
 }
 
 @Composable
-private fun PingLineChart(points: List<PingPoint>) {
+private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "") {
     val allPoints = points.sortedBy { it.elapsedSec }
     val windowEnd = maxOf(1, allPoints.lastOrNull()?.elapsedSec ?: 1)
     val windowStart = if (windowEnd > 120) windowEnd - 120 else 0
@@ -4973,7 +5212,13 @@ private fun PingLineChart(points: List<PingPoint>) {
     val maxX = maxOf(minX + 1, windowEnd)
     val ticks = pingTimeLabels(minX, maxX)
     Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-        Text("延迟(ms)", color = Muted, fontSize = 10.sp)
+        Text(
+            if (activeTargetLabel.isBlank()) "延迟(ms)" else "延迟(ms) · $activeTargetLabel · 最近120秒",
+            color = Muted,
+            fontSize = 10.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
         Row(modifier = Modifier.fillMaxWidth().height(154.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(modifier = Modifier.width(34.dp).height(142.dp), verticalArrangement = Arrangement.SpaceBetween) {
                 axisLabels(maxY).forEach { Text(it.toString(), color = Muted, fontSize = 9.sp, maxLines = 1) }
