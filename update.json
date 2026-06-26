@@ -1,15 +1,15 @@
 {
-  "versionCode": 108,
-  "versionName": "V1.0.8",
-  "title": "发现新版本 V1.0.8 build108",
+  "versionCode": 110,
+  "versionName": "V1.1.0",
+  "title": "发现新版本 V1.1.0 build110",
   "content": [
-    "修复 Ping 仅 IPv4 模式在部分 Android ROM 全程超时的问题",
-    "自动 Ping 明确解析并显示实际协议，避免异常 0ms 显示",
-    "Ping 图表显示当前目标和实际协议",
-    "目标地址和 Ping 地址增加最近 5 条历史，可点选和删除",
-    "保持 V1.0.7 的 NAT 判定、运营商识别和高性能定速发射核心"
+    "保留高频 Ping 引擎，30/50/100/200ms 优先使用常驻 ping 进程",
+    "优化 Ping 图表 Y 轴，使用主延迟区间动态缩放，保留趋势变化",
+    "高延迟用橙色异常点标记，timeout 用红点标记",
+    "图表显示目标地址、实际协议、最近120秒和实际频率",
+    "Ping 响应日志每次最多保存1200条，保留最近5次并显示存储用量"
   ],
-  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.0.8-108/NetSessionTester-V1.0.8-build108-signed.apk",
+  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.1.0-110/NetSessionTester-V1.1.0-build110-signed.apk",
   "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/latest",
   "force": false
 }

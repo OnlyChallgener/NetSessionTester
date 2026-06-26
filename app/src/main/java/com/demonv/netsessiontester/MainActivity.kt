@@ -264,7 +264,7 @@ private data class PingLogEntry(
 private fun trimPingLogSessions(
     logs: List<PingLogEntry>,
     maxSessions: Int = 5,
-    maxEntriesPerSession: Int = 300
+    maxEntriesPerSession: Int = 1200
 ): List<PingLogEntry> {
     if (logs.isEmpty()) return emptyList()
     return logs
@@ -322,6 +322,36 @@ private fun loadPingLogs(context: Context): List<PingLogEntry> {
             }
         }
     }.getOrDefault(emptyList())
+}
+
+private fun estimatePingLogStorageBytes(logs: List<PingLogEntry>): Int {
+    val arr = JSONArray()
+    trimPingLogSessions(logs).forEach { item ->
+        arr.put(JSONObject().apply {
+            put("timeEpochMs", item.timeEpochMs)
+            put("target", item.target)
+            put("protocol", item.protocol)
+            if (item.latencyMs != null) put("latencyMs", item.latencyMs) else put("latencyMs", JSONObject.NULL)
+            put("status", item.status)
+            put("note", item.note)
+            put("sessionId", item.sessionId)
+        })
+    }
+    return arr.toString().toByteArray(Charsets.UTF_8).size
+}
+
+private fun formatBytes(bytes: Int): String = when {
+    bytes < 1024 -> "${bytes}B"
+    bytes < 1024 * 1024 -> "${((bytes / 1024.0) * 10).roundToInt() / 10.0}KB"
+    else -> "${((bytes / 1024.0 / 1024.0) * 10).roundToInt() / 10.0}MB"
+}
+
+private fun pingMainAxisMax(values: List<Int>): Int {
+    if (values.isEmpty()) return 50
+    val sorted = values.sorted()
+    val idx = ((sorted.size - 1) * 0.95f).roundToInt().coerceIn(0, sorted.lastIndex)
+    val main = sorted[idx].coerceAtLeast(1)
+    return pingYAxisMax(main)
 }
 
 private fun loadCardOrder(context: Context, key: String, defaults: List<String>): List<String> {
@@ -1359,6 +1389,12 @@ private data class PingCommandResult(
     val failure: String? = null
 )
 
+private data class PingStreamEvent(
+    val latencyMs: Int?,
+    val failure: String? = null,
+    val timeEpochMs: Long = System.currentTimeMillis()
+)
+
 private suspend fun resolvePingTarget(host: String, protocol: PingProtocolMode): ResolvedPingTarget = withContext(Dispatchers.IO) {
     val target = host.trim().trim('[', ']').ifBlank { "223.5.5.5" }
     runCatching {
@@ -1440,6 +1476,85 @@ private suspend fun icmpPingResolved(address: String, timeoutMs: Int, protocol: 
             if (primary.failure == "命令失败") runCommand(listOf("ping", "-6", "-c", "1", "-W", timeoutSec.toString(), address)) else primary
         }
         PingProtocolMode.AUTO -> runCommand(listOf("ping", "-c", "1", "-W", timeoutSec.toString(), address))
+    }
+}
+
+private suspend fun streamIcmpPingResolved(
+    address: String,
+    timeoutMs: Int,
+    protocol: PingProtocolMode,
+    intervalMs: Long,
+    maxCount: Int,
+    onEvent: suspend (PingStreamEvent) -> Unit
+): Int = withContext(Dispatchers.IO) {
+    val timeoutSec = ((timeoutMs.coerceIn(300, 10_000) + 999) / 1000).coerceAtLeast(1)
+    val intervalSec = String.format(java.util.Locale.US, "%.3f", intervalMs.coerceIn(30L, 60_000L) / 1000.0)
+    val base = when (protocol) {
+        PingProtocolMode.IPV4 -> listOf("ping", "-i", intervalSec, "-c", maxCount.toString(), "-W", timeoutSec.toString(), address)
+        PingProtocolMode.IPV6 -> listOf("ping6", "-i", intervalSec, "-c", maxCount.toString(), "-W", timeoutSec.toString(), address)
+        PingProtocolMode.AUTO -> listOf("ping", "-i", intervalSec, "-c", maxCount.toString(), "-W", timeoutSec.toString(), address)
+    }
+    suspend fun runStream(command: List<String>): Pair<Int, Boolean> {
+        var process: Process? = null
+        var emitted = 0
+        var lastSeq = 0
+        var sawPingLine = false
+        val seqRegex = Regex("(?:icmp_)?seq[= ](\\d+)")
+        val timeRegex = Regex("time[=<]([0-9.]+)\\s*ms")
+        return try {
+            process = ProcessBuilder(command).redirectErrorStream(true).start()
+            val reader = process!!.inputStream.bufferedReader()
+            while (currentCoroutineContext().isActive) {
+                val line = reader.readLine() ?: break
+                val lower = line.lowercase()
+                if (lower.contains("unknown host") || lower.contains("bad address")) {
+                    withContext(Dispatchers.Main) { onEvent(PingStreamEvent(null, "解析失败")) }
+                    emitted++
+                    break
+                }
+                if (lower.contains("not permitted") || lower.contains("invalid option") || lower.contains("usage:")) {
+                    return Pair(emitted, false)
+                }
+                val time = timeRegex.find(line)?.groupValues?.getOrNull(1)?.toDoubleOrNull()?.roundToInt()?.coerceAtLeast(1)
+                if (time != null) {
+                    sawPingLine = true
+                    val seq = seqRegex.find(line)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: (lastSeq + 1)
+                    if (seq > lastSeq + 1) {
+                        repeat((seq - lastSeq - 1).coerceAtMost(maxCount - emitted)) {
+                            withContext(Dispatchers.Main) { onEvent(PingStreamEvent(null, "超时")) }
+                            emitted++
+                        }
+                    }
+                    lastSeq = seq.coerceAtLeast(lastSeq)
+                    withContext(Dispatchers.Main) { onEvent(PingStreamEvent(time, null)) }
+                    emitted++
+                    if (emitted >= maxCount) break
+                }
+            }
+            if (currentCoroutineContext().isActive) {
+                val waitMs = (timeoutMs + intervalMs + 1500L).coerceAtMost(12_000L)
+                process!!.waitFor(waitMs, TimeUnit.MILLISECONDS)
+                if (sawPingLine && emitted < maxCount) {
+                    repeat((maxCount - emitted).coerceAtMost(500)) {
+                        withContext(Dispatchers.Main) { onEvent(PingStreamEvent(null, "超时")) }
+                        emitted++
+                    }
+                }
+            }
+            Pair(emitted, sawPingLine || emitted > 0)
+        } catch (_: Throwable) {
+            Pair(emitted, false)
+        } finally {
+            runCatching { process?.destroy() }
+            runCatching { process?.destroyForcibly() }
+        }
+    }
+
+    val primary = runStream(base)
+    if (primary.second || protocol != PingProtocolMode.IPV6) {
+        primary.first
+    } else {
+        runStream(listOf("ping", "-6", "-i", intervalSec, "-c", maxCount.toString(), "-W", timeoutSec.toString(), address)).first
     }
 }
 
@@ -1922,7 +2037,7 @@ private fun NetSessionTesterApp() {
         }
     }
 
-    fun safePingIntervalMs(): Long = pingIntervalSetting.toLongOrNull()?.coerceIn(200L, 60_000L) ?: 1_000L
+    fun safePingIntervalMs(): Long = pingIntervalSetting.toLongOrNull()?.coerceIn(30L, 60_000L) ?: 1_000L
 
     fun safePingTimeoutMs(): Int = pingTimeoutSetting.toIntOrNull()?.coerceIn(300, 10_000) ?: 1_000
 
@@ -2008,33 +2123,55 @@ private fun NetSessionTesterApp() {
                 }
             }
 
+            fun handlePingResult(latency: Int?, failure: String?, eventTime: Long = System.currentTimeMillis()) {
+                val elapsed = ((eventTime - startedAt) / 1_000L).toInt().coerceAtLeast(0)
+                if (elapsed != currentSec) {
+                    flushSecond(currentSec)
+                    currentSec = elapsed
+                }
+                sent++
+                secSamples.add(latency)
+                val status = when {
+                    latency == null -> failure ?: "超时"
+                    latency >= 100 -> "高延迟"
+                    else -> "成功"
+                }
+                pendingLogs.add(PingLogEntry(
+                    timeEpochMs = eventTime,
+                    target = target,
+                    protocol = resolved.displayProtocol,
+                    latencyMs = latency,
+                    status = status,
+                    note = if (latency == null) (failure ?: "timeout") else "",
+                    sessionId = sessionId
+                ))
+            }
+
             try {
-                while (currentCoroutineContext().isActive && (maxCount == null || sent < maxCount)) {
-                    val loopStart = System.currentTimeMillis()
-                    val elapsed = ((loopStart - startedAt) / 1_000L).toInt().coerceAtLeast(0)
-                    if (elapsed != currentSec) {
-                        flushSecond(currentSec)
-                        currentSec = elapsed
+                val finiteCount = maxCount
+                if (interval <= 200L && finiteCount != null) {
+                    pingIntervalLabel = "${resolved.displayProtocol} · 高频${interval}ms"
+                    val streamed = streamIcmpPingResolved(resolved.address, timeout, resolved.protocol, interval, finiteCount) { event ->
+                        handlePingResult(event.latencyMs, event.failure, event.timeEpochMs)
                     }
-                    val result = icmpPingResolved(resolved.address, timeout, resolved.protocol)
-                    val latency = result.latencyMs
-                    sent++
-                    secSamples.add(latency)
-                    val status = when {
-                        latency == null -> result.failure ?: "超时"
-                        latency >= 100 -> "高延迟"
-                        else -> "成功"
+                    if (streamed <= 0 && currentCoroutineContext().isActive) {
+                        pendingLogs.add(PingLogEntry(target = target, protocol = resolved.displayProtocol, latencyMs = null, status = "高频不可用", note = "已回退普通模式", sessionId = sessionId))
+                        while (currentCoroutineContext().isActive && sent < finiteCount) {
+                            val loopStart = System.currentTimeMillis()
+                            val result = icmpPingResolved(resolved.address, timeout, resolved.protocol)
+                            handlePingResult(result.latencyMs, result.failure, System.currentTimeMillis())
+                            val cost = System.currentTimeMillis() - loopStart
+                            delay((interval - cost).coerceAtLeast(0L))
+                        }
                     }
-                    pendingLogs.add(PingLogEntry(
-                        target = target,
-                        protocol = resolved.displayProtocol,
-                        latencyMs = latency,
-                        status = status,
-                        note = if (latency == null) (result.failure ?: "timeout") else "",
-                        sessionId = sessionId
-                    ))
-                    val cost = System.currentTimeMillis() - loopStart
-                    delay((interval - cost).coerceAtLeast(0L))
+                } else {
+                    while (currentCoroutineContext().isActive && (maxCount == null || sent < maxCount)) {
+                        val loopStart = System.currentTimeMillis()
+                        val result = icmpPingResolved(resolved.address, timeout, resolved.protocol)
+                        handlePingResult(result.latencyMs, result.failure, System.currentTimeMillis())
+                        val cost = System.currentTimeMillis() - loopStart
+                        delay((interval - cost).coerceAtLeast(0L))
+                    }
                 }
             } finally {
                 flushSecond(currentSec)
@@ -3096,12 +3233,14 @@ private fun formatPingLogGroupTitle(group: PingLogGroup): String {
 private fun PingLogDialog(logs: List<PingLogEntry>, onDismiss: () -> Unit) {
     val groups = buildPingLogGroups(logs).take(5)
     val latest = groups.firstOrNull()
-    val latestEntries = latest?.entries.orEmpty().filter { it.status != "开始" }
+    val latestEntries = latest?.entries.orEmpty().filter { it.status != "开始" && it.status != "停止" && it.status != "高频不可用" }
     val success = latestEntries.count { it.status == "成功" || it.status == "高延迟" }
     val timeout = latestEntries.count { it.status == "超时" }
     val avg = latestEntries.mapNotNull { it.latencyMs }.takeIf { it.isNotEmpty() }?.average()?.roundToInt()
     val high = latestEntries.mapNotNull { it.latencyMs }.maxOrNull()
     val low = latestEntries.mapNotNull { it.latencyMs }.minOrNull()
+    val storageText = remember(logs) { formatBytes(estimatePingLogStorageBytes(logs)) }
+    val storedRows = remember(logs) { trimPingLogSessions(logs).size }
     var expandedSession by remember(groups.firstOrNull()?.sessionId) { mutableStateOf(groups.firstOrNull()?.sessionId) }
 
     AlertDialog(
@@ -3109,7 +3248,16 @@ private fun PingLogDialog(logs: List<PingLogEntry>, onDismiss: () -> Unit) {
         confirmButton = {
             TextButton(onClick = onDismiss) { Text("关闭", fontSize = 13.sp) }
         },
-        title = { Text("Ping 响应日志", fontWeight = FontWeight.Bold, color = TextDark) },
+        title = {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("Ping 响应日志", fontWeight = FontWeight.Bold, color = TextDark)
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    StatusChip("5次历史", BlueSoft, Blue, compact = true)
+                    StatusChip("存储 $storageText", Color(0xFFF8FAFC), Muted, compact = true)
+                    StatusChip("$storedRows 条", Color(0xFFF8FAFC), Muted, compact = true)
+                }
+            }
+        },
         text = {
             Column(
                 modifier = Modifier
@@ -3167,7 +3315,7 @@ private fun PingLogSessionCard(
     expanded: Boolean,
     onToggle: () -> Unit
 ) {
-    val items = group.entries.filter { it.status != "开始" }
+    val items = group.entries.filter { it.status != "开始" && it.status != "停止" && it.status != "高频不可用" }
     val success = items.count { it.status == "成功" || it.status == "高延迟" }
     val timeout = items.count { it.status == "超时" }
     val avg = items.mapNotNull { it.latencyMs }.takeIf { it.isNotEmpty() }?.average()?.roundToInt()
@@ -3191,7 +3339,10 @@ private fun PingLogSessionCard(
             }
             AnimatedVisibility(visible = expanded) {
                 Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                    items.asReversed().take(100).forEach { entry -> PingLogRow(entry) }
+                    items.asReversed().take(180).forEach { entry -> PingLogRow(entry) }
+                    if (items.size > 180) {
+                        Text("仅显示最近 180 条，完整数据已保存", color = Muted, fontSize = 10.sp)
+                    }
                 }
             }
         }
@@ -5146,7 +5297,9 @@ private fun PingCompactChartCard(
     val avg = successes.takeIf { it.isNotEmpty() }?.average()?.roundToInt()
     val max = successes.maxOrNull()
     val min = successes.minOrNull()
-    val loss = if (pingPoints.isNotEmpty()) ((pingPoints.count { it.latencyMs == null } * 100f) / pingPoints.size).roundToInt() else 0
+    val sampleTotal = pingPoints.sumOf { it.sampleCount }.coerceAtLeast(0)
+    val lossTotal = pingPoints.sumOf { it.lossCount }
+    val loss = if (sampleTotal > 0) ((lossTotal * 100f) / sampleTotal).roundToInt() else 0
     SoftCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
             SectionTitle("∿", "Ping 测试", Blue)
@@ -5205,13 +5358,19 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
     val windowStart = if (windowEnd > 120) windowEnd - 120 else 0
     val sorted = allPoints.filter { it.elapsedSec in windowStart..windowEnd }
     val values = sorted.mapNotNull { it.latencyMs }
-    val maxY = pingYAxisMax(values.maxOrNull() ?: 0)
+    val maxY = pingMainAxisMax(values)
     val minX = windowStart
     val maxX = maxOf(minX + 1, windowEnd)
     val ticks = pingTimeLabels(minX, maxX)
+    val visibleSamples = sorted.sumOf { it.sampleCount }
+    val visibleSeconds = (maxX - minX).coerceAtLeast(1)
+    val rateText = if (visibleSamples > 0) {
+        val hz = visibleSamples / visibleSeconds.toFloat()
+        "实际${String.format(java.util.Locale.US, "%.1f", hz)}次/s"
+    } else ""
     Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
         Text(
-            if (activeTargetLabel.isBlank()) "延迟(ms)" else "延迟(ms) · $activeTargetLabel · 最近120秒",
+            listOf("延迟(ms)", activeTargetLabel.takeIf { it.isNotBlank() }, "最近120秒", rateText.takeIf { it.isNotBlank() }).filterNotNull().joinToString(" · "),
             color = Muted,
             fontSize = 10.sp,
             maxLines = 1,
@@ -5275,7 +5434,7 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
                             drawPath(path, color = Blue, style = Stroke(width = 3f, cap = StrokeCap.Round))
                         }
                         segment.forEach { (p, o) ->
-                            if (p.highLatency) drawCircle(Orange, radius = 4.2f, center = o)
+                            if (p.highLatency || (p.latencyMs ?: 0) > maxY) drawCircle(Orange, radius = 4.2f, center = o)
                             else drawCircle(Blue, radius = 2.6f, center = o)
                             if (p.lossCount > 0) drawCircle(ErrorRed, radius = 3.6f, center = Offset(o.x, h - 5f))
                         }
