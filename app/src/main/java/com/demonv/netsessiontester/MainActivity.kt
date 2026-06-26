@@ -230,6 +230,9 @@ private data class ChartPoint(
 private data class PingPoint(
     val elapsedSec: Int,
     val latencyMs: Int?,
+    val lossCount: Int = 0,
+    val highLatency: Boolean = false,
+    val sampleCount: Int = 1,
     val timeEpochMs: Long = System.currentTimeMillis()
 )
 
@@ -243,7 +246,8 @@ private data class PingLogEntry(
     val protocol: String,
     val latencyMs: Int?,
     val status: String,
-    val note: String = ""
+    val note: String = "",
+    val sessionId: Long = 0L
 ) {
     val timeText: String
         get() = DateTimeFormatter.ofPattern("HH:mm:ss")
@@ -295,8 +299,8 @@ private fun currentAppVersionCode(context: Context): Long = runCatching {
 private fun currentAppVersionName(context: Context): String {
     return runCatching {
         val pkg = context.packageManager.getPackageInfo(context.packageName, 0)
-        pkg.versionName?.takeIf { it.isNotBlank() } ?: "V1.0.4-internal"
-    }.getOrDefault("V1.0.4-internal")
+        pkg.versionName?.takeIf { it.isNotBlank() } ?: "V1.0.5-internal"
+    }.getOrDefault("V1.0.5-internal")
 }
 
 private fun displayVersionName(raw: String): String {
@@ -1328,6 +1332,7 @@ private fun NetSessionTesterApp() {
     var editingRemarkSummary by remember { mutableStateOf<SessionSummary?>(null) }
     var editingRemarkText by remember { mutableStateOf("") }
     var showRunLogDetail by remember { mutableStateOf(false) }
+    var showPingLogDialog by remember { mutableStateOf(false) }
 
     val updatePrefs = remember { context.getSharedPreferences("app_update", Context.MODE_PRIVATE) }
     var latestUpdate by remember { mutableStateOf<UpdateInfo?>(null) }
@@ -1694,7 +1699,15 @@ private fun NetSessionTesterApp() {
     fun appendPingSecond(sec: Int, samples: List<Int?>) {
         val valid = samples.mapNotNull { it }
         val avg = valid.takeIf { it.isNotEmpty() }?.average()?.roundToInt()
-        pingPoints = (pingPoints.filterNot { it.elapsedSec == sec } + PingPoint(elapsedSec = sec, latencyMs = avg))
+        val lossCount = samples.count { it == null }
+        val highLatency = valid.any { it >= 100 }
+        pingPoints = (pingPoints.filterNot { it.elapsedSec == sec } + PingPoint(
+            elapsedSec = sec,
+            latencyMs = avg,
+            lossCount = lossCount,
+            highLatency = highLatency,
+            sampleCount = samples.size.coerceAtLeast(1)
+        ))
             .sortedBy { it.elapsedSec }
             .takeLast(360)
     }
@@ -1720,11 +1733,21 @@ private fun NetSessionTesterApp() {
     }
 
     fun appendPingLog(entry: PingLogEntry) {
-        pingLogs = (pingLogs + entry).takeLast(300)
+        pingLogs = (pingLogs + entry).takeLast(600)
+    }
+
+    fun appendPingLogs(entries: List<PingLogEntry>) {
+        if (entries.isEmpty()) return
+        pingLogs = (pingLogs + entries).takeLast(600)
     }
 
     fun appendPingPoint(sec: Int, latencyMs: Int?) {
-        pingPoints = (pingPoints.filterNot { it.elapsedSec == sec } + PingPoint(elapsedSec = sec, latencyMs = latencyMs))
+        pingPoints = (pingPoints.filterNot { it.elapsedSec == sec } + PingPoint(
+            elapsedSec = sec,
+            latencyMs = latencyMs,
+            lossCount = if (latencyMs == null) 1 else 0,
+            highLatency = (latencyMs ?: 0) >= 100
+        ))
             .sortedBy { it.elapsedSec }
             .takeLast(360)
     }
@@ -1738,34 +1761,69 @@ private fun NetSessionTesterApp() {
         pingJob?.cancel()
         if (reset) {
             pingPoints = emptyList()
-            pingLogs = emptyList()
         }
         pingRunning = true
         pingIntervalLabel = "${protocol.label} · ${interval}ms"
-        appendPingLog(PingLogEntry(target = target, protocol = protocol.label, latencyMs = null, status = "开始", note = "间隔${interval}ms · 超时${timeout}ms"))
+        val sessionId = System.currentTimeMillis()
+        appendPingLog(PingLogEntry(
+            timeEpochMs = sessionId,
+            target = target,
+            protocol = protocol.label,
+            latencyMs = null,
+            status = "开始",
+            note = "间隔${interval}ms · 超时${timeout}ms",
+            sessionId = sessionId
+        ))
         pingJob = scope.launch {
             val startedAt = System.currentTimeMillis()
             var sent = 0
+            var currentSec = 0
+            val secSamples = mutableListOf<Int?>()
+            val pendingLogs = mutableListOf<PingLogEntry>()
+
+            fun flushSecond(sec: Int) {
+                if (secSamples.isNotEmpty()) {
+                    appendPingSecond(sec, secSamples.toList())
+                    secSamples.clear()
+                }
+                if (pendingLogs.isNotEmpty()) {
+                    appendPingLogs(pendingLogs.toList())
+                    pendingLogs.clear()
+                }
+            }
+
             try {
                 while (currentCoroutineContext().isActive && (maxCount == null || sent < maxCount)) {
                     val loopStart = System.currentTimeMillis()
                     val elapsed = ((loopStart - startedAt) / 1_000L).toInt().coerceAtLeast(0)
+                    if (elapsed != currentSec) {
+                        flushSecond(currentSec)
+                        currentSec = elapsed
+                    }
                     val latency = icmpPingMs(target, timeout, protocol)
                     sent++
-                    appendPingPoint(elapsed, latency)
+                    secSamples.add(latency)
                     val status = when {
                         latency == null -> "超时"
                         latency >= 100 -> "高延迟"
                         else -> "成功"
                     }
-                    appendPingLog(PingLogEntry(target = target, protocol = protocol.label, latencyMs = latency, status = status, note = if (latency == null) "timeout" else ""))
+                    pendingLogs.add(PingLogEntry(
+                        target = target,
+                        protocol = protocol.label,
+                        latencyMs = latency,
+                        status = status,
+                        note = if (latency == null) "timeout" else "",
+                        sessionId = sessionId
+                    ))
                     val cost = System.currentTimeMillis() - loopStart
                     delay((interval - cost).coerceAtLeast(0L))
                 }
             } finally {
+                flushSecond(currentSec)
                 pingRunning = false
                 pingIntervalLabel = if (sent > 0) "已停止 · ${sent}次" else "停止"
-                appendPingLog(PingLogEntry(target = target, protocol = protocol.label, latencyMs = null, status = "停止", note = "共${sent}次"))
+                appendPingLog(PingLogEntry(target = target, protocol = protocol.label, latencyMs = null, status = "停止", note = "共${sent}次", sessionId = sessionId))
             }
         }
     }
@@ -2272,6 +2330,10 @@ private fun NetSessionTesterApp() {
         HistoryDetailDialog(summary = detailSummary!!, maskPrivacy = maskPrivacy, onDismiss = { detailSummary = null })
     }
 
+    if (showPingLogDialog) {
+        PingLogDialog(logs = pingLogs, onDismiss = { showPingLogDialog = false })
+    }
+
     if (detailTitle != null) {
         AlertDialog(
             onDismissRequest = { detailTitle = null },
@@ -2430,9 +2492,7 @@ private fun NetSessionTesterApp() {
                     onStartPing = { startPingMonitor(reset = true) },
                     onStopPing = { stopPingMonitor() },
                     onClearPing = { clearPingData() },
-                    onShowPingLog = {
-                        showDetail("Ping 响应日志", pingLogDetailLines(pingLogs))
-                    },
+                    onShowPingLog = { showPingLogDialog = true },
                     isAdding = state.isAdding,
                     runPhase = state.runPhase,
                     releaseUi = state.releaseUi,
@@ -2753,6 +2813,139 @@ private fun isAbnormalSummary(summary: SessionSummary): Boolean = listOfNotNull(
 }
 
 
+
+private data class PingLogGroup(
+    val sessionId: Long,
+    val target: String,
+    val protocol: String,
+    val startedAt: Long,
+    val headerNote: String,
+    val entries: List<PingLogEntry>
+)
+
+private fun buildPingLogGroups(logs: List<PingLogEntry>): List<PingLogGroup> {
+    if (logs.isEmpty()) return emptyList()
+    val groups = logs.groupBy { entry ->
+        if (entry.sessionId != 0L) entry.sessionId else entry.timeEpochMs
+    }
+    return groups.map { (id, items) ->
+        val sorted = items.sortedBy { it.timeEpochMs }
+        val first = sorted.first()
+        val header = sorted.firstOrNull { it.status == "开始" } ?: first
+        PingLogGroup(
+            sessionId = id,
+            target = header.target,
+            protocol = header.protocol,
+            startedAt = header.timeEpochMs,
+            headerNote = header.note,
+            entries = sorted
+        )
+    }.sortedByDescending { it.startedAt }
+}
+
+private fun formatPingLogGroupTitle(group: PingLogGroup): String {
+    val time = DateTimeFormatter.ofPattern("今天 HH:mm")
+        .withZone(ZoneId.systemDefault())
+        .format(Instant.ofEpochMilli(group.startedAt))
+    val note = group.headerNote.ifBlank { "" }
+    return listOf(time, group.target, group.protocol, note).filter { it.isNotBlank() }.joinToString(" · ")
+}
+
+@Composable
+private fun PingLogDialog(logs: List<PingLogEntry>, onDismiss: () -> Unit) {
+    val groups = buildPingLogGroups(logs)
+    val latest = groups.firstOrNull()
+    val latestEntries = latest?.entries.orEmpty().filter { it.status != "开始" }
+    val success = latestEntries.count { it.status == "成功" || it.status == "高延迟" }
+    val timeout = latestEntries.count { it.status == "超时" }
+    val avg = latestEntries.mapNotNull { it.latencyMs }.takeIf { it.isNotEmpty() }?.average()?.roundToInt()
+    val high = latestEntries.mapNotNull { it.latencyMs }.maxOrNull()
+    val low = latestEntries.mapNotNull { it.latencyMs }.minOrNull()
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("关闭", fontSize = 13.sp) }
+        },
+        title = { Text("Ping 响应日志", fontWeight = FontWeight.Bold, color = TextDark) },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 520.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                if (latest == null) {
+                    Text("暂无 Ping 响应日志。", color = Muted, fontSize = 13.sp)
+                } else {
+                    Card(
+                        shape = ShapeM,
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFFF8FAFC)),
+                        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text("最近一次 · ${latest.target} · ${latest.protocol}", color = TextDark, fontSize = 13.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text("总数 ${latestEntries.size} · 成功 $success · 超时 $timeout · 平均 ${avg?.let { "${it}ms" } ?: "—"}", color = Muted, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text("最高 ${high?.let { "${it}ms" } ?: "—"} · 最低 ${low?.let { "${it}ms" } ?: "—"} · 已保留最近 ${logs.size} 条", color = Muted, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                    }
+                    LazyColumn(
+                        modifier = Modifier.fillMaxWidth().height(360.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        groups.forEach { group ->
+                            item(key = "header-${group.sessionId}") {
+                                Text(
+                                    formatPingLogGroupTitle(group),
+                                    color = Blue,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.padding(top = 4.dp)
+                                )
+                            }
+                            items(group.entries.asReversed().take(100)) { entry ->
+                                if (entry.status != "开始") PingLogRow(entry)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    )
+}
+
+@Composable
+private fun PingLogRow(entry: PingLogEntry) {
+    val dotColor = when (entry.status) {
+        "成功" -> Green
+        "高延迟" -> Orange
+        "超时" -> ErrorRed
+        else -> Blue
+    }
+    val latencyText = entry.latencyMs?.let { "${it}ms" } ?: "—"
+    val statusText = when {
+        entry.status == "停止" && entry.note.isNotBlank() -> "停止 · ${entry.note}"
+        entry.status == "超时" && entry.note.isNotBlank() -> "超时 · ${entry.note}"
+        else -> entry.status
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color.White, ShapeS)
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Box(Modifier.width(7.dp).height(7.dp).background(dotColor, RoundedCornerShape(50)))
+        Text(entry.timeText, color = Muted, fontSize = 11.sp, modifier = Modifier.width(62.dp))
+        Text(latencyText, color = if (entry.status == "高延迟") Orange else if (entry.status == "超时") ErrorRed else TextDark, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(54.dp))
+        Text(statusText, color = dotColor, fontSize = 12.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+    }
+}
+
 private fun pingLogDetailLines(logs: List<PingLogEntry>): List<String> {
     if (logs.isEmpty()) return listOf("暂无 Ping 响应日志。")
     val success = logs.count { it.status == "成功" || it.status == "高延迟" }
@@ -2927,7 +3120,7 @@ private fun SettingsPage(
                     ParamField("目标会话（条）", successLimit, onSuccessLimitChange, Modifier.weight(1f))
                     Spacer(Modifier.weight(1f))
                 }
-                Text("V1.0.4 内测：NAT 兼容判定 + 独立 Ping 与响应日志。", color = Muted, fontSize = 12.sp, lineHeight = 16.sp)
+                Text("V1.0.5 内测：Ping 图表聚合、日志分组和协议下拉优化。", color = Muted, fontSize = 12.sp, lineHeight = 16.sp)
             }
         }
         item {
@@ -2952,12 +3145,52 @@ private fun SettingsPage(
                     ParamField("次数", pingCount, onPingCountChange, Modifier.weight(1f))
                     Column(Modifier.weight(1f)) {
                         FieldLabel("协议")
-                        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            PingProtocolMode.values().forEach { option ->
-                                FilterChip(
-                                    selected = pingProtocol == option,
-                                    onClick = { onPingProtocolChange(option) },
-                                    label = { Text(option.label, fontSize = 11.sp) }
+                        var protocolMenuOpen by remember { mutableStateOf(false) }
+                        Box {
+                            OutlinedButton(
+                                onClick = { protocolMenuOpen = true },
+                                modifier = Modifier.fillMaxWidth().height(50.dp),
+                                shape = ShapeM
+                            ) {
+                                Text(
+                                    when (pingProtocol) {
+                                        PingProtocolMode.AUTO -> "自动 IPv4/IPv6"
+                                        PingProtocolMode.IPV4 -> "仅 IPv4"
+                                        PingProtocolMode.IPV6 -> "仅 IPv6"
+                                    },
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            if (protocolMenuOpen) {
+                                AlertDialog(
+                                    onDismissRequest = { protocolMenuOpen = false },
+                                    confirmButton = {},
+                                    title = { Text("协议模式", fontWeight = FontWeight.Bold) },
+                                    text = {
+                                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                            PingProtocolMode.values().forEach { option ->
+                                                TextButton(
+                                                    onClick = {
+                                                        onPingProtocolChange(option)
+                                                        protocolMenuOpen = false
+                                                    },
+                                                    modifier = Modifier.fillMaxWidth()
+                                                ) {
+                                                    Text(
+                                                        when (option) {
+                                                            PingProtocolMode.AUTO -> "自动 IPv4/IPv6"
+                                                            PingProtocolMode.IPV4 -> "仅 IPv4"
+                                                            PingProtocolMode.IPV6 -> "仅 IPv6"
+                                                        },
+                                                        fontWeight = if (pingProtocol == option) FontWeight.Bold else FontWeight.Medium
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
                                 )
                             }
                         }
@@ -4002,6 +4235,22 @@ private fun timeLabels(minX: Int, maxX: Int, step: Int): List<Int> {
     return labels.distinct()
 }
 
+private fun pingTimeLabels(minX: Int, maxX: Int, maxTicks: Int = 6): List<Int> {
+    if (maxX <= minX) return listOf(minX)
+    val duration = maxX - minX
+    val niceSteps = listOf(1, 2, 3, 5, 10, 15, 20, 30, 60, 120, 180, 300, 600)
+    val step = niceSteps.firstOrNull { (duration / it) + 1 <= maxTicks } ?: ((duration + maxTicks - 1) / maxTicks).coerceAtLeast(1)
+    val labels = mutableListOf<Int>()
+    labels.add(minX)
+    var t = ((minX + step - 1) / step) * step
+    while (t < maxX && labels.size < maxTicks - 1) {
+        if (t > minX) labels.add(t)
+        t += step
+    }
+    if (labels.lastOrNull() != maxX) labels.add(maxX)
+    return labels.distinct().take(maxTicks)
+}
+
 
 private fun failureIntervalSummary(points: List<ChartPoint>, bucketSeconds: Int = 10): String {
     if (points.isEmpty()) return ""
@@ -4319,7 +4568,7 @@ private fun PingLineChart(points: List<PingPoint>) {
     val maxY = pingYAxisMax(values.maxOrNull() ?: 0)
     val minX = 0
     val maxX = maxOf(1, sorted.lastOrNull()?.elapsedSec ?: 1)
-    val step = chartXAxisStep(maxX)
+    val ticks = pingTimeLabels(minX, maxX)
     Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
         Text("延迟(ms)", color = Muted, fontSize = 10.sp)
         Row(modifier = Modifier.fillMaxWidth().height(154.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -4334,26 +4583,62 @@ private fun PingLineChart(points: List<PingPoint>) {
                     drawLine(Border.copy(alpha = 0.55f), Offset(0f, y), Offset(w, y), strokeWidth = 1f)
                 }
                 if (sorted.isNotEmpty()) {
-                    val path = Path()
-                    var started = false
-                    sorted.forEach { p ->
+                    fun toOffset(p: PingPoint): Offset? {
+                        val latency = p.latencyMs ?: return null
                         val x = w * ((p.elapsedSec - minX).toFloat() / (maxX - minX).toFloat())
-                        val latency = p.latencyMs
-                        if (latency == null) {
-                            drawCircle(ErrorRed, radius = 4f, center = Offset(x, h - 5f))
+                        val clipped = latency.coerceIn(0, maxY)
+                        val y = h - h * (clipped.toFloat() / maxY.toFloat())
+                        return Offset(x, y)
+                    }
+
+                    val segments = mutableListOf<MutableList<Pair<PingPoint, Offset>>>()
+                    var current = mutableListOf<Pair<PingPoint, Offset>>()
+                    var previous: PingPoint? = null
+                    sorted.forEach { p ->
+                        val offset = toOffset(p)
+                        if (offset == null) {
+                            val x = w * ((p.elapsedSec - minX).toFloat() / (maxX - minX).toFloat())
+                            if (p.lossCount > 0) drawCircle(ErrorRed, radius = 4f, center = Offset(x, h - 5f))
+                            if (current.isNotEmpty()) segments.add(current)
+                            current = mutableListOf()
+                            previous = p
                         } else {
-                            val clipped = latency.coerceIn(0, maxY)
-                            val y = h - h * (clipped.toFloat() / maxY.toFloat())
-                            if (!started) { path.moveTo(x, y); started = true } else path.lineTo(x, y)
-                            drawCircle(Blue, radius = 3f, center = Offset(x, y))
+                            val gap = previous?.let { p.elapsedSec - it.elapsedSec } ?: 0
+                            if (gap > 5 && current.isNotEmpty()) {
+                                segments.add(current)
+                                current = mutableListOf()
+                            }
+                            current.add(p to offset)
+                            previous = p
                         }
                     }
-                    drawPath(path, color = Blue, style = Stroke(width = 3f))
+                    if (current.isNotEmpty()) segments.add(current)
+
+                    segments.forEach { segment ->
+                        if (segment.size == 1) {
+                            drawCircle(Blue, radius = 3.2f, center = segment.first().second)
+                        } else {
+                            val path = Path()
+                            path.moveTo(segment.first().second.x, segment.first().second.y)
+                            for (i in 1 until segment.size) {
+                                val prev = segment[i - 1].second
+                                val next = segment[i].second
+                                val midX = (prev.x + next.x) / 2f
+                                path.cubicTo(midX, prev.y, midX, next.y, next.x, next.y)
+                            }
+                            drawPath(path, color = Blue, style = Stroke(width = 3f, cap = StrokeCap.Round))
+                        }
+                        segment.forEach { (p, o) ->
+                            if (p.highLatency) drawCircle(Orange, radius = 4.2f, center = o)
+                            else drawCircle(Blue, radius = 2.6f, center = o)
+                            if (p.lossCount > 0) drawCircle(ErrorRed, radius = 3.6f, center = Offset(o.x, h - 5f))
+                        }
+                    }
                 }
             }
         }
         Row(modifier = Modifier.fillMaxWidth().padding(start = 34.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-            timeLabels(minX, maxX, step).forEach { Text("${it}s", color = Muted, fontSize = 10.sp) }
+            ticks.forEach { Text("${it}s", color = Muted, fontSize = 10.sp) }
         }
     }
 }
