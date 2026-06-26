@@ -341,16 +341,14 @@ private fun cleanTargetText(value: String): String = value.trim().trimEnd('/')
 
 private fun loadTargetHistory(context: Context, key: String): List<String> {
     val raw = context.getSharedPreferences("target_history_store", Context.MODE_PRIVATE).getString(key, "") ?: ""
-    return raw.split("
-").map { it.trim() }.filter { it.isNotBlank() }.distinct().take(5)
+    return raw.split("\n").map { it.trim() }.filter { it.isNotBlank() }.distinct().take(5)
 }
 
 private fun saveTargetHistory(context: Context, key: String, items: List<String>) {
     val clean = items.map { cleanTargetText(it) }.filter { it.isNotBlank() }.distinct().take(5)
     context.getSharedPreferences("target_history_store", Context.MODE_PRIVATE)
         .edit()
-        .putString(key, clean.joinToString("
-"))
+        .putString(key, clean.joinToString("\n"))
         .apply()
 }
 
