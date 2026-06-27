@@ -1305,7 +1305,12 @@ private fun parseStunResponse(data: ByteArray, length: Int, transactionId: ByteA
             val pair = parseStunAddressAttribute(data, value, attrLen, type)
             when (type) {
                 0x0020, 0x0001 -> if (pair != null && mapped == null) mapped = pair
-                0x802C -> if (pair != null) other = InetSocketAddress(pair.first, pair.second)
+                // RFC5780 OTHER-ADDRESS. Some legacy RFC3489 servers still return
+                // CHANGED-ADDRESS (0x0005); treat it as the alternate address so
+                // stun.miwifi.com / stun.voip.aebc.com style servers can run the
+                // same mapping/filtering compatibility flow instead of being
+                // rejected as unsupported.
+                0x802C, 0x0005 -> if (pair != null && other == null) other = InetSocketAddress(pair.first, pair.second)
                 0x802B -> if (pair != null) origin = InetSocketAddress(pair.first, pair.second)
             }
         }
@@ -1438,9 +1443,26 @@ private fun manualRfc5780Probe(endpoint: StunEndpoint): ManualNatResult? {
     val mainAddress = InetSocketAddress(resolveFirstIpv4(endpoint.host), endpoint.port)
     DatagramSocket().use { socket ->
         val base = sendAndReceiveStun(socket, mainAddress, buildStunBindingRequest(), 1200) ?: error("Binding无响应")
-        val other = base.otherAddress ?: error("服务器不支持OTHER-ADDRESS，无法完成RFC5780")
+        val other = base.otherAddress
+
+        // Strict/compatible RFC5780 requires a real alternate address. If a server
+        // only supports basic Binding, do not fail the whole test; show RFC8489
+        // basic mapping result and mark filtering as unverified.
+        if (other == null) {
+            return manualRfc8489Result(
+                socket = socket,
+                endpoint = endpoint,
+                base = base,
+                message = "服务器未返回 OTHER-ADDRESS/CHANGED-ADDRESS，已降级为基础 STUN Binding；过滤行为未验证。"
+            )
+        }
+
         val map2 = sendAndReceiveStun(socket, other, buildStunBindingRequest(), 1200)
         val mapping = if (map2 != null && map2.mappedIp == base.mappedIp && map2.mappedPort == base.mappedPort) "端口保持" else "端口变化"
+
+        // Filtering test: only CHANGE-REQUEST responses are allowed to prove
+        // filtering openness. A normal Binding response must never be counted as
+        // Endpoint-Independent Filtering, otherwise NAT3 can be misreported as NAT1.
         val changedIpPort = sendAndReceiveStun(socket, mainAddress, buildStunBindingRequest(changeIp = true, changePort = true), 1200)
         val filtering = if (changedIpPort != null) {
             "开放"
@@ -1468,10 +1490,41 @@ private fun manualRfc5780Probe(endpoint: StunEndpoint): ManualNatResult? {
     }
 }
 
+private fun manualRfc8489Result(
+    socket: DatagramSocket,
+    endpoint: StunEndpoint,
+    base: StunRawResponse,
+    message: String
+): ManualNatResult {
+    val mainAddress = InetSocketAddress(resolveFirstIpv4(endpoint.host), endpoint.port)
+    val again = sendAndReceiveStun(socket, mainAddress, buildStunBindingRequest(), 900)
+    val mapping = if (again != null && again.mappedIp == base.mappedIp && again.mappedPort == base.mappedPort) "端口保持" else if (again != null) "端口变化" else "公网映射"
+    val natType = when (mapping) {
+        "端口变化" -> "NAT4 / 对称型"
+        "端口保持" -> "端口保持型"
+        else -> "基础 STUN 可用"
+    }
+    return ManualNatResult(
+        success = true,
+        natType = natType,
+        mappingBehavior = mapping,
+        filteringBehavior = "未验证",
+        localAddress = localIpv4Addresses().firstOrNull()?.let { "$it:${socket.localPort}" } ?: "本地:${socket.localPort}",
+        publicAddress = "${base.mappedIp}:${base.mappedPort}",
+        method = "RFC8489",
+        server = endpoint.key,
+        message = message
+    )
+}
+
 private fun manualRfc3489Probe(endpoint: StunEndpoint): ManualNatResult? {
     val mainAddress = InetSocketAddress(resolveFirstIpv4(endpoint.host), endpoint.port)
     DatagramSocket().use { socket ->
         val base = sendAndReceiveStun(socket, mainAddress, buildStunBindingRequest(), 1200) ?: error("Binding无响应")
+        val changedAddress = base.otherAddress
+        val map2 = changedAddress?.let { sendAndReceiveStun(socket, it, buildStunBindingRequest(), 1200) }
+        val mapping = if (map2 != null && (map2.mappedIp != base.mappedIp || map2.mappedPort != base.mappedPort)) "端口变化" else "端口保持"
+
         val changedIpPort = sendAndReceiveStun(socket, mainAddress, buildStunBindingRequest(changeIp = true, changePort = true), 1200)
         val changedPort = if (changedIpPort == null) sendAndReceiveStun(socket, mainAddress, buildStunBindingRequest(changePort = true), 1200) else null
         val filtering = when {
@@ -1479,21 +1532,22 @@ private fun manualRfc3489Probe(endpoint: StunEndpoint): ManualNatResult? {
             changedPort != null -> "地址受限"
             else -> "端口受限"
         }
-        val natType = when (filtering) {
-            "开放" -> "NAT1 / 全锥形"
-            "地址受限" -> "NAT2 / 地址受限型"
+        val natType = when {
+            mapping == "端口变化" -> "NAT4 / 对称型"
+            filtering == "开放" -> "NAT1 / 全锥形"
+            filtering == "地址受限" -> "NAT2 / 地址受限型"
             else -> "NAT3 / 端口受限型"
         }
         return ManualNatResult(
             success = true,
             natType = natType,
-            mappingBehavior = "端口保持",
+            mappingBehavior = mapping,
             filteringBehavior = filtering,
             localAddress = localIpv4Addresses().firstOrNull()?.let { "$it:${socket.localPort}" } ?: "本地:${socket.localPort}",
             publicAddress = "${base.mappedIp}:${base.mappedPort}",
             method = "RFC3489",
             server = endpoint.key,
-            message = "RFC3489 兼容检测完成"
+            message = if (changedAddress == null) "RFC3489 兼容检测完成；服务器未返回备用地址，映射判断按当前公网映射显示。" else "RFC3489 兼容检测完成"
         )
     }
 }
@@ -5507,7 +5561,7 @@ private fun NatDiagnosticDialog(
                     NatModeChip("RFC3489", mode == ManualNatMode.RFC3489, Modifier.weight(1f)) { onModeChange(ManualNatMode.RFC3489) }
                 }
                 Text(
-                    if (mode == ManualNatMode.RFC5780) "RFC5780 会检测映射行为和过滤行为，适合严格判断 NAT1/NAT2/NAT3。" else "RFC3489 是经典兼容检测，结果可与老工具对比。",
+                    if (mode == ManualNatMode.RFC5780) "RFC5780 会检测映射行为和过滤行为；若服务器不支持严格流程，会自动降级为 RFC8489 基础结果。" else "RFC3489 是经典兼容检测，结果可与老工具对比。",
                     color = Muted,
                     fontSize = 12.sp,
                     lineHeight = 16.sp,
@@ -5609,6 +5663,7 @@ private fun MiniResultLine(label: String, value: String) {
 private fun standardMappingText(value: String): String = when (value) {
     "端口保持" -> "Endpoint-Independent Mapping（端口保持）"
     "端口变化" -> "Address and Port-Dependent Mapping（端口变化）"
+    "公网映射" -> "Binding Mapping（公网映射）"
     else -> value
 }
 
@@ -5616,6 +5671,7 @@ private fun standardFilteringText(value: String): String = when (value) {
     "开放" -> "Endpoint-Independent Filtering（开放）"
     "地址受限" -> "Address-Dependent Filtering（地址受限）"
     "端口受限" -> "Address and Port-Dependent Filtering（端口受限）"
+    "未验证" -> "Not Verified（未验证）"
     else -> value
 }
 
