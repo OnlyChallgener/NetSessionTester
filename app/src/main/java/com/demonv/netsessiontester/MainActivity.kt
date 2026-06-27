@@ -687,7 +687,8 @@ private data class StunRawResponse(
     val mappedIp: String,
     val mappedPort: Int,
     val otherAddress: InetSocketAddress? = null,
-    val responseOrigin: InetSocketAddress? = null
+    val responseOrigin: InetSocketAddress? = null,
+    val remoteAddress: InetSocketAddress? = null
 )
 
 private data class Rfc5780ProbeResult(
@@ -1344,9 +1345,30 @@ private fun sendAndReceiveStun(socket: DatagramSocket, address: InetSocketAddres
         val buffer = ByteArray(1024)
         val responsePacket = DatagramPacket(buffer, buffer.size)
         socket.receive(responsePacket)
-        parseStunResponse(responsePacket.data, responsePacket.length, request.transactionId)
+        parseStunResponse(responsePacket.data, responsePacket.length, request.transactionId)?.copy(
+            remoteAddress = InetSocketAddress(responsePacket.address, responsePacket.port)
+        )
     }.getOrNull()
 }
+private fun sameSocketAddress(a: InetSocketAddress?, b: InetSocketAddress?): Boolean {
+    if (a == null || b == null) return false
+    return a.port == b.port && a.address?.hostAddress == b.address?.hostAddress
+}
+
+private fun sameIp(a: InetSocketAddress?, b: InetSocketAddress?): Boolean {
+    if (a == null || b == null) return false
+    return a.address?.hostAddress == b.address?.hostAddress
+}
+
+private fun isValidChangeIpPortResponse(response: StunRawResponse?, other: InetSocketAddress?): Boolean {
+    return response != null && sameSocketAddress(response.remoteAddress, other)
+}
+
+private fun isValidChangePortResponse(response: StunRawResponse?, main: InetSocketAddress): Boolean {
+    val remote = response?.remoteAddress ?: return false
+    return remote.address?.hostAddress == main.address?.hostAddress && remote.port != main.port
+}
+
 
 private fun rfc5780ProbeFast(): Rfc5780ProbeResult? {
     val candidates = listOf(
@@ -1372,11 +1394,11 @@ private fun rfc5780ProbeFast(): Rfc5780ProbeResult? {
                 "端口变化"
             }
             val changedIpPort = sendAndReceiveStun(socket, mainAddress, buildStunBindingRequest(changeIp = true, changePort = true), 900)
-            val filteringBehavior = if (changedIpPort != null) {
+            val filteringBehavior = if (isValidChangeIpPortResponse(changedIpPort, other)) {
                 "开放"
             } else {
                 val changedPort = sendAndReceiveStun(socket, mainAddress, buildStunBindingRequest(changePort = true), 900)
-                if (changedPort != null) "地址受限" else "端口受限"
+                if (isValidChangePortResponse(changedPort, mainAddress)) "地址受限" else "端口受限"
             }
             return Rfc5780ProbeResult(
                 serverKey = endpoint.key,
@@ -1460,15 +1482,16 @@ private fun manualRfc5780Probe(endpoint: StunEndpoint): ManualNatResult? {
         val map2 = sendAndReceiveStun(socket, other, buildStunBindingRequest(), 1200)
         val mapping = if (map2 != null && map2.mappedIp == base.mappedIp && map2.mappedPort == base.mappedPort) "端口保持" else "端口变化"
 
-        // Filtering test: only CHANGE-REQUEST responses are allowed to prove
-        // filtering openness. A normal Binding response must never be counted as
-        // Endpoint-Independent Filtering, otherwise NAT3 can be misreported as NAT1.
+        // Filtering test: only CHANGE-REQUEST responses from the expected changed
+        // source address/port prove filtering openness. A normal Binding response,
+        // or a response from the original server address, must never be counted as
+        // Endpoint-Independent Filtering; otherwise NAT3 can be misreported as NAT1.
         val changedIpPort = sendAndReceiveStun(socket, mainAddress, buildStunBindingRequest(changeIp = true, changePort = true), 1200)
-        val filtering = if (changedIpPort != null) {
+        val filtering = if (isValidChangeIpPortResponse(changedIpPort, other)) {
             "开放"
         } else {
             val changedPort = sendAndReceiveStun(socket, mainAddress, buildStunBindingRequest(changePort = true), 1200)
-            if (changedPort != null) "地址受限" else "端口受限"
+            if (isValidChangePortResponse(changedPort, mainAddress)) "地址受限" else "端口受限"
         }
         val natType = when {
             mapping != "端口保持" -> "NAT4 / 对称型"
@@ -1526,10 +1549,11 @@ private fun manualRfc3489Probe(endpoint: StunEndpoint): ManualNatResult? {
         val mapping = if (map2 != null && (map2.mappedIp != base.mappedIp || map2.mappedPort != base.mappedPort)) "端口变化" else "端口保持"
 
         val changedIpPort = sendAndReceiveStun(socket, mainAddress, buildStunBindingRequest(changeIp = true, changePort = true), 1200)
-        val changedPort = if (changedIpPort == null) sendAndReceiveStun(socket, mainAddress, buildStunBindingRequest(changePort = true), 1200) else null
+        val changeIpPortOk = isValidChangeIpPortResponse(changedIpPort, changedAddress)
+        val changedPort = if (!changeIpPortOk) sendAndReceiveStun(socket, mainAddress, buildStunBindingRequest(changePort = true), 1200) else null
         val filtering = when {
-            changedIpPort != null -> "开放"
-            changedPort != null -> "地址受限"
+            changeIpPortOk -> "开放"
+            isValidChangePortResponse(changedPort, mainAddress) -> "地址受限"
             else -> "端口受限"
         }
         val natType = when {
