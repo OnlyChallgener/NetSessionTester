@@ -698,6 +698,24 @@ private data class Rfc5780ProbeResult(
     val filteringBehavior: String
 )
 
+private enum class ManualNatMode(val label: String) {
+    RFC5780("RFC5780"),
+    RFC3489("RFC3489")
+}
+
+private data class ManualNatResult(
+    val success: Boolean,
+    val natType: String,
+    val mappingBehavior: String,
+    val filteringBehavior: String,
+    val localAddress: String,
+    val publicAddress: String,
+    val method: String,
+    val server: String,
+    val message: String = ""
+)
+
+
 private val stunRandom = java.security.SecureRandom()
 
 private data class DnsProbeResult(
@@ -846,12 +864,14 @@ private suspend fun detectNetworkProbe(
     targetHost: String,
     targetPort: Int
 ): NetworkProbeInfo = withContext(Dispatchers.IO) {
+    // V1.1.2 自测：网络信息只做轻量探测，不再主动跑 NAT 类型。
+    // NAT 类型交给手动诊断面板，避免普通 STUN 自动误判 NAT1。
     buildNetworkProbeInfo(
         publicIpResult = publicIpResult,
         env = env,
         targetHost = targetHost,
         targetPort = targetPort,
-        full = true
+        full = false
     )
 }
 
@@ -1366,6 +1386,118 @@ private fun rfc5780ProbeFast(): Rfc5780ProbeResult? {
 }
 
 
+
+private fun parseStunEndpoint(raw: String, defaultPort: Int = 3478): StunEndpoint? {
+    val clean = raw.trim().removePrefix("stun:").removePrefix("turn:")
+    if (clean.isBlank()) return null
+    val host: String
+    val port: Int
+    if (clean.startsWith("[") && clean.contains("]")) {
+        host = clean.substringAfter("[").substringBefore("]")
+        port = clean.substringAfter("]:", defaultPort.toString()).toIntOrNull() ?: defaultPort
+    } else {
+        val parts = clean.split(":")
+        host = parts.firstOrNull().orEmpty()
+        port = parts.getOrNull(1)?.toIntOrNull() ?: defaultPort
+    }
+    if (host.isBlank() || port !in 1..65535) return null
+    return StunEndpoint(host, port)
+}
+
+private fun manualNatProbe(mode: ManualNatMode, servers: List<String>): ManualNatResult {
+    val cleanServers = servers.mapNotNull { parseStunEndpoint(it) }.ifEmpty {
+        listOf(if (mode == ManualNatMode.RFC5780) StunEndpoint("stunserver2025.stunprotocol.org", 3478) else StunEndpoint("stun.voip.aebc.com", 3478))
+    }
+    var lastError = "STUN服务器无响应"
+    for (endpoint in cleanServers) {
+        val result = runCatching {
+            when (mode) {
+                ManualNatMode.RFC5780 -> manualRfc5780Probe(endpoint)
+                ManualNatMode.RFC3489 -> manualRfc3489Probe(endpoint)
+            }
+        }.getOrElse { error ->
+            lastError = error.message ?: "检测失败"
+            null
+        }
+        if (result != null) return result
+    }
+    return ManualNatResult(
+        success = false,
+        natType = "无法判断",
+        mappingBehavior = "未知",
+        filteringBehavior = "未知",
+        localAddress = "不可用",
+        publicAddress = "不可用",
+        method = mode.label,
+        server = cleanServers.firstOrNull()?.key.orEmpty(),
+        message = lastError
+    )
+}
+
+private fun manualRfc5780Probe(endpoint: StunEndpoint): ManualNatResult? {
+    val mainAddress = InetSocketAddress(resolveFirstIpv4(endpoint.host), endpoint.port)
+    DatagramSocket().use { socket ->
+        val base = sendAndReceiveStun(socket, mainAddress, buildStunBindingRequest(), 1200) ?: error("Binding无响应")
+        val other = base.otherAddress ?: error("服务器不支持OTHER-ADDRESS，无法完成RFC5780")
+        val map2 = sendAndReceiveStun(socket, other, buildStunBindingRequest(), 1200)
+        val mapping = if (map2 != null && map2.mappedIp == base.mappedIp && map2.mappedPort == base.mappedPort) "端口保持" else "端口变化"
+        val changedIpPort = sendAndReceiveStun(socket, mainAddress, buildStunBindingRequest(changeIp = true, changePort = true), 1200)
+        val filtering = if (changedIpPort != null) {
+            "开放"
+        } else {
+            val changedPort = sendAndReceiveStun(socket, mainAddress, buildStunBindingRequest(changePort = true), 1200)
+            if (changedPort != null) "地址受限" else "端口受限"
+        }
+        val natType = when {
+            mapping != "端口保持" -> "NAT4 / 对称型"
+            filtering == "开放" -> "NAT1 / 全锥形"
+            filtering == "地址受限" -> "NAT2 / 地址受限型"
+            else -> "NAT3 / 端口受限型"
+        }
+        return ManualNatResult(
+            success = true,
+            natType = natType,
+            mappingBehavior = mapping,
+            filteringBehavior = filtering,
+            localAddress = localIpv4Addresses().firstOrNull()?.let { "$it:${socket.localPort}" } ?: "本地:${socket.localPort}",
+            publicAddress = "${base.mappedIp}:${base.mappedPort}",
+            method = "RFC5780",
+            server = endpoint.key,
+            message = "RFC5780 已完成出网端口和回包限制检测"
+        )
+    }
+}
+
+private fun manualRfc3489Probe(endpoint: StunEndpoint): ManualNatResult? {
+    val mainAddress = InetSocketAddress(resolveFirstIpv4(endpoint.host), endpoint.port)
+    DatagramSocket().use { socket ->
+        val base = sendAndReceiveStun(socket, mainAddress, buildStunBindingRequest(), 1200) ?: error("Binding无响应")
+        val changedIpPort = sendAndReceiveStun(socket, mainAddress, buildStunBindingRequest(changeIp = true, changePort = true), 1200)
+        val changedPort = if (changedIpPort == null) sendAndReceiveStun(socket, mainAddress, buildStunBindingRequest(changePort = true), 1200) else null
+        val filtering = when {
+            changedIpPort != null -> "开放"
+            changedPort != null -> "地址受限"
+            else -> "端口受限"
+        }
+        val natType = when (filtering) {
+            "开放" -> "NAT1 / 全锥形"
+            "地址受限" -> "NAT2 / 地址受限型"
+            else -> "NAT3 / 端口受限型"
+        }
+        return ManualNatResult(
+            success = true,
+            natType = natType,
+            mappingBehavior = "端口保持",
+            filteringBehavior = filtering,
+            localAddress = localIpv4Addresses().firstOrNull()?.let { "$it:${socket.localPort}" } ?: "本地:${socket.localPort}",
+            publicAddress = "${base.mappedIp}:${base.mappedPort}",
+            method = "RFC3489",
+            server = endpoint.key,
+            message = "RFC3489 兼容检测完成，建议以 RFC5780 结果为准"
+        )
+    }
+}
+
 private fun dnsProbe(host: String): DnsProbeResult {
     val cleanHost = host.trim().removePrefix("[").removeSuffix("]").ifBlank { "www.baidu.com" }
     val system = runCatching { InetAddress.getAllByName(cleanHost).toList() }.getOrDefault(emptyList())
@@ -1771,6 +1903,12 @@ private fun NetSessionTesterApp() {
     var editingRemarkText by remember { mutableStateOf("") }
     var showRunLogDetail by remember { mutableStateOf(false) }
     var showPingLogDialog by remember { mutableStateOf(false) }
+    var showNatDiagnosticDialog by remember { mutableStateOf(false) }
+    var natDiagnosticResult by remember { mutableStateOf<ManualNatResult?>(null) }
+    var natDiagnosticRunning by remember { mutableStateOf(false) }
+    var natManualMode by remember { mutableStateOf(ManualNatMode.RFC5780) }
+    var natRfc5780Servers by remember { mutableStateOf(listOf("stunserver2025.stunprotocol.org:3478")) }
+    var natRfc3489Servers by remember { mutableStateOf(listOf("stun.voip.aebc.com:3478")) }
 
     val updatePrefs = remember { context.getSharedPreferences("app_update", Context.MODE_PRIVATE) }
     var latestUpdate by remember { mutableStateOf<UpdateInfo?>(null) }
@@ -1786,6 +1924,7 @@ private fun NetSessionTesterApp() {
     var bottomNoticeJob by remember { mutableStateOf<Job?>(null) }
 
     BackHandler(enabled = showRunLogDetail) { showRunLogDetail = false }
+    BackHandler(enabled = showNatDiagnosticDialog) { showNatDiagnosticDialog = false }
 
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
@@ -2816,6 +2955,43 @@ private fun NetSessionTesterApp() {
         PingLogDialog(logs = pingLogs, onDismiss = { showPingLogDialog = false })
     }
 
+    if (showNatDiagnosticDialog) {
+        NatDiagnosticDialog(
+            mode = natManualMode,
+            servers = if (natManualMode == ManualNatMode.RFC5780) natRfc5780Servers else natRfc3489Servers,
+            running = natDiagnosticRunning,
+            result = natDiagnosticResult,
+            onModeChange = { mode ->
+                natManualMode = mode
+                natDiagnosticResult = null
+            },
+            onServersChange = { next ->
+                if (natManualMode == ManualNatMode.RFC5780) natRfc5780Servers = next else natRfc3489Servers = next
+            },
+            onRun = {
+                if (!natDiagnosticRunning) {
+                    scope.launch {
+                        natDiagnosticRunning = true
+                        val modeNow = natManualMode
+                        val serverNow = if (modeNow == ManualNatMode.RFC5780) natRfc5780Servers else natRfc3489Servers
+                        val result = withContext(Dispatchers.IO) { manualNatProbe(modeNow, serverNow) }
+                        natDiagnosticResult = result
+                        networkProbeInfo = networkProbeInfo.copy(
+                            natType = result.natType,
+                            portText = result.publicAddress.substringAfter(':', networkProbeInfo.portText),
+                            mappingBehavior = result.mappingBehavior,
+                            filterBehavior = result.filteringBehavior,
+                            confidence = if (result.success) if (result.method == "RFC5780") "高" else "中" else "低",
+                            diagnosis = if (result.success) "手动NAT诊断完成：${result.method} · ${result.server}。${result.message}" else "手动NAT诊断失败：${result.message}"
+                        )
+                        natDiagnosticRunning = false
+                    }
+                }
+            },
+            onDismiss = { showNatDiagnosticDialog = false }
+        )
+    }
+
     if (detailTitle != null) {
         AlertDialog(
             onDismissRequest = { detailTitle = null },
@@ -2926,6 +3102,7 @@ private fun NetSessionTesterApp() {
                     onRefreshPublicIp = { refreshPublicIp() },
                     onCopyPublicIpv4 = { copyText(publicIpResult.ipv4, "IPv4出口地址") },
                     onCopyPublicIpv6 = { copyText(publicIpResult.ipv6, "IPv6出口地址") },
+                    onOpenNatDiagnostics = { showNatDiagnosticDialog = true },
                     maskPrivacy = maskPrivacy,
                     onMaskPrivacyChange = { maskPrivacy = it },
                     onResolve = {
@@ -3779,6 +3956,7 @@ private fun SettingsPage(
     onRefreshPublicIp: () -> Unit,
     onCopyPublicIpv4: () -> Unit,
     onCopyPublicIpv6: () -> Unit,
+    onOpenNatDiagnostics: () -> Unit,
     maskPrivacy: Boolean,
     onMaskPrivacyChange: (Boolean) -> Unit,
     onResolve: () -> Unit,
@@ -3861,7 +4039,8 @@ private fun SettingsPage(
                         maskPrivacy = maskPrivacy,
                         onRefresh = onRefreshPublicIp,
                         onCopyPublicIpv4 = onCopyPublicIpv4,
-                        onCopyPublicIpv6 = onCopyPublicIpv6
+                        onCopyPublicIpv6 = onCopyPublicIpv6,
+                        onOpenNatDiagnostics = onOpenNatDiagnostics
                     )
                     "session" -> SoftCard {
                         SectionTitle("≡", "会话参数", Green)
@@ -3877,7 +4056,7 @@ private fun SettingsPage(
                             ParamField("目标会话（条）", successLimit, onSuccessLimitChange, Modifier.weight(1f), leadingMark = "count")
                             Spacer(Modifier.weight(1f))
                         }
-                        Text("V1.0.8 正式版：修复 Ping IPv4/AUTO 解析、目标历史、图表目标显示。", color = Muted, fontSize = 12.sp, lineHeight = 16.sp)
+                        Text("V1.1.2 自测：NAT 改为手动诊断，网络信息只保留 IPv4/IPv6/优先级等轻量展示。", color = Muted, fontSize = 12.sp, lineHeight = 16.sp)
                     }
                     "ping" -> SoftCard {
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -5293,6 +5472,134 @@ private fun HistoryBarRow(label: String, value: Int, maxValue: Int, color: Color
     }
 }
 
+
+@Composable
+private fun NatDiagnosticDialog(
+    mode: ManualNatMode,
+    servers: List<String>,
+    running: Boolean,
+    result: ManualNatResult?,
+    onModeChange: (ManualNatMode) -> Unit,
+    onServersChange: (List<String>) -> Unit,
+    onRun: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = { if (!running) onDismiss() },
+        confirmButton = {
+            TextButton(onClick = onDismiss, enabled = !running) { Text("完成", fontSize = 13.sp) }
+        },
+        dismissButton = {
+            TextButton(onClick = onRun, enabled = !running) { Text(if (running) "检测中" else "开始检测", fontSize = 13.sp, fontWeight = FontWeight.Bold) }
+        },
+        title = { Text("NAT 类型检测", fontWeight = FontWeight.ExtraBold, color = TextDark) },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 560.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text("手动检测 · IPv4 · UDP", color = Muted, fontSize = 12.sp)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    NatModeChip("RFC5780", mode == ManualNatMode.RFC5780, Modifier.weight(1f)) { onModeChange(ManualNatMode.RFC5780) }
+                    NatModeChip("RFC3489", mode == ManualNatMode.RFC3489, Modifier.weight(1f)) { onModeChange(ManualNatMode.RFC3489) }
+                }
+                Text(
+                    if (mode == ManualNatMode.RFC5780) "RFC5780 会检测出网端口和回包限制，适合严格判断 NAT1/NAT2/NAT3。" else "RFC3489 是经典兼容检测，结果可与老工具对比。",
+                    color = Muted,
+                    fontSize = 12.sp,
+                    lineHeight = 16.sp,
+                    modifier = Modifier.background(Color(0xFFF8FAFC), ShapeM).padding(10.dp)
+                )
+                Text("STUN服务器", color = TextDark, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                servers.forEachIndexed { index, item ->
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        OutlinedTextField(
+                            value = item,
+                            onValueChange = { value ->
+                                val next = servers.toMutableList()
+                                next[index] = value.trim()
+                                onServersChange(next)
+                            },
+                            label = { Text("服务器 ${index + 1}/${servers.size}", fontSize = 11.sp) },
+                            singleLine = true,
+                            shape = ShapeM,
+                            modifier = Modifier.weight(1f)
+                        )
+                        IconButton(
+                            onClick = {
+                                if (servers.size > 1) onServersChange(servers.filterIndexed { i, _ -> i != index })
+                            },
+                            enabled = servers.size > 1
+                        ) {
+                            Icon(Icons.Filled.DeleteOutline, contentDescription = null, tint = if (servers.size > 1) ErrorRed else Muted)
+                        }
+                    }
+                }
+                OutlinedButton(
+                    onClick = { onServersChange((servers + defaultNatServer(mode)).distinct().take(6)) },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = ShapeM
+                ) { Text("添加服务器", fontSize = 13.sp) }
+                result?.let { r ->
+                    Column(
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.fillMaxWidth().background(if (r.success) BlueSoft else RedSoft, ShapeM).padding(12.dp)
+                    ) {
+                        Text(r.natType, color = if (r.success) Blue else ErrorRed, fontSize = 18.sp, fontWeight = FontWeight.ExtraBold)
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                            MiniResultTile("出网端口", r.mappingBehavior, Modifier.weight(1f))
+                            MiniResultTile("回包限制", r.filteringBehavior, Modifier.weight(1f))
+                        }
+                        MiniResultLine("本地地址", r.localAddress)
+                        MiniResultLine("公网地址", r.publicAddress)
+                        MiniResultLine("检测方式", r.method)
+                        MiniResultLine("服务器", r.server)
+                        if (r.message.isNotBlank()) Text(r.message, color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
+                    }
+                }
+            }
+        }
+    )
+}
+
+@Composable
+private fun NatModeChip(label: String, selected: Boolean, modifier: Modifier, onClick: () -> Unit) {
+    Card(
+        shape = ShapeM,
+        colors = CardDefaults.cardColors(containerColor = if (selected) BlueSoft else Color.White),
+        elevation = CardDefaults.cardElevation(defaultElevation = if (selected) 1.dp else 0.dp),
+        modifier = modifier.height(44.dp).clickable(onClick = onClick)
+    ) {
+        Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
+            Text(label, color = if (selected) Blue else TextDark, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+        }
+    }
+}
+
+@Composable
+private fun MiniResultTile(label: String, value: String, modifier: Modifier = Modifier) {
+    Column(modifier = modifier.background(Color.White.copy(alpha = 0.8f), ShapeM).padding(10.dp)) {
+        Text(label, color = Muted, fontSize = 11.sp)
+        Text(value, color = TextDark, fontWeight = FontWeight.Bold, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+@Composable
+private fun MiniResultLine(label: String, value: String) {
+    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, color = Muted, fontSize = 11.sp, modifier = Modifier.width(72.dp))
+        Text(value, color = TextDark, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+private fun defaultNatServer(mode: ManualNatMode): String = when (mode) {
+    ManualNatMode.RFC5780 -> "stunserver2025.stunprotocol.org:3478"
+    ManualNatMode.RFC3489 -> "stun.voip.aebc.com:3478"
+}
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun NetworkEnvironmentSettingsCard(
@@ -5303,13 +5610,15 @@ private fun NetworkEnvironmentSettingsCard(
     maskPrivacy: Boolean,
     onRefresh: () -> Unit,
     onCopyPublicIpv4: () -> Unit,
-    onCopyPublicIpv6: () -> Unit
+    onCopyPublicIpv6: () -> Unit,
+    onOpenNatDiagnostics: () -> Unit
 ) {
     var expanded by remember { mutableStateOf(true) }
     SoftCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
             SectionTitle("i", "网络信息", Purple)
             Spacer(Modifier.weight(1f))
+            TextButton(onClick = onOpenNatDiagnostics) { Text("NAT诊断", fontSize = 12.sp) }
             TextButton(onClick = onRefresh) { Text(if (publicIpLoading) "检测中" else "刷新", fontSize = 12.sp) }
             IconButton(onClick = { expanded = !expanded }, modifier = Modifier.width(32.dp).height(32.dp)) {
                 Text(if (expanded) "⌃" else "⌄", color = TextDark, fontSize = 19.sp, fontWeight = FontWeight.Bold)
@@ -5326,7 +5635,7 @@ private fun NetworkEnvironmentSettingsCard(
                 InfoMetricTile("N", "NAT", probeInfo.natType, Color(0xFFFFE4E6), ErrorRed, Modifier.weight(1f))
                 InfoMetricTile("C", "运营商", probeInfo.carrier, Color(0xFFF3E8FF), Purple, Modifier.weight(1f))
             }
-            Text("点击右上角展开查看 STUN、DNS、映射和过滤详情。", color = Muted, fontSize = 11.sp, modifier = Modifier.fillMaxWidth(), maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text("NAT类型需手动诊断；网络信息只做轻量展示。", color = Muted, fontSize = 11.sp, modifier = Modifier.fillMaxWidth(), maxLines = 1, overflow = TextOverflow.Ellipsis)
             return@SoftCard
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
