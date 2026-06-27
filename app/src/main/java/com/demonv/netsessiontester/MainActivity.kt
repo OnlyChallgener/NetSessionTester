@@ -647,7 +647,12 @@ private data class StunProbeResult(
     val roundCount: Int = 1,
     val stableRoundCount: Int = 1,
     val usedBackup: Boolean = false,
-    val sourceHost: String = ""
+    val sourceHost: String = "",
+    val detectionMethod: String = "RFC8489多节点",
+    val filteringVerified: Boolean = false,
+    val rfc5780Server: String = "",
+    val rfc5780MappingBehavior: String = "",
+    val rfc5780FilteringBehavior: String = ""
 ) {
     val portStable: Boolean
         get() = mappedPorts.size <= 1
@@ -676,6 +681,21 @@ private data class PendingStunRequest(
     val endpoint: StunEndpoint,
     val address: InetAddress,
     val request: StunRequest
+)
+
+private data class StunRawResponse(
+    val mappedIp: String,
+    val mappedPort: Int,
+    val otherAddress: InetSocketAddress? = null,
+    val responseOrigin: InetSocketAddress? = null
+)
+
+private data class Rfc5780ProbeResult(
+    val serverKey: String,
+    val mappedIp: String,
+    val mappedPort: Int,
+    val mappingBehavior: String,
+    val filteringBehavior: String
 )
 
 private val stunRandom = java.security.SecureRandom()
@@ -900,10 +920,19 @@ private fun buildNetworkProbeInfo(
     val weakPortChange = stunSuccess && !stun!!.portStable && multiStun < 3
     val strictNat1 = stunSuccess && stun!!.portStable && stun.ipStable && stun.roundStable && stun.successCount == stun.totalCount && stun.totalCount >= 6 && stun.roundCount >= 2
     val stableMapping = stunSuccess && stun!!.portStable && stun.ipStable && multiStun >= 3
+    val rfc5780Verified = stunSuccess && stun!!.filteringVerified
+    val rfc5780EndpointIndependentMapping = rfc5780Verified && stun.rfc5780MappingBehavior == "端点无关映射"
+    val rfc5780EndpointIndependentFiltering = rfc5780Verified && stun.rfc5780FilteringBehavior == "端点无关过滤"
+    val rfc5780AddressFiltering = rfc5780Verified && stun.rfc5780FilteringBehavior == "地址相关过滤"
+    val rfc5780PortFiltering = rfc5780Verified && stun.rfc5780FilteringBehavior == "地址端口相关过滤"
 
     val natType = when {
         env.hasVpn -> "代理环境"
         isDirectPublicV4 -> "NAT1 / 开放"
+        rfc5780EndpointIndependentMapping && rfc5780EndpointIndependentFiltering -> "NAT1 / 全锥形"
+        rfc5780EndpointIndependentMapping && rfc5780AddressFiltering -> "NAT2 / 地址受限型"
+        rfc5780EndpointIndependentMapping && rfc5780PortFiltering -> "NAT3 / 端口受限型"
+        rfc5780Verified && !rfc5780EndpointIndependentMapping -> "NAT4 / 对称型"
         strictNat1 -> "NAT1 / 全锥形"
         strongSymmetric -> "NAT4 / 对称型"
         stableMapping -> "NAT3 / 端口保持型"
@@ -918,6 +947,7 @@ private fun buildNetworkProbeInfo(
         isDirectPublicV4 -> "公网直连"
         stun == null && full -> "未知"
         stun == null -> "待检测"
+        rfc5780Verified && stun.rfc5780MappingBehavior.isNotBlank() -> stun.rfc5780MappingBehavior
         strongSymmetric -> "端口变化"
         weakPortChange -> "端口变化待确认"
         else -> "端口保持"
@@ -926,6 +956,7 @@ private fun buildNetworkProbeInfo(
     val filtering = when {
         env.hasVpn -> "无法准确判断"
         isDirectPublicV4 -> "开放型"
+        rfc5780Verified && stun.rfc5780FilteringBehavior.isNotBlank() -> stun.rfc5780FilteringBehavior
         strictNat1 || stableMapping -> "未验证"
         strongSymmetric -> "未验证"
         stun != null -> "未完成检测"
@@ -937,6 +968,8 @@ private fun buildNetworkProbeInfo(
     val confidence = when {
         env.hasVpn -> "低"
         !full -> "低"
+        rfc5780EndpointIndependentMapping && rfc5780EndpointIndependentFiltering -> "高"
+        rfc5780Verified -> "中高"
         strictNat1 -> "高"
         strongSymmetric && stun!!.ipStable && stun.roundStable && multiStun >= 5 -> "高"
         strongSymmetric && stun!!.ipStable && multiStun >= 4 -> "中高"
@@ -959,12 +992,14 @@ private fun buildNetworkProbeInfo(
 
     val stunRoundText = stun?.let { if (it.roundCount >= 2) "复测${it.roundCount}轮${if (it.roundStable) "稳定" else "有波动"}。" else "" } ?: ""
     val stunBackupText = stun?.let { if (it.usedBackup) "已启用备用节点。" else "" } ?: ""
-    val stunNodeText = if (full && stunTotal > 0) "STUN节点 ${multiStun}/${stunTotal} 成功。${stunRoundText}${stunBackupText}" else ""
+    val rfc5780Text = stun?.let { if (it.filteringVerified) "RFC5780节点 ${it.rfc5780Server} 已验证过滤行为。" else "" } ?: ""
+    val stunNodeText = if (full && stunTotal > 0) "STUN节点 ${multiStun}/${stunTotal} 成功。${stunRoundText}${stunBackupText}${rfc5780Text}" else ""
     val diagnosis = when {
         env.hasVpn -> "检测到VPN/代理，NAT、出口和IPv6结果仅供参考。"
         dns.fakeIpDetected -> "检测到Fake-IP，DNS可能被代理工具接管。"
         !dns.systemHasAaaa && dns.domesticHasAaaa -> "系统DNS未返回IPv6，国内备用DNS可解析，可能被AdGuard/代理/路由器策略过滤。"
         !dns.systemHasAaaa && dns.globalHasAaaa -> "系统和国内备用DNS未返回IPv6，国外备用DNS可解析，可能存在地区DNS差异或本地DNS策略影响。"
+        rfc5780Verified -> "${stunNodeText}检测方式：${stun!!.detectionMethod}，映射行为：${stun.rfc5780MappingBehavior}，过滤行为：${stun.rfc5780FilteringBehavior}。"
         natType.startsWith("NAT4 / 对称") -> "${stunNodeText}多个可用STUN目标返回的外部端口不一致，当前按对称型/NAT4理解，P2P/游戏联机可能受影响。"
         natType.startsWith("NAT3 / 端口保持") -> "${stunNodeText}多节点端口保持，但未满足6/6节点与2轮稳定条件，当前按端口保持型受限网络显示；完整过滤行为需RFC5780/自建节点验证。"
         natType.startsWith("NAT3 / 受限") && weakPortChange -> "${stunNodeText}UDP基础探测可用，但可用节点不足以确认对称型，当前按受限型理解，建议换网络或再次刷新复测。"
@@ -972,7 +1007,7 @@ private fun buildNetworkProbeInfo(
         natType.startsWith("NAT类型待确认") -> "公网IPv4可用，但STUN基础探测未成功，NAT类型暂按待确认处理。"
         natType.startsWith("UDP") -> "多个STUN基础请求均失败，当前仅能判断为UDP受限/无法判断，可能是UDP被防火墙、代理或运营商限制。"
         natType.startsWith("NAT2") -> "UDP映射较稳定，普通联机能力中等。"
-        natType.startsWith("NAT1") -> "${stunNodeText}6/6节点与2轮复测均保持同一公网端口，按兼容口径判定为 NAT1；完整过滤行为需 RFC5780 / 自建节点验证。"
+        natType.startsWith("NAT1") -> if (rfc5780Verified) "${stunNodeText}RFC5780已完成映射和过滤验证，当前判定为 NAT1 / 全锥形。" else "${stunNodeText}6/6节点与2轮复测均保持同一公网端口，按兼容口径判定为 NAT1；完整过滤行为需 RFC5780 / 自建节点验证。"
         else -> "网络信息已更新。"
     }
 
@@ -1103,6 +1138,7 @@ private fun stunBindingProbe(): StunProbeResult {
             round.isNotEmpty() && round.map { it.mappedIp }.toSet().size <= 1 && round.map { it.mappedPort }.toSet().size <= 1
         }
         val representative = allResults.first()
+        val rfc5780 = rfc5780ProbeFast()
         return representative.copy(
             successCount = uniqueSuccess,
             totalCount = totalCount,
@@ -1110,7 +1146,12 @@ private fun stunBindingProbe(): StunProbeResult {
             mappedIps = allResults.map { it.mappedIp }.toSet(),
             roundCount = roundResults.size,
             stableRoundCount = stableRoundCount,
-            usedBackup = usedBackup
+            usedBackup = usedBackup,
+            detectionMethod = if (rfc5780 != null) "RFC5780+RFC8489" else "RFC8489多节点",
+            filteringVerified = rfc5780 != null,
+            rfc5780Server = rfc5780?.serverKey.orEmpty(),
+            rfc5780MappingBehavior = rfc5780?.mappingBehavior.orEmpty(),
+            rfc5780FilteringBehavior = rfc5780?.filteringBehavior.orEmpty()
         )
     }
 }
@@ -1193,20 +1234,38 @@ private fun resolveFirstIpv4(host: String): InetAddress {
         ?: error("STUN服务器无IPv4地址")
 }
 
-private fun buildStunBindingRequest(): StunRequest {
+private fun buildStunBindingRequest(changeIp: Boolean = false, changePort: Boolean = false): StunRequest {
     val tx = ByteArray(12)
     synchronized(stunRandom) { stunRandom.nextBytes(tx) }
-    val req = ByteArray(20)
+    val hasChangeRequest = changeIp || changePort
+    val attrLen = if (hasChangeRequest) 8 else 0
+    val req = ByteArray(20 + attrLen)
     req[1] = 0x01.toByte()
+    req[2] = ((attrLen ushr 8) and 0xFF).toByte()
+    req[3] = (attrLen and 0xFF).toByte()
     req[4] = 0x21.toByte()
     req[5] = 0x12.toByte()
     req[6] = 0xA4.toByte()
     req[7] = 0x42.toByte()
     System.arraycopy(tx, 0, req, 8, 12)
+    if (hasChangeRequest) {
+        // RFC3489/RFC5780 CHANGE-REQUEST: bit 2 = change IP, bit 1 = change port.
+        req[21] = 0x03.toByte()
+        req[23] = 0x04.toByte()
+        var flags = 0
+        if (changeIp) flags = flags or 0x04
+        if (changePort) flags = flags or 0x02
+        req[27] = flags.toByte()
+    }
     return StunRequest(req, tx)
 }
 
 private fun parseStunMappedAddress(data: ByteArray, length: Int, localPort: Int, transactionId: ByteArray): StunProbeResult? {
+    val response = parseStunResponse(data, length, transactionId) ?: return null
+    return StunProbeResult(response.mappedIp, response.mappedPort, localPort)
+}
+
+private fun parseStunResponse(data: ByteArray, length: Int, transactionId: ByteArray): StunRawResponse? {
     if (length < 20) return null
     val messageType = ((data[0].toInt() and 0xFF) shl 8) or (data[1].toInt() and 0xFF)
     if (messageType != 0x0101) return null
@@ -1214,27 +1273,94 @@ private fun parseStunMappedAddress(data: ByteArray, length: Int, localPort: Int,
     for (i in 0 until 12) {
         if (data[8 + i] != transactionId[i]) return null
     }
+    var mapped: Pair<String, Int>? = null
+    var other: InetSocketAddress? = null
+    var origin: InetSocketAddress? = null
     var pos = 20
     while (pos + 4 <= length) {
         val type = ((data[pos].toInt() and 0xFF) shl 8) or (data[pos + 1].toInt() and 0xFF)
         val attrLen = ((data[pos + 2].toInt() and 0xFF) shl 8) or (data[pos + 3].toInt() and 0xFF)
         val value = pos + 4
         if (value + attrLen <= length && attrLen >= 8) {
-            val family = data[value + 1].toInt() and 0xFF
-            if (family == 0x01 && (type == 0x0020 || type == 0x0001)) {
-                val rawPort = ((data[value + 2].toInt() and 0xFF) shl 8) or (data[value + 3].toInt() and 0xFF)
-                val mappedPort = if (type == 0x0020) rawPort xor 0x2112 else rawPort
-                val ipBytes = ByteArray(4)
-                val magic = byteArrayOf(0x21.toByte(), 0x12.toByte(), 0xA4.toByte(), 0x42.toByte())
-                for (i in 0..3) {
-                    val b = data[value + 4 + i].toInt()
-                    ipBytes[i] = if (type == 0x0020) ((b xor magic[i].toInt()) and 0xFF).toByte() else (b and 0xFF).toByte()
-                }
-                val mappedIp = InetAddress.getByAddress(ipBytes).hostAddress ?: return null
-                return StunProbeResult(mappedIp, mappedPort, localPort)
+            val pair = parseStunAddressAttribute(data, value, attrLen, type)
+            when (type) {
+                0x0020, 0x0001 -> if (pair != null && mapped == null) mapped = pair
+                0x802C -> if (pair != null) other = InetSocketAddress(pair.first, pair.second)
+                0x802B -> if (pair != null) origin = InetSocketAddress(pair.first, pair.second)
             }
         }
         pos += 4 + ((attrLen + 3) / 4) * 4
+    }
+    val m = mapped ?: return null
+    return StunRawResponse(m.first, m.second, other, origin)
+}
+
+private fun parseStunAddressAttribute(data: ByteArray, value: Int, attrLen: Int, type: Int): Pair<String, Int>? {
+    if (attrLen < 8) return null
+    val family = data[value + 1].toInt() and 0xFF
+    if (family != 0x01) return null
+    val rawPort = ((data[value + 2].toInt() and 0xFF) shl 8) or (data[value + 3].toInt() and 0xFF)
+    val port = if (type == 0x0020) rawPort xor 0x2112 else rawPort
+    val ipBytes = ByteArray(4)
+    val magic = byteArrayOf(0x21.toByte(), 0x12.toByte(), 0xA4.toByte(), 0x42.toByte())
+    for (i in 0..3) {
+        val b = data[value + 4 + i].toInt()
+        ipBytes[i] = if (type == 0x0020) ((b xor magic[i].toInt()) and 0xFF).toByte() else (b and 0xFF).toByte()
+    }
+    val ip = InetAddress.getByAddress(ipBytes).hostAddress ?: return null
+    return ip to port
+}
+
+private fun sendAndReceiveStun(socket: DatagramSocket, address: InetSocketAddress, request: StunRequest, timeoutMs: Int): StunRawResponse? {
+    return runCatching {
+        socket.soTimeout = timeoutMs.coerceIn(500, 1800)
+        val packet = DatagramPacket(request.bytes, request.bytes.size, address.address, address.port)
+        socket.send(packet)
+        val buffer = ByteArray(1024)
+        val responsePacket = DatagramPacket(buffer, buffer.size)
+        socket.receive(responsePacket)
+        parseStunResponse(responsePacket.data, responsePacket.length, request.transactionId)
+    }.getOrNull()
+}
+
+private fun rfc5780ProbeFast(): Rfc5780ProbeResult? {
+    val candidates = listOf(
+        StunEndpoint("stunserver2025.stunprotocol.org", 3478),
+        StunEndpoint("stun.voipgate.com", 3478),
+        StunEndpoint("stun.ekiga.net", 3478),
+        StunEndpoint("stun.callwithus.com", 3478),
+        StunEndpoint("stun.counterpath.net", 3478),
+        StunEndpoint("stun.sipgate.net", 3478),
+        StunEndpoint("stun.vline.com", 3478)
+    )
+    val deadline = System.currentTimeMillis() + 2600L
+    for (endpoint in candidates) {
+        if (System.currentTimeMillis() >= deadline) break
+        val mainAddress = runCatching { InetSocketAddress(resolveFirstIpv4(endpoint.host), endpoint.port) }.getOrNull() ?: continue
+        DatagramSocket().use { socket ->
+            val base = sendAndReceiveStun(socket, mainAddress, buildStunBindingRequest(), 900) ?: return@use
+            val other = base.otherAddress ?: return@use
+            val map2 = sendAndReceiveStun(socket, other, buildStunBindingRequest(), 900)
+            val mappingBehavior = if (map2 != null && map2.mappedIp == base.mappedIp && map2.mappedPort == base.mappedPort) {
+                "端点无关映射"
+            } else {
+                "地址/端口相关映射"
+            }
+            val changedIpPort = sendAndReceiveStun(socket, mainAddress, buildStunBindingRequest(changeIp = true, changePort = true), 900)
+            val filteringBehavior = if (changedIpPort != null) {
+                "端点无关过滤"
+            } else {
+                val changedPort = sendAndReceiveStun(socket, mainAddress, buildStunBindingRequest(changePort = true), 900)
+                if (changedPort != null) "地址相关过滤" else "地址端口相关过滤"
+            }
+            return Rfc5780ProbeResult(
+                serverKey = endpoint.key,
+                mappedIp = base.mappedIp,
+                mappedPort = base.mappedPort,
+                mappingBehavior = mappingBehavior,
+                filteringBehavior = filteringBehavior
+            )
+        }
     }
     return null
 }
@@ -5370,7 +5496,7 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
     } else ""
     Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
         Text(
-            listOf("延迟(ms)", activeTargetLabel.takeIf { it.isNotBlank() }, "最近120秒", rateText.takeIf { it.isNotBlank() }).filterNotNull().joinToString(" · "),
+            listOf("延迟(ms)", activeTargetLabel.takeIf { it.isNotBlank() }, rateText.takeIf { it.isNotBlank() }).filterNotNull().joinToString(" · "),
             color = Muted,
             fontSize = 10.sp,
             maxLines = 1,

@@ -1,8 +1,8 @@
 # Changelog
 
-## V1.1.0 build110
+## V1.1.1 build111
 
-- versionName 更新为 V1.1.0。
+- versionName 更新为 V1.1.1。
 - versionCode 更新为 110。
 - 优化 Ping 图表 Y 轴策略，使用主延迟区间动态缩放。
 - 异常高延迟不再强行拉高整个 Y 轴，改为橙色点标记。
