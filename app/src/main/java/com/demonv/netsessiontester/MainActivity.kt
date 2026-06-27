@@ -1463,7 +1463,7 @@ private fun manualRfc5780Probe(endpoint: StunEndpoint): ManualNatResult? {
             publicAddress = "${base.mappedIp}:${base.mappedPort}",
             method = "RFC5780",
             server = endpoint.key,
-            message = "RFC5780 已完成出网端口和回包限制检测"
+            message = "RFC5780 检测完成"
         )
     }
 }
@@ -1493,7 +1493,7 @@ private fun manualRfc3489Probe(endpoint: StunEndpoint): ManualNatResult? {
             publicAddress = "${base.mappedIp}:${base.mappedPort}",
             method = "RFC3489",
             server = endpoint.key,
-            message = "RFC3489 兼容检测完成，建议以 RFC5780 结果为准"
+            message = "RFC3489 兼容检测完成"
         )
     }
 }
@@ -5507,7 +5507,7 @@ private fun NatDiagnosticDialog(
                     NatModeChip("RFC3489", mode == ManualNatMode.RFC3489, Modifier.weight(1f)) { onModeChange(ManualNatMode.RFC3489) }
                 }
                 Text(
-                    if (mode == ManualNatMode.RFC5780) "RFC5780 会检测出网端口和回包限制，适合严格判断 NAT1/NAT2/NAT3。" else "RFC3489 是经典兼容检测，结果可与老工具对比。",
+                    if (mode == ManualNatMode.RFC5780) "RFC5780 会检测映射行为和过滤行为，适合严格判断 NAT1/NAT2/NAT3。" else "RFC3489 是经典兼容检测，结果可与老工具对比。",
                     color = Muted,
                     fontSize = 12.sp,
                     lineHeight = 16.sp,
@@ -5524,38 +5524,48 @@ private fun NatDiagnosticDialog(
                                 onServersChange(next)
                             },
                             label = { Text("服务器 ${index + 1}/${servers.size}", fontSize = 11.sp) },
+                            placeholder = { Text(defaultNatServer(mode), fontSize = 12.sp) },
                             singleLine = true,
                             shape = ShapeM,
                             modifier = Modifier.weight(1f)
                         )
                         IconButton(
                             onClick = {
-                                if (servers.size > 1) onServersChange(servers.filterIndexed { i, _ -> i != index })
-                            },
-                            enabled = servers.size > 1
+                                val next = if (servers.size > 1) {
+                                    servers.filterIndexed { i, _ -> i != index }
+                                } else {
+                                    listOf("")
+                                }
+                                onServersChange(next)
+                            }
                         ) {
-                            Icon(Icons.Filled.DeleteOutline, contentDescription = null, tint = if (servers.size > 1) ErrorRed else Muted)
+                            Icon(Icons.Filled.DeleteOutline, contentDescription = null, tint = ErrorRed)
                         }
                     }
                 }
                 OutlinedButton(
-                    onClick = { onServersChange((servers + defaultNatServer(mode)).distinct().take(6)) },
+                    onClick = {
+                        val clean = servers.map { it.trim() }
+                        val next = if (clean.size >= 6) clean else clean + ""
+                        onServersChange(next)
+                    },
                     modifier = Modifier.fillMaxWidth(),
                     shape = ShapeM
-                ) { Text("添加服务器", fontSize = 13.sp) }
+                ) { Text("+ 添加服务器", fontSize = 13.sp) }
                 result?.let { r ->
                     Column(
                         verticalArrangement = Arrangement.spacedBy(8.dp),
                         modifier = Modifier.fillMaxWidth().background(if (r.success) BlueSoft else RedSoft, ShapeM).padding(12.dp)
                     ) {
+                        Text("测试结果", color = Muted, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                         Text(r.natType, color = if (r.success) Blue else ErrorRed, fontSize = 18.sp, fontWeight = FontWeight.ExtraBold)
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                            MiniResultTile("出网端口", r.mappingBehavior, Modifier.weight(1f))
-                            MiniResultTile("回包限制", r.filteringBehavior, Modifier.weight(1f))
+                            MiniResultTile("映射行为", standardMappingText(r.mappingBehavior), Modifier.weight(1f))
+                            MiniResultTile("过滤行为", standardFilteringText(r.filteringBehavior), Modifier.weight(1f))
                         }
                         MiniResultLine("本地地址", r.localAddress)
                         MiniResultLine("公网地址", r.publicAddress)
-                        MiniResultLine("检测方式", r.method)
+                        MiniResultLine("测试方法", r.method)
                         MiniResultLine("服务器", r.server)
                         if (r.message.isNotBlank()) Text(r.message, color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
                     }
@@ -5583,7 +5593,7 @@ private fun NatModeChip(label: String, selected: Boolean, modifier: Modifier, on
 private fun MiniResultTile(label: String, value: String, modifier: Modifier = Modifier) {
     Column(modifier = modifier.background(Color.White.copy(alpha = 0.8f), ShapeM).padding(10.dp)) {
         Text(label, color = Muted, fontSize = 11.sp)
-        Text(value, color = TextDark, fontWeight = FontWeight.Bold, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(value, color = TextDark, fontWeight = FontWeight.Bold, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis, lineHeight = 15.sp)
     }
 }
 
@@ -5593,6 +5603,20 @@ private fun MiniResultLine(label: String, value: String) {
         Text(label, color = Muted, fontSize = 11.sp, modifier = Modifier.width(72.dp))
         Text(value, color = TextDark, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
+}
+
+
+private fun standardMappingText(value: String): String = when (value) {
+    "端口保持" -> "Endpoint-Independent Mapping（端口保持）"
+    "端口变化" -> "Address and Port-Dependent Mapping（端口变化）"
+    else -> value
+}
+
+private fun standardFilteringText(value: String): String = when (value) {
+    "开放" -> "Endpoint-Independent Filtering（开放）"
+    "地址受限" -> "Address-Dependent Filtering（地址受限）"
+    "端口受限" -> "Address and Port-Dependent Filtering（端口受限）"
+    else -> value
 }
 
 private fun defaultNatServer(mode: ManualNatMode): String = when (mode) {

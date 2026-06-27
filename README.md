@@ -1,5 +1,5 @@
 # NetSessionTester
 
-当前版本：V1.1.2-internal build112 selftest
+V1.1.2-internal build112 NAT 手动检测自测版。
 
-本自测包将 NAT 类型检测改为手动诊断入口，默认只保留 IPv4 + UDP；RFC5780 与 RFC3489 可单独选择 STUN 服务器。
+本包重点验证 NAT 诊断弹窗、STUN 服务器增删、RFC5780/RFC3489 手动检测和图标回退优化。
