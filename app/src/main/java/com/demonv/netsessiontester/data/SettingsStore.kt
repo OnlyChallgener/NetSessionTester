@@ -22,7 +22,9 @@ data class SavedSettings(
     val pingIntervalMs: String = "1000",
     val pingCount: String = "无限",
     val pingTimeoutMs: String = "1000",
-    val pingProtocol: String = "AUTO"
+    val pingProtocol: String = "AUTO",
+    val natRfc5780Servers: String = "stunserver2025.stunprotocol.org:3478",
+    val natRfc3489Servers: String = "stun.voip.aebc.com:3478"
 )
 
 class SettingsStore(context: Context) {
@@ -70,7 +72,9 @@ class SettingsStore(context: Context) {
             pingIntervalMs = prefs.getString(KEY_PING_INTERVAL_MS, "1000") ?: "1000",
             pingCount = prefs.getString(KEY_PING_COUNT, "无限") ?: "无限",
             pingTimeoutMs = prefs.getString(KEY_PING_TIMEOUT_MS, "1000") ?: "1000",
-            pingProtocol = prefs.getString(KEY_PING_PROTOCOL, "AUTO") ?: "AUTO"
+            pingProtocol = prefs.getString(KEY_PING_PROTOCOL, "AUTO") ?: "AUTO",
+            natRfc5780Servers = prefs.getString(KEY_NAT_RFC5780_SERVERS, "stunserver2025.stunprotocol.org:3478") ?: "stunserver2025.stunprotocol.org:3478",
+            natRfc3489Servers = prefs.getString(KEY_NAT_RFC3489_SERVERS, "stun.voip.aebc.com:3478") ?: "stun.voip.aebc.com:3478"
         )
     }
 
@@ -93,6 +97,8 @@ class SettingsStore(context: Context) {
             .putString(KEY_PING_COUNT, settings.pingCount)
             .putString(KEY_PING_TIMEOUT_MS, settings.pingTimeoutMs)
             .putString(KEY_PING_PROTOCOL, settings.pingProtocol)
+            .putString(KEY_NAT_RFC5780_SERVERS, settings.natRfc5780Servers)
+            .putString(KEY_NAT_RFC3489_SERVERS, settings.natRfc3489Servers)
             .apply()
     }
 
@@ -114,6 +120,8 @@ class SettingsStore(context: Context) {
         private const val KEY_PING_COUNT = "ping_count"
         private const val KEY_PING_TIMEOUT_MS = "ping_timeout_ms"
         private const val KEY_PING_PROTOCOL = "ping_protocol"
+        private const val KEY_NAT_RFC5780_SERVERS = "nat_rfc5780_servers"
+        private const val KEY_NAT_RFC3489_SERVERS = "nat_rfc3489_servers"
         private const val KEY_PERF_FIX3_MIGRATED = "perf_fix3_migrated"
         private const val KEY_V86_FAILURE_MIGRATED = "v86_failure_migrated"
     }

@@ -1,16 +1,15 @@
 {
-  "versionCode": 111,
-  "versionName": "V1.1.1",
-  "title": "发现新版本 V1.1.1 build111",
+  "versionCode": 113,
+  "versionName": "V1.1.3",
+  "title": "发现新版本 V1.1.3 build113",
   "content": [
-    "保留高频 Ping 引擎，30/50/100/200ms 优先使用常驻 ping 进程",
-    "优化 Ping 图表 Y 轴，使用主延迟区间动态缩放，保留趋势变化",
-    "高延迟用橙色异常点标记，timeout 用红点标记",
-    "图表显示目标地址、实际协议和实际频率",
-    "Ping 响应日志每次最多保存1200条，保留最近5次并显示存储用量",
-    "优化 STUN 流程：默认 RFC8489 多节点，支持 RFC5780 候选节点过滤验证"
+    "NAT手动诊断支持多服务器自动顺延",
+    "测试过程中显示当前服务器和RFC测试阶段",
+    "继续收紧RFC3489/RFC5780状态机，避免NAT3误判NAT1",
+    "STUN地址不填写端口时默认使用3478",
+    "保留高频Ping、图表和日志优化"
   ],
-  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.1.1-111/NetSessionTester-V1.1.1-build111-signed.apk",
+  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.1.3-113/NetSessionTester-V1.1.3-build113-signed.apk",
   "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/latest",
   "force": false
 }

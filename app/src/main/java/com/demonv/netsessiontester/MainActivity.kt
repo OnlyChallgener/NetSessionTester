@@ -1575,6 +1575,29 @@ private fun detectRfc3489Classic(endpoint: StunEndpoint, timeoutMs: Int = 1200, 
     }
 }
 
+private fun normalizeNatServerList(raw: String, fallback: String): List<String> {
+    val items = raw.split("\n")
+        .map { it.trim() }
+        .filter { it.isNotBlank() }
+        .map { input ->
+            val endpoint = parseStunEndpoint(input)
+            endpoint?.key ?: input
+        }
+        .distinct()
+        .take(8)
+    return items.ifEmpty { listOf(fallback) }
+}
+
+private fun encodeNatServerList(servers: List<String>, fallback: String): String {
+    return servers.map { it.trim() }
+        .filter { it.isNotBlank() }
+        .map { input -> parseStunEndpoint(input)?.key ?: input }
+        .distinct()
+        .take(8)
+        .ifEmpty { listOf(fallback) }
+        .joinToString("\n")
+}
+
 private fun parseStunEndpoint(raw: String, defaultPort: Int = 3478): StunEndpoint? {
     val clean = raw.trim().removePrefix("stun:").removePrefix("turn:")
     if (clean.isBlank()) return null
@@ -2257,6 +2280,8 @@ private fun NetSessionTesterApp() {
         pingCountSetting = saved.pingCount.ifBlank { "无限" }
         pingTimeoutSetting = saved.pingTimeoutMs
         pingProtocolSetting = runCatching { PingProtocolMode.valueOf(saved.pingProtocol) }.getOrDefault(PingProtocolMode.AUTO)
+        natRfc5780Servers = normalizeNatServerList(saved.natRfc5780Servers, "stunserver2025.stunprotocol.org:3478")
+        natRfc3489Servers = normalizeNatServerList(saved.natRfc3489Servers, "stun.voip.aebc.com:3478")
         state = state.copy(history = historyStore.load(historyPeriod, historyLimit.toIntOrNull()?.coerceIn(10, 100) ?: 30))
         historySavedCount = historyStore.count()
         historyCounts = historyStore.counts()
@@ -2283,7 +2308,8 @@ private fun NetSessionTesterApp() {
     LaunchedEffect(
         settingsLoaded, host, port, mode, batchSize, intervalMs, timeoutMs,
         successLimit, failureLimit, keepConnections, maskPrivacy, historyLimit,
-        pingEnabled, pingTarget, pingIntervalSetting, pingCountSetting, pingTimeoutSetting, pingProtocolSetting
+        pingEnabled, pingTarget, pingIntervalSetting, pingCountSetting, pingTimeoutSetting, pingProtocolSetting,
+        natRfc5780Servers, natRfc3489Servers
     ) {
         if (settingsLoaded) {
             settingsStore.save(
@@ -2304,7 +2330,9 @@ private fun NetSessionTesterApp() {
                     pingIntervalMs = pingIntervalSetting,
                     pingCount = pingCountSetting,
                     pingTimeoutMs = pingTimeoutSetting,
-                    pingProtocol = pingProtocolSetting.name
+                    pingProtocol = pingProtocolSetting.name,
+                    natRfc5780Servers = encodeNatServerList(natRfc5780Servers, "stunserver2025.stunprotocol.org:3478"),
+                    natRfc3489Servers = encodeNatServerList(natRfc3489Servers, "stun.voip.aebc.com:3478")
                 )
             )
         }

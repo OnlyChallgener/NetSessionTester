@@ -16,3 +16,7 @@
 
 Tag: v1.1.3-113
 APK: NetSessionTester-V1.1.3-build113-signed.apk
+
+## V1.1.3 build113 hotfix
+
+同版本紧急修复：NAT 手动诊断自定义 STUN 服务器列表会持久化保存，退出 App 后不再恢复默认。
