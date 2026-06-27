@@ -1,7 +1,10 @@
-# V1.1.2-internal build112 NAT full-state selftest
+# NetSessionTester V1.1.3 build113
 
-- 重写手动 NAT 检测状态机，严格对齐 RFC3489 Test I / Test II / Test I' / Test III 分支流程。
-- RFC5780 过滤测试与映射测试完全隔离，过滤测试使用独立 socket，避免先向备用地址发包导致 NAT3 被误判 NAT1。
-- NAT1 / 全锥形必须由连续两次独立 Filtering Test II 成功证明。
-- RFC3489 / RFC5780 响应必须匹配 transaction id、预期来源 IP 和预期端口。
-- RFC5780 不支持备用地址时降级 RFC8489，过滤行为显示未验证。
+## 主要更新
+
+- NAT 手动诊断支持多个 STUN 服务器按顺序自动尝试。
+- 当前服务器失败、超时或不支持当前模式时，会自动尝试下一个服务器。
+- NAT 检测过程中显示当前服务器和测试阶段，例如 RFC3489 Test I/II/I'/III、RFC5780 Filtering/Mapping。
+- 继续收紧 RFC3489 / RFC5780 状态机，避免普通 Binding 或非预期来源响应被误判为过滤开放。
+- STUN 服务器地址不填写端口时默认使用 3478。
+- 保留 V1.1.x 高频 Ping、图表动态区间和日志容量优化。

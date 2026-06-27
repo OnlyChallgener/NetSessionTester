@@ -1,5 +1,18 @@
 # NetSessionTester
 
-当前版本：V1.1.2-internal build112 NAT strict-order selftest
+当前版本：V1.1.3 build113
 
-本自测包修复 NAT 检测状态机顺序：过滤行为测试先于映射测试，避免提前向备用地址发包导致 NAT3 被误判成 NAT1。
+宽带会话测试器，支持 TCP 会话测试、IPv4/IPv6 分别测试、独立 Ping、高频 Ping、网络信息展示和手动 NAT 诊断。
+
+## V1.1.3 重点
+
+- NAT 检测改为手动诊断，不再在网络信息里主动误判。
+- 支持 RFC5780 / RFC3489 两种检测方式。
+- STUN 服务器支持多条配置，检测时按顺序自动顺延。
+- 检测过程显示当前服务器和测试阶段，便于对照 NatTypeTester / nat_type_detector。
+- STUN 地址不写端口时默认 3478。
+
+## Release
+
+Tag: v1.1.3-113
+APK: NetSessionTester-V1.1.3-build113-signed.apk

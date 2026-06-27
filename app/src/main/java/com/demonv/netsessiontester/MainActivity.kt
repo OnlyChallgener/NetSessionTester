@@ -865,7 +865,7 @@ private suspend fun detectNetworkProbe(
     targetHost: String,
     targetPort: Int
 ): NetworkProbeInfo = withContext(Dispatchers.IO) {
-    // V1.1.2 自测：网络信息只做轻量探测，不再主动跑 NAT 类型。
+    // V1.1.3：NAT 手动诊断支持多服务器顺延与测试阶段显示。
     // NAT 类型交给手动诊断面板，避免普通 STUN 自动误判 NAT1。
     buildNetworkProbeInfo(
         publicIpResult = publicIpResult,
@@ -1396,9 +1396,10 @@ private data class MappingDetection(
     val other: InetSocketAddress?
 )
 
-private fun detectRfc5780FilteringStrict(endpoint: StunEndpoint, timeoutMs: Int = 1200): FilteringDetection {
+private fun detectRfc5780FilteringStrict(endpoint: StunEndpoint, timeoutMs: Int = 1200, progress: (String) -> Unit = {}): FilteringDetection {
     val mainAddress = InetSocketAddress(resolveFirstIpv4(endpoint.host), endpoint.port)
 
+    progress("RFC5780 Filtering Test II · Change IP + Port")
     // Filtering Test II: Change IP + Change Port.
     // Use a fresh socket and do NOT contact OTHER/CHANGED before this request.
     // Full cone / open filtering is accepted only when the response comes from a real
@@ -1433,6 +1434,7 @@ private fun detectRfc5780FilteringStrict(endpoint: StunEndpoint, timeoutMs: Int 
         )
     }
 
+    progress("RFC5780 Filtering Test III · Change Port")
     // Filtering Test III: Change Port only. Fresh socket again to avoid permissions
     // created by any previous probe. Success here means address-restricted; timeout
     // means address-and-port restricted (port restricted / NAT3).
@@ -1464,8 +1466,9 @@ private fun detectRfc5780FilteringStrict(endpoint: StunEndpoint, timeoutMs: Int 
     }
 }
 
-private fun detectRfc5780MappingStrict(endpoint: StunEndpoint, timeoutMs: Int = 1200): MappingDetection {
+private fun detectRfc5780MappingStrict(endpoint: StunEndpoint, timeoutMs: Int = 1200, progress: (String) -> Unit = {}): MappingDetection {
     val mainAddress = InetSocketAddress(resolveFirstIpv4(endpoint.host), endpoint.port)
+    progress("RFC5780 Mapping Test I · 获取公网映射")
     DatagramSocket().use { socket ->
         val base = sendAndReceiveStun(socket, mainAddress, buildStunBindingRequest(), timeoutMs) ?: error("Binding无响应")
         val other = base.otherAddress
@@ -1473,10 +1476,12 @@ private fun detectRfc5780MappingStrict(endpoint: StunEndpoint, timeoutMs: Int = 
             return MappingDetection("公网映射", "服务器未返回 OTHER-ADDRESS/CHANGED-ADDRESS。", base, null)
         }
         val altSamePort = other.address?.let { InetSocketAddress(it, mainAddress.port) } ?: other
+        progress("RFC5780 Mapping Test II · 对比备用IP")
         val map2 = runCatching { sendAndReceiveStun(socket, altSamePort, buildStunBindingRequest(), timeoutMs) }.getOrNull()
         if (map2 != null && map2.mappedIp == base.mappedIp && map2.mappedPort == base.mappedPort) {
             return MappingDetection("端口保持", "Mapping Test II 映射一致。", base, other)
         }
+        progress("RFC5780 Mapping Test III · 对比备用端口")
         val map3 = runCatching { sendAndReceiveStun(socket, other, buildStunBindingRequest(), timeoutMs) }.getOrNull()
         val behavior = when {
             map2 == null && map3 == null -> "公网映射"
@@ -1524,13 +1529,15 @@ private data class Rfc3489TestResult(
     val detail: String
 )
 
-private fun detectRfc3489Classic(endpoint: StunEndpoint, timeoutMs: Int = 1200): Rfc3489TestResult {
+private fun detectRfc3489Classic(endpoint: StunEndpoint, timeoutMs: Int = 1200, progress: (String) -> Unit = {}): Rfc3489TestResult {
     val mainAddress = InetSocketAddress(resolveFirstIpv4(endpoint.host), endpoint.port)
     DatagramSocket().use { socket ->
+        progress("RFC3489 Test I · 获取公网映射")
         // Test I: ordinary binding.
         val base = sendAndReceiveStun(socket, mainAddress, buildStunBindingRequest(), timeoutMs) ?: error("Test I 无响应")
         val changedAddress = base.otherAddress
 
+        progress("RFC3489 Test II · Change IP + Port")
         // Test II: Change IP + Change Port. Do this before contacting CHANGED-ADDRESS directly.
         val testII = sendAndReceiveStun(socket, mainAddress, buildStunBindingRequest(changeIp = true, changePort = true), timeoutMs)
         val testIIOk = isValidChangeIpPortResponse(testII, mainAddress, changedAddress)
@@ -1538,6 +1545,7 @@ private fun detectRfc3489Classic(endpoint: StunEndpoint, timeoutMs: Int = 1200):
         var mappingBehavior = "端口保持"
         var mapDetail = ""
         if (!testIIOk && changedAddress != null) {
+            progress("RFC3489 Test I' · 检查映射变化")
             // Test I': ordinary binding to CHANGED-ADDRESS, used only after Test II failed.
             val testIPrime = sendAndReceiveStun(socket, changedAddress, buildStunBindingRequest(), timeoutMs)
             if (testIPrime != null && (testIPrime.mappedIp != base.mappedIp || testIPrime.mappedPort != base.mappedPort)) {
@@ -1556,6 +1564,7 @@ private fun detectRfc3489Classic(endpoint: StunEndpoint, timeoutMs: Int = 1200):
             mappingBehavior == "端口变化" -> "未验证"
             testIIOk -> "开放"
             else -> {
+                progress("RFC3489 Test III · Change Port")
                 // Test III: Change Port only, only meaningful after Test II failed and mapping did not change.
                 val testIII = sendAndReceiveStun(socket, mainAddress, buildStunBindingRequest(changePort = true), timeoutMs)
                 if (isValidChangePortResponse(testIII, mainAddress)) "地址受限" else "端口受限"
@@ -1583,22 +1592,25 @@ private fun parseStunEndpoint(raw: String, defaultPort: Int = 3478): StunEndpoin
     return StunEndpoint(host, port)
 }
 
-private fun manualNatProbe(mode: ManualNatMode, servers: List<String>): ManualNatResult {
+private fun manualNatProbe(mode: ManualNatMode, servers: List<String>, progress: (String) -> Unit = {}): ManualNatResult {
     val cleanServers = servers.mapNotNull { parseStunEndpoint(it) }.ifEmpty {
         listOf(if (mode == ManualNatMode.RFC5780) StunEndpoint("stunserver2025.stunprotocol.org", 3478) else StunEndpoint("stun.voip.aebc.com", 3478))
     }
     var lastError = "STUN服务器无响应"
-    for (endpoint in cleanServers) {
+    cleanServers.forEachIndexed { index, endpoint ->
+        progress("服务器 ${index + 1}/${cleanServers.size} · ${endpoint.key}")
         val result = runCatching {
             when (mode) {
-                ManualNatMode.RFC5780 -> manualRfc5780Probe(endpoint)
-                ManualNatMode.RFC3489 -> manualRfc3489Probe(endpoint)
+                ManualNatMode.RFC5780 -> manualRfc5780Probe(endpoint, progress)
+                ManualNatMode.RFC3489 -> manualRfc3489Probe(endpoint, progress)
             }
         }.getOrElse { error ->
             lastError = error.message ?: "检测失败"
+            progress("服务器 ${index + 1}/${cleanServers.size} 失败：$lastError")
             null
         }
         if (result != null) return result
+        if (index < cleanServers.lastIndex) progress("正在尝试服务器 ${index + 2}/${cleanServers.size}")
     }
     return ManualNatResult(
         success = false,
@@ -1613,11 +1625,14 @@ private fun manualNatProbe(mode: ManualNatMode, servers: List<String>): ManualNa
     )
 }
 
-private fun manualRfc5780Probe(endpoint: StunEndpoint): ManualNatResult? {
+private fun manualRfc5780Probe(endpoint: StunEndpoint, progress: (String) -> Unit = {}): ManualNatResult? {
     return runCatching {
-        val filtering = detectRfc5780FilteringStrict(endpoint, timeoutMs = 1200)
-        val mapping = detectRfc5780MappingStrict(endpoint, timeoutMs = 1200)
+        progress("RFC5780 Filtering · 测试回包限制")
+        val filtering = detectRfc5780FilteringStrict(endpoint, timeoutMs = 1200, progress = progress)
+        progress("RFC5780 Mapping · 测试出网端口")
+        val mapping = detectRfc5780MappingStrict(endpoint, timeoutMs = 1200, progress = progress)
         if (mapping.other == null) {
+            progress("RFC8489 Binding · 服务器不支持严格5780，降级基础结果")
             DatagramSocket().use { socket ->
                 return@runCatching manualRfc8489Result(
                     socket = socket,
@@ -1674,9 +1689,9 @@ private fun manualRfc8489Result(
     )
 }
 
-private fun manualRfc3489Probe(endpoint: StunEndpoint): ManualNatResult? {
+private fun manualRfc3489Probe(endpoint: StunEndpoint, progress: (String) -> Unit = {}): ManualNatResult? {
     return runCatching {
-        val classic = detectRfc3489Classic(endpoint, timeoutMs = 1200)
+        val classic = detectRfc3489Classic(endpoint, timeoutMs = 1200, progress = progress)
         val natType = when {
             classic.mappingBehavior == "端口变化" -> "NAT4 / 对称型"
             classic.filteringBehavior == "开放" -> "NAT1 / 全锥形"
@@ -2105,6 +2120,7 @@ private fun NetSessionTesterApp() {
     var showNatDiagnosticDialog by remember { mutableStateOf(false) }
     var natDiagnosticResult by remember { mutableStateOf<ManualNatResult?>(null) }
     var natDiagnosticRunning by remember { mutableStateOf(false) }
+    var natDiagnosticProgress by remember { mutableStateOf("") }
     var natManualMode by remember { mutableStateOf(ManualNatMode.RFC5780) }
     var natRfc5780Servers by remember { mutableStateOf(listOf("stunserver2025.stunprotocol.org:3478")) }
     var natRfc3489Servers by remember { mutableStateOf(listOf("stun.voip.aebc.com:3478")) }
@@ -3159,10 +3175,12 @@ private fun NetSessionTesterApp() {
             mode = natManualMode,
             servers = if (natManualMode == ManualNatMode.RFC5780) natRfc5780Servers else natRfc3489Servers,
             running = natDiagnosticRunning,
+            progressText = natDiagnosticProgress,
             result = natDiagnosticResult,
             onModeChange = { mode ->
                 natManualMode = mode
                 natDiagnosticResult = null
+                natDiagnosticProgress = ""
             },
             onServersChange = { next ->
                 if (natManualMode == ManualNatMode.RFC5780) natRfc5780Servers = next else natRfc3489Servers = next
@@ -3171,10 +3189,14 @@ private fun NetSessionTesterApp() {
                 if (!natDiagnosticRunning) {
                     scope.launch {
                         natDiagnosticRunning = true
+                        natDiagnosticProgress = "准备检测 · IPv4 · UDP"
                         val modeNow = natManualMode
                         val serverNow = if (modeNow == ManualNatMode.RFC5780) natRfc5780Servers else natRfc3489Servers
-                        val result = withContext(Dispatchers.IO) { manualNatProbe(modeNow, serverNow) }
+                        val result = withContext(Dispatchers.IO) {
+                            manualNatProbe(modeNow, serverNow) { message -> scope.launch { natDiagnosticProgress = message } }
+                        }
                         natDiagnosticResult = result
+                        natDiagnosticProgress = if (result.success) "检测完成 · ${result.method} · ${result.server}" else "检测失败 · ${result.message}"
                         networkProbeInfo = networkProbeInfo.copy(
                             natType = result.natType,
                             portText = result.publicAddress.substringAfter(':', networkProbeInfo.portText),
@@ -4255,7 +4277,7 @@ private fun SettingsPage(
                             ParamField("目标会话（条）", successLimit, onSuccessLimitChange, Modifier.weight(1f), leadingMark = "count")
                             Spacer(Modifier.weight(1f))
                         }
-                        Text("V1.1.2 自测：NAT 改为手动诊断，网络信息只保留 IPv4/IPv6/优先级等轻量展示。", color = Muted, fontSize = 12.sp, lineHeight = 16.sp)
+                        Text("V1.1.3：NAT 手动诊断支持多服务器顺延，测试过程会显示 Test I/II/III 或 Filtering/Mapping 阶段。", color = Muted, fontSize = 12.sp, lineHeight = 16.sp)
                     }
                     "ping" -> SoftCard {
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -5677,6 +5699,7 @@ private fun NatDiagnosticDialog(
     mode: ManualNatMode,
     servers: List<String>,
     running: Boolean,
+    progressText: String,
     result: ManualNatResult?,
     onModeChange: (ManualNatMode) -> Unit,
     onServersChange: (List<String>) -> Unit,
@@ -5751,6 +5774,15 @@ private fun NatDiagnosticDialog(
                     modifier = Modifier.fillMaxWidth(),
                     shape = ShapeM
                 ) { Text("+ 添加服务器", fontSize = 13.sp) }
+                if (running || progressText.isNotBlank()) {
+                    Column(
+                        modifier = Modifier.fillMaxWidth().background(Color(0xFFF8FAFC), ShapeM).padding(10.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text("检测进度", color = Muted, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        Text(progressText.ifBlank { "等待开始" }, color = TextDark, fontSize = 12.sp, lineHeight = 16.sp)
+                    }
+                }
                 result?.let { r ->
                     Column(
                         verticalArrangement = Arrangement.spacedBy(8.dp),
