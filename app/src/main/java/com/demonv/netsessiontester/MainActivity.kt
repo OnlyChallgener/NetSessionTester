@@ -921,10 +921,10 @@ private fun buildNetworkProbeInfo(
     val strictNat1 = stunSuccess && stun!!.portStable && stun.ipStable && stun.roundStable && stun.successCount == stun.totalCount && stun.totalCount >= 6 && stun.roundCount >= 2
     val stableMapping = stunSuccess && stun!!.portStable && stun.ipStable && multiStun >= 3
     val rfc5780Verified = stunSuccess && stun!!.filteringVerified
-    val rfc5780EndpointIndependentMapping = rfc5780Verified && stun.rfc5780MappingBehavior == "端点无关映射"
-    val rfc5780EndpointIndependentFiltering = rfc5780Verified && stun.rfc5780FilteringBehavior == "端点无关过滤"
-    val rfc5780AddressFiltering = rfc5780Verified && stun.rfc5780FilteringBehavior == "地址相关过滤"
-    val rfc5780PortFiltering = rfc5780Verified && stun.rfc5780FilteringBehavior == "地址端口相关过滤"
+    val rfc5780EndpointIndependentMapping = rfc5780Verified && stun.rfc5780MappingBehavior == "端口保持"
+    val rfc5780EndpointIndependentFiltering = rfc5780Verified && stun.rfc5780FilteringBehavior == "开放"
+    val rfc5780AddressFiltering = rfc5780Verified && stun.rfc5780FilteringBehavior == "地址受限"
+    val rfc5780PortFiltering = rfc5780Verified && stun.rfc5780FilteringBehavior == "端口受限"
 
     val natType = when {
         env.hasVpn -> "代理环境"
@@ -992,22 +992,22 @@ private fun buildNetworkProbeInfo(
 
     val stunRoundText = stun?.let { if (it.roundCount >= 2) "复测${it.roundCount}轮${if (it.roundStable) "稳定" else "有波动"}。" else "" } ?: ""
     val stunBackupText = stun?.let { if (it.usedBackup) "已启用备用节点。" else "" } ?: ""
-    val rfc5780Text = stun?.let { if (it.filteringVerified) "RFC5780节点 ${it.rfc5780Server} 已验证过滤行为。" else "" } ?: ""
+    val rfc5780Text = stun?.let { if (it.filteringVerified) "RFC5780节点 ${it.rfc5780Server} 已验证回包限制。" else "" } ?: ""
     val stunNodeText = if (full && stunTotal > 0) "STUN节点 ${multiStun}/${stunTotal} 成功。${stunRoundText}${stunBackupText}${rfc5780Text}" else ""
     val diagnosis = when {
         env.hasVpn -> "检测到VPN/代理，NAT、出口和IPv6结果仅供参考。"
         dns.fakeIpDetected -> "检测到Fake-IP，DNS可能被代理工具接管。"
         !dns.systemHasAaaa && dns.domesticHasAaaa -> "系统DNS未返回IPv6，国内备用DNS可解析，可能被AdGuard/代理/路由器策略过滤。"
         !dns.systemHasAaaa && dns.globalHasAaaa -> "系统和国内备用DNS未返回IPv6，国外备用DNS可解析，可能存在地区DNS差异或本地DNS策略影响。"
-        rfc5780Verified -> "${stunNodeText}检测方式：${stun!!.detectionMethod}，映射行为：${stun.rfc5780MappingBehavior}，过滤行为：${stun.rfc5780FilteringBehavior}。"
+        rfc5780Verified -> "${stunNodeText}检测方式：${stun!!.detectionMethod}，出网端口：${stun.rfc5780MappingBehavior}，回包限制：${stun.rfc5780FilteringBehavior}。"
         natType.startsWith("NAT4 / 对称") -> "${stunNodeText}多个可用STUN目标返回的外部端口不一致，当前按对称型/NAT4理解，P2P/游戏联机可能受影响。"
-        natType.startsWith("NAT3 / 端口保持") -> "${stunNodeText}多节点端口保持，但未满足6/6节点与2轮稳定条件，当前按端口保持型受限网络显示；完整过滤行为需RFC5780/自建节点验证。"
+        natType.startsWith("NAT3 / 端口保持") -> "${stunNodeText}多节点端口保持，但未满足6/6节点与2轮稳定条件，当前按端口保持型受限网络显示；完整回包限制需RFC5780/自建节点验证。"
         natType.startsWith("NAT3 / 受限") && weakPortChange -> "${stunNodeText}UDP基础探测可用，但可用节点不足以确认对称型，当前按受限型理解，建议换网络或再次刷新复测。"
-        natType.startsWith("NAT3 / 受限") -> "${stunNodeText}UDP基础探测可用，过滤行为未完成RFC5780验证；完整过滤行为需RFC5780/自建节点验证。"
+        natType.startsWith("NAT3 / 受限") -> "${stunNodeText}UDP基础探测可用，回包限制未完成RFC5780验证；完整回包限制需RFC5780/自建节点验证。"
         natType.startsWith("NAT类型待确认") -> "公网IPv4可用，但STUN基础探测未成功，NAT类型暂按待确认处理。"
         natType.startsWith("UDP") -> "多个STUN基础请求均失败，当前仅能判断为UDP受限/无法判断，可能是UDP被防火墙、代理或运营商限制。"
         natType.startsWith("NAT2") -> "UDP映射较稳定，普通联机能力中等。"
-        natType.startsWith("NAT1") -> if (rfc5780Verified) "${stunNodeText}RFC5780已完成映射和过滤验证，当前判定为 NAT1 / 全锥形。" else "${stunNodeText}6/6节点与2轮复测均保持同一公网端口，按兼容口径判定为 NAT1；完整过滤行为需 RFC5780 / 自建节点验证。"
+        natType.startsWith("NAT1") -> if (rfc5780Verified) "${stunNodeText}RFC5780已完成端口保持和回包验证，当前判定为 NAT1 / 全锥形。" else "${stunNodeText}6/6节点与2轮复测均保持同一公网端口，按兼容口径判定为 NAT1；完整回包限制需 RFC5780 / 自建节点验证。"
         else -> "网络信息已更新。"
     }
 
@@ -1342,16 +1342,16 @@ private fun rfc5780ProbeFast(): Rfc5780ProbeResult? {
             val other = base.otherAddress ?: return@use
             val map2 = sendAndReceiveStun(socket, other, buildStunBindingRequest(), 900)
             val mappingBehavior = if (map2 != null && map2.mappedIp == base.mappedIp && map2.mappedPort == base.mappedPort) {
-                "端点无关映射"
+                "端口保持"
             } else {
-                "地址/端口相关映射"
+                "端口变化"
             }
             val changedIpPort = sendAndReceiveStun(socket, mainAddress, buildStunBindingRequest(changeIp = true, changePort = true), 900)
             val filteringBehavior = if (changedIpPort != null) {
-                "端点无关过滤"
+                "开放"
             } else {
                 val changedPort = sendAndReceiveStun(socket, mainAddress, buildStunBindingRequest(changePort = true), 900)
-                if (changedPort != null) "地址相关过滤" else "地址端口相关过滤"
+                if (changedPort != null) "地址受限" else "端口受限"
             }
             return Rfc5780ProbeResult(
                 serverKey = endpoint.key,
@@ -5345,10 +5345,10 @@ private fun NetworkEnvironmentSettingsCard(
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
             InfoMetricTile("↕", "优先级", probeInfo.priority, Color(0xFFFFF3E0), Orange, Modifier.weight(1f))
-            InfoMetricTile("M", "映射行为", probeInfo.mappingBehavior, Color(0xFFE0F2FE), Blue, Modifier.weight(1f))
+            InfoMetricTile("M", "出网端口", probeInfo.mappingBehavior, Color(0xFFE0F2FE), Blue, Modifier.weight(1f))
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-            InfoMetricTile("F", "过滤行为", probeInfo.filterBehavior, Color(0xFFFCE7F3), Color(0xFFD946EF), Modifier.weight(1f))
+            InfoMetricTile("F", "回包限制", probeInfo.filterBehavior, Color(0xFFFCE7F3), Color(0xFFD946EF), Modifier.weight(1f))
             InfoMetricTile("D", "DNS诊断", probeInfo.dnsStatus, Color(0xFFF3E8FF), Purple, Modifier.weight(1f))
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
