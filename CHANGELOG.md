@@ -1,10 +1,7 @@
-# Changelog
+# V1.1.2-internal build112 NAT full-state selftest
 
-## V1.1.2-internal build112 NAT strict state machine selftest
-
-- 修复 RFC5780 过滤测试误判：Change IP + Change Port 成功必须来自 OTHER-ADDRESS / CHANGED-ADDRESS。
-- 修复 RFC5780 Change Port 判断：响应必须来自原服务器 IP 的不同端口。
-- 修复 RFC3489 Test II / Test III 成功条件：不再把任意响应当成开放或地址受限。
-- 保留 CHANGED-ADDRESS 兼容读取，支持 stun.miwifi.com、stun.voip.aebc.com 等服务器。
-- 保留无端口自动补 3478。
-- 目标：对齐 NatTypeTester / nat_type_detector 的 NAT3 判定口径。
+- 重写手动 NAT 检测状态机，严格对齐 RFC3489 Test I / Test II / Test I' / Test III 分支流程。
+- RFC5780 过滤测试与映射测试完全隔离，过滤测试使用独立 socket，避免先向备用地址发包导致 NAT3 被误判 NAT1。
+- NAT1 / 全锥形必须由连续两次独立 Filtering Test II 成功证明。
+- RFC3489 / RFC5780 响应必须匹配 transaction id、预期来源 IP 和预期端口。
+- RFC5780 不支持备用地址时降级 RFC8489，过滤行为显示未验证。
