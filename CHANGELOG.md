@@ -1,3 +1,9 @@
+# V1.1.14 build115
+
+- 发布版本号更新为 V1.1.14 / build115，versionCode 115。
+- 首页 NSLookup / Tracket 入口卡片改为与网络信息小卡一致的字号和尺寸：58dp 最小高度、9dp 内边距、MarkBox 图标、11sp 小标题、14sp 主文字。
+- 保留 V1.1.14 build114 下载横幅可关闭修复、HTTP 404 说明优化、NSLookup 自定义 DNS、Tracket 默认 30 跳等功能。
+
 # V1.1.14 build114
 
 - 发布版本号更新为 V1.1.14 / build114。
@@ -41,3 +47,7 @@
 - 失败/完成状态横幅新增右侧关闭按钮，支持横向滑动关闭。
 - 下载失败 HTTP 404 文案增加 GitHub Release 包未发布或 APK 文件名不一致提示。
 - 修正 NSLookup / Tracket 首页入口字号，避免入口文字过大挤压。
+
+### V1.1.14 build114 hotfix - shortcut font visual correction
+- 再次下调首页 NSLookup / Tracket 两个入口卡片字号、图标和高度，修复视觉上仍偏大的问题。
+- 版本号保持 V1.1.14 / build114 不变。

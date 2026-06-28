@@ -1,5 +1,14 @@
 # NetSessionTester
 
+## V1.1.14 build115
+
+- versionName: V1.1.14
+- versionCode: 115
+- 首页 NSLookup / Tracket 入口卡片统一为网络信息小卡尺寸与字号。
+- 保留 build114 的下载横幅关闭修复、NSLookup 自定义 DNS、Tracket 默认 30 跳。
+
+# NetSessionTester
+
 当前版本：V1.1.3 build113
 
 宽带会话测试器，支持 TCP 会话测试、IPv4/IPv6 分别测试、独立 Ping、高频 Ping、网络信息展示和手动 NAT 诊断。

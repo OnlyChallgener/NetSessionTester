@@ -1,3 +1,12 @@
+# V1.1.14 build115 测试要点
+
+1. 应用版本应显示 V1.1.14，versionCode 为 115。
+2. 首页 NSLookup / Tracket 入口卡片应与 IPv4 / IPv6 / NAT / 运营商卡片使用同级字号与尺寸，不再明显偏大。
+3. 下载失败横幅可点击 X 或左右滑动关闭；进入弹窗后点右上角 X 也应清掉横幅。
+4. HTTP 404 文案应提示可能 GitHub release 包尚未发布或 APK 文件名不一致。
+5. NSLookup DNS1 默认 223.5.5.5，DNS2 默认 2400:3200::1，自定义 DNS 历史每个最多 3 条。
+6. Tracket 默认跳数为 30。
+
 # V1.1.14 build114 测试要点
 
 1. 版本检查：确认 App 显示 V1.1.14，versionCode 为 114。
@@ -36,3 +45,8 @@
 4. 点击横幅进入下载弹窗后，点右上角 × 会同时关闭弹窗并清除失败横幅。
 5. 首页 NSLookup / Tracket 入口字号不再过大，不遮挡副标题。
 6. versionName 仍为 V1.1.14，versionCode 仍为 114。
+
+## Hotfix 验证补充：入口字号
+- 首页 NSLookup / Tracket 标题应为 14sp，副标题 12sp。
+- 入口卡片高度 58dp，图标容器 36dp。
+- 只调整两个入口卡片，其它网络信息卡片不变。

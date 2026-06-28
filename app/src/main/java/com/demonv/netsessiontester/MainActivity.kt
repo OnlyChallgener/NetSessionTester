@@ -6550,27 +6550,31 @@ private fun NetworkToolShortcutCard(
     onClick: () -> Unit
 ) {
     Row(
+        verticalAlignment = Alignment.CenterVertically,
         modifier = modifier
-            .height(64.dp)
+            .heightIn(min = 58.dp)
             .background(Color(0xFFF8FAFC), ShapeM)
-            .border(1.dp, Border.copy(alpha = 0.70f), ShapeM)
             .clickable(onClick = onClick)
-            .padding(horizontal = 8.dp, vertical = 6.dp),
-        verticalAlignment = Alignment.CenterVertically
+            .padding(9.dp)
     ) {
-        Box(
-            modifier = Modifier
-                .width(40.dp)
-                .height(40.dp)
-                .background(bg, RoundedCornerShape(12.dp)),
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(iconFor(mark), contentDescription = null, tint = color, modifier = Modifier.width(21.dp).height(21.dp))
-        }
+        MarkBox(mark, bg, color)
         Spacer(Modifier.width(8.dp))
-        Column(Modifier.weight(1f), verticalArrangement = Arrangement.Center) {
-            Text(title, color = TextDark, fontWeight = FontWeight.ExtraBold, fontSize = 16.sp, lineHeight = 19.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(subtitle, color = Muted, fontSize = 13.sp, lineHeight = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Column(Modifier.weight(1f)) {
+            Text(
+                title,
+                color = Muted,
+                fontSize = 11.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                subtitle,
+                color = TextDark,
+                fontWeight = FontWeight.Bold,
+                fontSize = 14.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
         }
     }
 }
@@ -6583,8 +6587,8 @@ private fun ToolPageHeader(title: String, subtitle: String, onBack: () -> Unit) 
     ) {
         Box(
             modifier = Modifier
-                .width(40.dp)
-                .height(40.dp)
+                .width(36.dp)
+                .height(36.dp)
                 .background(Color.White, RoundedCornerShape(14.dp))
                 .border(1.dp, Border, RoundedCornerShape(14.dp))
                 .clickable(onClick = onBack),
@@ -7848,7 +7852,7 @@ private fun BottomNav(selectedTab: MainTab, onSelect: (MainTab) -> Unit) {
                     image,
                     contentDescription = tab.label,
                     tint = if (selected) Blue else Muted,
-                    modifier = Modifier.width(21.dp).height(21.dp)
+                    modifier = Modifier.width(19.dp).height(19.dp)
                 )
                 Spacer(Modifier.height(2.dp))
                 Text(
