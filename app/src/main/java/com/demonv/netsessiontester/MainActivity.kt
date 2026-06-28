@@ -536,7 +536,14 @@ private suspend fun downloadUpdateApk(
     }
     try {
         val code = conn.responseCode
-        if (code !in 200..299) error("下载失败：HTTP $code")
+        if (code !in 200..299) {
+            val hint = when (code) {
+                404 -> "下载失败：HTTP 404，可能 GitHub 还未发布 release 包或 APK 文件名不一致"
+                403 -> "下载失败：HTTP 403，可能 GitHub 限制访问，建议打开 GitHub 手动下载"
+                else -> "下载失败：HTTP $code"
+            }
+            error(hint)
+        }
         val total = conn.contentLengthLong.takeIf { it > 0L } ?: 0L
         val start = System.currentTimeMillis()
         var lastAt = start
@@ -2477,6 +2484,24 @@ private fun NetSessionTesterApp() {
         downloadUi = UpdateDownloadUi(active = false, failed = true, message = "已取消下载，可重新下载")
     }
 
+    fun dismissUpdateDownloadUi() {
+        if (downloadUi.active) {
+            downloadRunId = System.nanoTime()
+            downloadJob?.cancel()
+            downloadJob = null
+        }
+        showDownloadDialog = false
+        downloadUi = UpdateDownloadUi()
+    }
+
+    fun closeUpdateDownloadDialog() {
+        if (downloadUi.failed || downloadUi.finished) {
+            dismissUpdateDownloadUi()
+        } else {
+            showDownloadDialog = false
+        }
+    }
+
     fun installReadyApk() {
         val path = downloadUi.apkFilePath ?: return
         installDownloadedApk(context, File(path))
@@ -3302,7 +3327,7 @@ private fun NetSessionTesterApp() {
         UpdateDownloadDialog(
             info = latestUpdate,
             state = downloadUi,
-            onDismiss = { showDownloadDialog = false },
+            onDismiss = { closeUpdateDownloadDialog() },
             onInstall = { installReadyApk() },
             onRetry = { latestUpdate?.let { startUpdateDownload(it) } },
             onCancelDownload = { cancelUpdateDownload() },
@@ -3509,7 +3534,8 @@ private fun NetSessionTesterApp() {
                     state = downloadUi,
                     modifier = Modifier.align(Alignment.TopCenter).padding(horizontal = 12.dp, vertical = 8.dp),
                     onOpen = { showDownloadDialog = true },
-                    onInstall = { installReadyApk() }
+                    onInstall = { installReadyApk() },
+                    onDismiss = { dismissUpdateDownloadUi() }
                 )
             }
 
@@ -5167,7 +5193,8 @@ private fun UpdateDownloadBanner(
     state: UpdateDownloadUi,
     modifier: Modifier = Modifier,
     onOpen: () -> Unit,
-    onInstall: () -> Unit
+    onInstall: () -> Unit,
+    onDismiss: () -> Unit
 ) {
     val title = when {
         state.finished -> "更新包已下载"
@@ -5180,9 +5207,32 @@ private fun UpdateDownloadBanner(
         state.failed -> ErrorRed
         else -> Blue
     }
+    var dragX by remember { mutableStateOf(0f) }
+    val dragOffset by animateFloatAsState(
+        targetValue = dragX,
+        animationSpec = tween(140, easing = FastOutSlowInEasing),
+        label = "update_banner_drag"
+    )
+    val dismissible = state.failed || state.finished || state.message.contains("取消")
+
     Card(
         modifier = modifier
             .fillMaxWidth()
+            .offset { IntOffset(dragOffset.roundToInt(), 0) }
+            .pointerInput(dismissible) {
+                if (dismissible) {
+                    detectHorizontalDragGestures(
+                        onHorizontalDrag = { change, amount ->
+                            change.consume()
+                            dragX += amount
+                        },
+                        onDragEnd = {
+                            if (kotlin.math.abs(dragX) > 80f) onDismiss() else dragX = 0f
+                        },
+                        onDragCancel = { dragX = 0f }
+                    )
+                }
+            }
             .clickable { if (state.finished) onInstall() else onOpen() },
         shape = ShapeM,
         colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.98f)),
@@ -5200,14 +5250,23 @@ private fun UpdateDownloadBanner(
                 Column(Modifier.weight(1f)) {
                     Text(title, color = TextDark, fontSize = 12.sp, fontWeight = FontWeight.Bold, maxLines = 1)
                     val detail = when {
-                        state.finished -> "点击安装"
-                        state.failed -> state.message.ifBlank { "点击查看" }
+                        state.finished -> "点击安装，右滑或点 × 可关闭"
+                        state.failed -> state.message.ifBlank { "点击查看详情，右滑或点 × 可关闭" }
                         state.active -> "${state.progress}% · ${formatBytes(state.downloadedBytes)} / ${if (state.totalBytes > 0) formatBytes(state.totalBytes) else "未知大小"} · ${formatSpeed(state.speedBytesPerSecond)}"
                         else -> "点击查看"
                     }
-                    Text(detail, color = Muted, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(detail, color = Muted, fontSize = 10.sp, maxLines = 2, overflow = TextOverflow.Ellipsis, lineHeight = 13.sp)
                 }
-                Text(if (state.finished) "安装" else "查看", color = color, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                if (dismissible) {
+                    IconButton(
+                        onClick = onDismiss,
+                        modifier = Modifier.width(30.dp).height(30.dp)
+                    ) {
+                        Icon(Icons.Filled.Close, contentDescription = "关闭下载提示", tint = Muted, modifier = Modifier.width(18.dp).height(18.dp))
+                    }
+                } else {
+                    Text(if (state.finished) "安装" else "查看", color = color, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                }
             }
             if (state.active || state.finished) {
                 LinearProgressIndicator(
@@ -6501,16 +6560,16 @@ private fun NetworkToolShortcutCard(
     ) {
         Box(
             modifier = Modifier
-                .width(42.dp)
-                .height(42.dp)
+                .width(40.dp)
+                .height(40.dp)
                 .background(bg, RoundedCornerShape(12.dp)),
             contentAlignment = Alignment.Center
         ) {
-            Icon(iconFor(mark), contentDescription = null, tint = color, modifier = Modifier.width(22.dp).height(22.dp))
+            Icon(iconFor(mark), contentDescription = null, tint = color, modifier = Modifier.width(21.dp).height(21.dp))
         }
-        Spacer(Modifier.width(7.dp))
+        Spacer(Modifier.width(8.dp))
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.Center) {
-            Text(title, color = TextDark, fontWeight = FontWeight.ExtraBold, fontSize = 18.sp, lineHeight = 21.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(title, color = TextDark, fontWeight = FontWeight.ExtraBold, fontSize = 16.sp, lineHeight = 19.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(subtitle, color = Muted, fontSize = 13.sp, lineHeight = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
     }
