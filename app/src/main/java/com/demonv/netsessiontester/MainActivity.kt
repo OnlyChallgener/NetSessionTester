@@ -5918,6 +5918,9 @@ private enum class NsLookupRecordType(val label: String) {
     AAAA("AAAA")
 }
 
+private const val DEFAULT_NS_DNS1 = "223.5.5.5"
+private const val DEFAULT_NS_DNS2 = "2400:3200::1"
+
 private enum class ToolIpPolicy(val label: String) {
     AUTO("自动"),
     IPV6_FIRST("IPv6优先"),
@@ -5943,7 +5946,7 @@ private data class TracketToolRecord(
     val dnsServers: String,
     val targetIp: String,
     val ipPolicy: String = ToolIpPolicy.IPV6_FIRST.label,
-    val maxHops: Int = 16,
+    val maxHops: Int = 30,
     val timeoutMs: Int = 1200,
     val hops: List<String>,
     val costMs: Long,
@@ -5988,6 +5991,31 @@ private fun String.safeInt(default: Int, min: Int, max: Int): Int {
 
 private class NetToolHistoryStore(context: Context) {
     private val prefs = context.getSharedPreferences("net_tool_history_v1", Context.MODE_PRIVATE)
+
+    fun loadNsDns(slot: Int): List<String> {
+        val key = if (slot == 2) "ns_dns2_history" else "ns_dns1_history"
+        val arr = JSONArray(prefs.getString(key, "[]") ?: "[]")
+        return buildList {
+            for (i in 0 until arr.length()) {
+                val value = arr.optString(i).trim()
+                if (value.isNotBlank()) add(value)
+            }
+        }.distinct().take(3)
+    }
+
+    fun addNsDns(slot: Int, input: String) {
+        val value = normalizeDnsServerInput(input) ?: return
+        val key = if (slot == 2) "ns_dns2_history" else "ns_dns1_history"
+        val next = (listOf(value) + loadNsDns(slot).filterNot { it == value }).take(3)
+        prefs.edit().putString(key, JSONArray(next).toString()).apply()
+    }
+
+    fun deleteNsDns(slot: Int, input: String) {
+        val value = input.trim()
+        val key = if (slot == 2) "ns_dns2_history" else "ns_dns1_history"
+        val next = loadNsDns(slot).filterNot { it == value }
+        prefs.edit().putString(key, JSONArray(next).toString()).apply()
+    }
 
     fun loadNsLookup(): List<NsLookupToolRecord> {
         val arr = JSONArray(prefs.getString("nslookup", "[]") ?: "[]")
@@ -6062,7 +6090,7 @@ private class NetToolHistoryStore(context: Context) {
                         dnsServers = o.optString("dnsServers"),
                         targetIp = o.optString("targetIp"),
                         ipPolicy = o.optString("ipPolicy", ToolIpPolicy.IPV6_FIRST.label),
-                        maxHops = o.optInt("maxHops", 16),
+                        maxHops = o.optInt("maxHops", 30),
                         timeoutMs = o.optInt("timeoutMs", 1200),
                         hops = o.optJSONArray("hops")?.toStringList().orEmpty(),
                         costMs = o.optLong("costMs"),
@@ -6126,31 +6154,146 @@ private fun chooseToolTargetAddress(addresses: List<InetAddress>, policy: ToolIp
     }
 }
 
+private data class DnsToolQueryResult(
+    val answers: List<String>,
+    val server: String,
+    val slotLabel: String
+)
+
+private fun normalizeDnsServerInput(input: String): String? {
+    val value = input.trim()
+        .removePrefix("[")
+        .removeSuffix("]")
+        .substringBefore('%')
+        .trim()
+    if (value.isBlank()) return null
+    val isIpv4 = Regex("""^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$""").matches(value)
+    val isIpv6 = value.contains(":") && Regex("""^[0-9A-Fa-f:.]+$""").matches(value)
+    if (!isIpv4 && !isIpv6) return null
+    return runCatching { InetAddress.getByName(value).hostAddress?.substringBefore('%') }.getOrNull()
+}
+
+private fun parseDnsAddressAnswers(data: ByteArray, length: Int, txId: Int, qType: Int): List<String> {
+    if (length < 12) error("DNS响应过短")
+    val id = ((data[0].toInt() and 0xFF) shl 8) or (data[1].toInt() and 0xFF)
+    if (id != txId) error("DNS响应ID不匹配")
+    val flags = ((data[2].toInt() and 0xFF) shl 8) or (data[3].toInt() and 0xFF)
+    val rcode = flags and 0x0F
+    if (rcode != 0) error("DNS返回错误码 $rcode")
+    val qd = ((data[4].toInt() and 0xFF) shl 8) or (data[5].toInt() and 0xFF)
+    val an = ((data[6].toInt() and 0xFF) shl 8) or (data[7].toInt() and 0xFF)
+    var pos = 12
+    repeat(qd) {
+        pos = skipDnsName(data, length, pos)
+        if (pos < 0 || pos + 4 > length) error("DNS问题区解析失败")
+        pos += 4
+    }
+    val answers = mutableListOf<String>()
+    repeat(an) {
+        pos = skipDnsName(data, length, pos)
+        if (pos < 0 || pos + 10 > length) error("DNS答案区解析失败")
+        val type = ((data[pos].toInt() and 0xFF) shl 8) or (data[pos + 1].toInt() and 0xFF)
+        val clazz = ((data[pos + 2].toInt() and 0xFF) shl 8) or (data[pos + 3].toInt() and 0xFF)
+        val rdLen = ((data[pos + 8].toInt() and 0xFF) shl 8) or (data[pos + 9].toInt() and 0xFF)
+        pos += 10
+        if (pos + rdLen > length) error("DNS记录长度异常")
+        if (clazz == 1 && type == qType) {
+            when {
+                qType == 1 && rdLen == 4 -> {
+                    answers += (0 until 4).joinToString(".") { idx -> (data[pos + idx].toInt() and 0xFF).toString() }
+                }
+                qType == 28 && rdLen == 16 -> {
+                    answers += InetAddress.getByAddress(data.copyOfRange(pos, pos + 16)).hostAddress.substringBefore('%')
+                }
+            }
+        }
+        pos += rdLen
+    }
+    return answers.distinct()
+}
+
+private fun queryDnsAddressByServer(host: String, server: String, qType: Int, timeoutMs: Int): List<String> {
+    val txId = (System.nanoTime().toInt() and 0xFFFF)
+    val query = buildDnsQuery(host, txId, qType = qType)
+    DatagramSocket().use { socket ->
+        socket.soTimeout = timeoutMs.coerceIn(500, 10000)
+        socket.send(DatagramPacket(query, query.size, InetAddress.getByName(server), 53))
+        val buf = ByteArray(1500)
+        val packet = DatagramPacket(buf, buf.size)
+        socket.receive(packet)
+        return parseDnsAddressAnswers(packet.data, packet.length, txId, qType)
+    }
+}
+
+private fun queryDnsAddressWithFallback(
+    host: String,
+    qType: Int,
+    dns1: String,
+    dns2: String,
+    timeoutMs: Int
+): DnsToolQueryResult {
+    val candidates = buildList {
+        normalizeDnsServerInput(dns1)?.let { add("DNS1" to it) }
+        normalizeDnsServerInput(dns2)?.let { add("DNS2" to it) }
+    }.distinctBy { it.second }
+    if (candidates.isEmpty()) error("DNS1/DNS2 需要填写有效 IPv4 或 IPv6 地址")
+    var lastError: Throwable? = null
+    for ((label, server) in candidates) {
+        val result = runCatching { queryDnsAddressByServer(host, server, qType, timeoutMs) }
+        if (result.isSuccess) return DnsToolQueryResult(result.getOrDefault(emptyList()), server, label)
+        lastError = result.exceptionOrNull()
+    }
+    error(lastError?.message ?: "自定义DNS查询失败")
+}
+
 private suspend fun runNsLookupTool(
-    context: Context,
     input: String,
-    dnsSnapshot: List<String>,
-    recordType: NsLookupRecordType
+    dns1: String,
+    dns2: String,
+    recordType: NsLookupRecordType,
+    timeoutMs: Int
 ): NsLookupToolRecord = withContext(Dispatchers.IO) {
     val host = cleanToolHost(input)
-    val dns = dnsTextFromSnapshot(dnsSnapshot)
+    val timeout = timeoutMs.coerceIn(500, 10000)
     val start = System.currentTimeMillis()
     runCatching {
-        val addresses = InetAddress.getAllByName(host).toList().filterNot { it.isLoopbackAddress }
-        val allIpv4 = addresses.filterIsInstance<Inet4Address>().mapNotNull { it.hostAddress }.distinct()
-        val allIpv6 = addresses.filterIsInstance<Inet6Address>().mapNotNull { it.hostAddress?.substringBefore('%') }.distinct()
+        val usedDns = linkedSetOf<String>()
+        var ipv4 = emptyList<String>()
+        var ipv6 = emptyList<String>()
+        var successCount = 0
+        var lastError: Throwable? = null
+        if (recordType != NsLookupRecordType.AAAA) {
+            val result = runCatching { queryDnsAddressWithFallback(host, 1, dns1, dns2, timeout) }
+            result.onSuccess {
+                ipv4 = it.answers
+                usedDns += "${it.slotLabel} ${it.server}"
+                successCount++
+            }.onFailure { lastError = it }
+        }
+        if (recordType != NsLookupRecordType.A) {
+            val result = runCatching { queryDnsAddressWithFallback(host, 28, dns1, dns2, timeout) }
+            result.onSuccess {
+                ipv6 = it.answers
+                usedDns += "${it.slotLabel} ${it.server}"
+                successCount++
+            }.onFailure { lastError = it }
+        }
+        if (successCount == 0) error(lastError?.message ?: "自定义DNS查询失败")
         NsLookupToolRecord(
             host = host,
-            dnsServers = dns,
+            dnsServers = usedDns.joinToString(" / ").ifBlank { "自定义DNS" },
             recordType = recordType.label,
-            ipv4 = if (recordType == NsLookupRecordType.AAAA) emptyList() else allIpv4,
-            ipv6 = if (recordType == NsLookupRecordType.A) emptyList() else allIpv6,
+            ipv4 = if (recordType == NsLookupRecordType.AAAA) emptyList() else ipv4,
+            ipv6 = if (recordType == NsLookupRecordType.A) emptyList() else ipv6,
             costMs = (System.currentTimeMillis() - start).coerceAtLeast(0L)
         )
     }.getOrElse { e ->
         NsLookupToolRecord(
             host = host,
-            dnsServers = dns,
+            dnsServers = listOfNotNull(
+                normalizeDnsServerInput(dns1)?.let { "DNS1 $it" },
+                normalizeDnsServerInput(dns2)?.let { "DNS2 $it" }
+            ).joinToString(" / ").ifBlank { "自定义DNS无效" },
             recordType = recordType.label,
             ipv4 = emptyList(),
             ipv6 = emptyList(),
@@ -6275,7 +6418,7 @@ private fun NsLookupToolRecord.copyText(): String {
         appendLine("NSLookup")
         appendLine("时间：$timeText")
         appendLine("目标：$host")
-        appendLine("本机DNS：$dnsServers")
+        appendLine("查询DNS：$dnsServers")
         appendLine("记录类型：$recordType")
         appendLine("耗时：${costMs}ms")
         if (error.isNotBlank()) {
@@ -6349,7 +6492,7 @@ private fun NetworkToolShortcutCard(
 ) {
     Row(
         modifier = modifier
-            .height(56.dp)
+            .height(64.dp)
             .background(Color(0xFFF8FAFC), ShapeM)
             .border(1.dp, Border.copy(alpha = 0.70f), ShapeM)
             .clickable(onClick = onClick)
@@ -6358,17 +6501,17 @@ private fun NetworkToolShortcutCard(
     ) {
         Box(
             modifier = Modifier
-                .width(34.dp)
-                .height(34.dp)
+                .width(42.dp)
+                .height(42.dp)
                 .background(bg, RoundedCornerShape(12.dp)),
             contentAlignment = Alignment.Center
         ) {
-            Icon(iconFor(mark), contentDescription = null, tint = color, modifier = Modifier.width(17.dp).height(17.dp))
+            Icon(iconFor(mark), contentDescription = null, tint = color, modifier = Modifier.width(22.dp).height(22.dp))
         }
         Spacer(Modifier.width(7.dp))
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.Center) {
-            Text(title, color = TextDark, fontWeight = FontWeight.ExtraBold, fontSize = 11.sp, lineHeight = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(subtitle, color = Muted, fontSize = 9.sp, lineHeight = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(title, color = TextDark, fontWeight = FontWeight.ExtraBold, fontSize = 18.sp, lineHeight = 21.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(subtitle, color = Muted, fontSize = 13.sp, lineHeight = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
     }
 }
@@ -6408,6 +6551,10 @@ private fun NsLookupToolPage(onBack: () -> Unit) {
     var running by remember { mutableStateOf(false) }
     var recordType by remember { mutableStateOf(NsLookupRecordType.ALL) }
     var timeoutMs by remember { mutableStateOf("1200") }
+    var dns1 by remember { mutableStateOf(DEFAULT_NS_DNS1) }
+    var dns2 by remember { mutableStateOf(DEFAULT_NS_DNS2) }
+    var dns1History by remember { mutableStateOf(store.loadNsDns(1)) }
+    var dns2History by remember { mutableStateOf(store.loadNsDns(2)) }
     var latest by remember { mutableStateOf<NsLookupToolRecord?>(null) }
     var records by remember { mutableStateOf(store.loadNsLookup()) }
     val localDns by remember { mutableStateOf(readLocalDnsServers(context.applicationContext)) }
@@ -6417,7 +6564,7 @@ private fun NsLookupToolPage(onBack: () -> Unit) {
         modifier = Modifier.fillMaxSize().padding(horizontal = 14.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        item { ToolPageHeader("解析配置", "固定显示本机 DNS，解析域名 A / AAAA 记录", onBack) }
+        item { ToolPageHeader("解析配置", "固定显示本机 DNS，使用自定义 DNS 解析 A / AAAA", onBack) }
         item {
             SoftCard {
                 ConfigLongRow(
@@ -6445,6 +6592,36 @@ private fun NsLookupToolPage(onBack: () -> Unit) {
                     }
                 )
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    ConfigColumn(label = "DNS1", modifier = Modifier.weight(1f)) {
+                        HistoryTextField(
+                            value = dns1,
+                            onValueChange = { dns1 = it.trim() },
+                            placeholder = DEFAULT_NS_DNS1,
+                            history = dns1History,
+                            onPick = { dns1 = it },
+                            onDelete = { deleted ->
+                                store.deleteNsDns(1, deleted)
+                                dns1History = store.loadNsDns(1)
+                            },
+                            leadingMark = "dns"
+                        )
+                    }
+                    ConfigColumn(label = "DNS2", modifier = Modifier.weight(1f)) {
+                        HistoryTextField(
+                            value = dns2,
+                            onValueChange = { dns2 = it.trim() },
+                            placeholder = DEFAULT_NS_DNS2,
+                            history = dns2History,
+                            onPick = { dns2 = it },
+                            onDelete = { deleted ->
+                                store.deleteNsDns(2, deleted)
+                                dns2History = store.loadNsDns(2)
+                            },
+                            leadingMark = "dns"
+                        )
+                    }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                     ConfigColumn(label = "记录类型", modifier = Modifier.weight(1f)) {
                         Row(horizontalArrangement = Arrangement.spacedBy(5.dp), modifier = Modifier.fillMaxWidth()) {
                             NsLookupRecordType.values().forEach { type ->
@@ -6467,7 +6644,12 @@ private fun NsLookupToolPage(onBack: () -> Unit) {
                         if (running) return@Button
                         running = true
                         scope.launch {
-                            val record = runNsLookupTool(context.applicationContext, host, localDns, recordType)
+                            val timeout = timeoutMs.safeInt(1200, 500, 10000)
+                            store.addNsDns(1, dns1)
+                            store.addNsDns(2, dns2)
+                            dns1History = store.loadNsDns(1)
+                            dns2History = store.loadNsDns(2)
+                            val record = runNsLookupTool(host, dns1, dns2, recordType, timeout)
                             latest = record
                             store.addNsLookup(record)
                             records = store.loadNsLookup()
@@ -6515,7 +6697,7 @@ private fun TracketToolPage(onBack: () -> Unit) {
     var host by remember { mutableStateOf("www.baidu.com") }
     var running by remember { mutableStateOf(false) }
     var ipPolicy by remember { mutableStateOf(ToolIpPolicy.IPV6_FIRST) }
-    var maxHopsText by remember { mutableStateOf("16") }
+    var maxHopsText by remember { mutableStateOf("30") }
     var timeoutMsText by remember { mutableStateOf("1200") }
     var liveHops by remember { mutableStateOf<List<String>>(emptyList()) }
     var liveTitle by remember { mutableStateOf("追踪过程") }
@@ -6553,7 +6735,7 @@ private fun TracketToolPage(onBack: () -> Unit) {
                         CleanField(
                             value = maxHopsText,
                             onValueChange = { maxHopsText = it.onlyDigits().take(2) },
-                            placeholder = "16",
+                            placeholder = "30",
                             keyboardType = KeyboardType.Number,
                             leadingMark = "chart"
                         )
@@ -6578,9 +6760,9 @@ private fun TracketToolPage(onBack: () -> Unit) {
                         if (running) return@Button
                         running = true
                         liveHops = emptyList()
-                        liveTitle = "正在追踪：第 0 / ${maxHopsText.safeInt(16, 1, 30)} 跳"
+                        liveTitle = "正在追踪：第 0 / ${maxHopsText.safeInt(30, 1, 30)} 跳"
                         scope.launch {
-                            val maxHops = maxHopsText.safeInt(16, 1, 30)
+                            val maxHops = maxHopsText.safeInt(30, 1, 30)
                             val timeout = timeoutMsText.safeInt(1200, 500, 10000)
                             val record = runTracketToolLive(
                                 context = context.applicationContext,

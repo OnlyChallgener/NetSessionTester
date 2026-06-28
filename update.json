@@ -1,15 +1,16 @@
 {
-  "versionCode": 113,
-  "versionName": "V1.1.3",
-  "title": "发现新版本 V1.1.3 build113",
+  "versionCode": 114,
+  "versionName": "V1.1.14",
+  "title": "发现新版本 V1.1.14 build114",
   "content": [
-    "NAT手动诊断支持多服务器自动顺延",
-    "测试过程中显示当前服务器和RFC测试阶段",
-    "继续收紧RFC3489/RFC5780状态机，避免NAT3误判NAT1",
-    "STUN地址不填写端口时默认使用3478",
-    "保留高频Ping、图表和日志优化"
+    "NSLookup支持DNS1/DNS2自定义解析服务器，默认223.5.5.5和2400:3200::1",
+    "自定义DNS支持IPv4/IPv6地址，DNS1/DNS2各保存最近3条并可下拉删除",
+    "本机DNS仅固定展示，不再写入NSLookup查询历史",
+    "NSLookup解析历史保留15条，点击复制，左滑删除",
+    "Tracket默认跳数调整为30，追踪历史保留15条",
+    "首页NSLookup/Tracket入口文字放大并修复遮挡"
   ],
-  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.1.3-113/NetSessionTester-V1.1.3-build113-signed.apk",
+  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.1.14-114/NetSessionTester-V1.1.14-build114-signed.apk",
   "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/latest",
   "force": false
 }

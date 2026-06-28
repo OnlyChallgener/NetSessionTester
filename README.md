@@ -20,3 +20,8 @@ APK: NetSessionTester-V1.1.3-build113-signed.apk
 ## V1.1.3 build113 hotfix
 
 同版本紧急修复：NAT 手动诊断自定义 STUN 服务器列表会持久化保存，退出 App 后不再恢复默认。
+
+
+## V1.1.14 build114
+
+发布版：NSLookup 自定义 DNS、DNS 历史、Tracket 默认 30 跳、入口小卡片遮挡修复。
