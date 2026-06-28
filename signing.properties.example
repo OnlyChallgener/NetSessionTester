@@ -1,0 +1,5 @@
+# Copy this file to signing.properties for local builds. Do NOT commit signing.properties or .jks files.
+LABPROBE_KEYSTORE_PATH=keystore/labprobe-upload.jks
+LABPROBE_KEYSTORE_PASSWORD=change_this_password
+LABPROBE_KEY_ALIAS=labprobe
+LABPROBE_KEY_PASSWORD=change_this_password
