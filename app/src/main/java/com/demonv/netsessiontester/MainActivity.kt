@@ -65,6 +65,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
@@ -5910,11 +5911,25 @@ private fun defaultNatServer(mode: ManualNatMode): String = when (mode) {
 }
 
 
+
+private enum class NsLookupRecordType(val label: String) {
+    ALL("全部"),
+    A("A"),
+    AAAA("AAAA")
+}
+
+private enum class ToolIpPolicy(val label: String) {
+    AUTO("自动"),
+    IPV6_FIRST("IPv6优先"),
+    IPV4_FIRST("IPv4优先")
+}
+
 private data class NsLookupToolRecord(
     val id: Long = System.currentTimeMillis(),
     val timeText: String = toolNowText(),
     val host: String,
     val dnsServers: String,
+    val recordType: String = NsLookupRecordType.ALL.label,
     val ipv4: List<String>,
     val ipv6: List<String>,
     val costMs: Long,
@@ -5927,6 +5942,9 @@ private data class TracketToolRecord(
     val host: String,
     val dnsServers: String,
     val targetIp: String,
+    val ipPolicy: String = ToolIpPolicy.IPV6_FIRST.label,
+    val maxHops: Int = 16,
+    val timeoutMs: Int = 1200,
     val hops: List<String>,
     val costMs: Long,
     val error: String = ""
@@ -5959,6 +5977,15 @@ private fun readLocalDnsServers(context: Context): List<String> {
     }.getOrDefault(emptyList())
 }
 
+private fun dnsTextFromSnapshot(localDns: List<String>): String = localDns.joinToString(" / ").ifBlank { "未读取到" }
+
+private fun Int.safeMs(default: Int = 1200): Int = coerceIn(500, 10000).takeIf { this > 0 } ?: default
+
+private fun String.safeInt(default: Int, min: Int, max: Int): Int {
+    val v = toIntOrNull() ?: default
+    return v.coerceIn(min, max)
+}
+
 private class NetToolHistoryStore(context: Context) {
     private val prefs = context.getSharedPreferences("net_tool_history_v1", Context.MODE_PRIVATE)
 
@@ -5973,6 +6000,7 @@ private class NetToolHistoryStore(context: Context) {
                         timeText = o.optString("timeText"),
                         host = o.optString("host"),
                         dnsServers = o.optString("dnsServers"),
+                        recordType = o.optString("recordType", NsLookupRecordType.ALL.label),
                         ipv4 = o.optJSONArray("ipv4")?.toStringList().orEmpty(),
                         ipv6 = o.optJSONArray("ipv6")?.toStringList().orEmpty(),
                         costMs = o.optLong("costMs"),
@@ -5984,7 +6012,9 @@ private class NetToolHistoryStore(context: Context) {
     }
 
     fun addNsLookup(record: NsLookupToolRecord) {
-        val next = (listOf(record) + loadNsLookup().filterNot { it.host == record.host && it.ipv4 == record.ipv4 && it.ipv6 == record.ipv6 && it.error == record.error }).take(10)
+        val next = (listOf(record) + loadNsLookup().filterNot {
+            it.host == record.host && it.recordType == record.recordType && it.ipv4 == record.ipv4 && it.ipv6 == record.ipv6 && it.error == record.error
+        }).take(15)
         prefs.edit().putString("nslookup", JSONArray().apply {
             next.forEach { r ->
                 put(JSONObject()
@@ -5992,6 +6022,7 @@ private class NetToolHistoryStore(context: Context) {
                     .put("timeText", r.timeText)
                     .put("host", r.host)
                     .put("dnsServers", r.dnsServers)
+                    .put("recordType", r.recordType)
                     .put("ipv4", JSONArray(r.ipv4))
                     .put("ipv6", JSONArray(r.ipv6))
                     .put("costMs", r.costMs)
@@ -6009,6 +6040,7 @@ private class NetToolHistoryStore(context: Context) {
                     .put("timeText", r.timeText)
                     .put("host", r.host)
                     .put("dnsServers", r.dnsServers)
+                    .put("recordType", r.recordType)
                     .put("ipv4", JSONArray(r.ipv4))
                     .put("ipv6", JSONArray(r.ipv6))
                     .put("costMs", r.costMs)
@@ -6029,6 +6061,9 @@ private class NetToolHistoryStore(context: Context) {
                         host = o.optString("host"),
                         dnsServers = o.optString("dnsServers"),
                         targetIp = o.optString("targetIp"),
+                        ipPolicy = o.optString("ipPolicy", ToolIpPolicy.IPV6_FIRST.label),
+                        maxHops = o.optInt("maxHops", 16),
+                        timeoutMs = o.optInt("timeoutMs", 1200),
                         hops = o.optJSONArray("hops")?.toStringList().orEmpty(),
                         costMs = o.optLong("costMs"),
                         error = o.optString("error")
@@ -6039,7 +6074,7 @@ private class NetToolHistoryStore(context: Context) {
     }
 
     fun addTracket(record: TracketToolRecord) {
-        val next = (listOf(record) + loadTracket().filterNot { it.host == record.host && it.hops == record.hops && it.error == record.error }).take(10)
+        val next = (listOf(record) + loadTracket().filterNot { it.host == record.host && it.hops == record.hops && it.error == record.error }).take(15)
         prefs.edit().putString("tracket", JSONArray().apply {
             next.forEach { r ->
                 put(JSONObject()
@@ -6048,6 +6083,9 @@ private class NetToolHistoryStore(context: Context) {
                     .put("host", r.host)
                     .put("dnsServers", r.dnsServers)
                     .put("targetIp", r.targetIp)
+                    .put("ipPolicy", r.ipPolicy)
+                    .put("maxHops", r.maxHops)
+                    .put("timeoutMs", r.timeoutMs)
                     .put("hops", JSONArray(r.hops))
                     .put("costMs", r.costMs)
                     .put("error", r.error))
@@ -6065,6 +6103,9 @@ private class NetToolHistoryStore(context: Context) {
                     .put("host", r.host)
                     .put("dnsServers", r.dnsServers)
                     .put("targetIp", r.targetIp)
+                    .put("ipPolicy", r.ipPolicy)
+                    .put("maxHops", r.maxHops)
+                    .put("timeoutMs", r.timeoutMs)
                     .put("hops", JSONArray(r.hops))
                     .put("costMs", r.costMs)
                     .put("error", r.error))
@@ -6077,60 +6118,110 @@ private fun JSONArray.toStringList(): List<String> = buildList {
     for (i in 0 until length()) add(optString(i))
 }
 
-private suspend fun runNsLookupTool(context: Context, input: String): NsLookupToolRecord = withContext(Dispatchers.IO) {
-    val host = cleanToolHost(input)
-    val dns = readLocalDnsServers(context).joinToString(" / ").ifBlank { "未读取到" }
-    val start = System.currentTimeMillis()
-    runCatching {
-        val addresses = InetAddress.getAllByName(host).toList().filterNot { it.isLoopbackAddress }
-        NsLookupToolRecord(
-            host = host,
-            dnsServers = dns,
-            ipv4 = addresses.filterIsInstance<Inet4Address>().mapNotNull { it.hostAddress }.distinct(),
-            ipv6 = addresses.filterIsInstance<Inet6Address>().mapNotNull { it.hostAddress?.substringBefore('%') }.distinct(),
-            costMs = (System.currentTimeMillis() - start).coerceAtLeast(0L)
-        )
-    }.getOrElse { e ->
-        NsLookupToolRecord(host = host, dnsServers = dns, ipv4 = emptyList(), ipv6 = emptyList(), costMs = (System.currentTimeMillis() - start).coerceAtLeast(0L), error = e.message ?: "解析失败")
+private fun chooseToolTargetAddress(addresses: List<InetAddress>, policy: ToolIpPolicy): InetAddress? {
+    return when (policy) {
+        ToolIpPolicy.IPV6_FIRST -> addresses.firstOrNull { it is Inet6Address } ?: addresses.firstOrNull { it is Inet4Address } ?: addresses.firstOrNull()
+        ToolIpPolicy.IPV4_FIRST -> addresses.firstOrNull { it is Inet4Address } ?: addresses.firstOrNull { it is Inet6Address } ?: addresses.firstOrNull()
+        ToolIpPolicy.AUTO -> addresses.firstOrNull { it is Inet6Address } ?: addresses.firstOrNull { it is Inet4Address } ?: addresses.firstOrNull()
     }
 }
 
-private suspend fun runTracketTool(context: Context, input: String): TracketToolRecord = withContext(Dispatchers.IO) {
+private suspend fun runNsLookupTool(
+    context: Context,
+    input: String,
+    dnsSnapshot: List<String>,
+    recordType: NsLookupRecordType
+): NsLookupToolRecord = withContext(Dispatchers.IO) {
     val host = cleanToolHost(input)
-    val dns = readLocalDnsServers(context).joinToString(" / ").ifBlank { "未读取到" }
+    val dns = dnsTextFromSnapshot(dnsSnapshot)
+    val start = System.currentTimeMillis()
+    runCatching {
+        val addresses = InetAddress.getAllByName(host).toList().filterNot { it.isLoopbackAddress }
+        val allIpv4 = addresses.filterIsInstance<Inet4Address>().mapNotNull { it.hostAddress }.distinct()
+        val allIpv6 = addresses.filterIsInstance<Inet6Address>().mapNotNull { it.hostAddress?.substringBefore('%') }.distinct()
+        NsLookupToolRecord(
+            host = host,
+            dnsServers = dns,
+            recordType = recordType.label,
+            ipv4 = if (recordType == NsLookupRecordType.AAAA) emptyList() else allIpv4,
+            ipv6 = if (recordType == NsLookupRecordType.A) emptyList() else allIpv6,
+            costMs = (System.currentTimeMillis() - start).coerceAtLeast(0L)
+        )
+    }.getOrElse { e ->
+        NsLookupToolRecord(
+            host = host,
+            dnsServers = dns,
+            recordType = recordType.label,
+            ipv4 = emptyList(),
+            ipv6 = emptyList(),
+            costMs = (System.currentTimeMillis() - start).coerceAtLeast(0L),
+            error = e.message ?: "解析失败"
+        )
+    }
+}
+
+private suspend fun runTracketToolLive(
+    context: Context,
+    input: String,
+    dnsSnapshot: List<String>,
+    policy: ToolIpPolicy,
+    maxHops: Int,
+    timeoutMs: Int,
+    onHop: suspend (String) -> Unit
+): TracketToolRecord = withContext(Dispatchers.IO) {
+    val host = cleanToolHost(input)
+    val dns = dnsTextFromSnapshot(dnsSnapshot)
     val start = System.currentTimeMillis()
     runCatching {
         val resolved = InetAddress.getAllByName(host).toList().filterNot { it.isLoopbackAddress }
-        val target = resolved.firstOrNull { it is Inet4Address } ?: resolved.firstOrNull() ?: error("无法解析目标")
+        val target = chooseToolTargetAddress(resolved, policy) ?: error("无法解析目标")
         val targetIp = target.hostAddress?.substringBefore('%') ?: host
         val ipv6 = target is Inet6Address
         val hops = mutableListOf<String>()
-        for (ttl in 1..30) {
-            val output = runPingWithTtl(host = targetIp, ttl = ttl, ipv6 = ipv6)
+        for (ttl in 1..maxHops) {
+            val output = runPingWithTtl(host = targetIp, ttl = ttl, ipv6 = ipv6, timeoutMs = timeoutMs)
             val hopIp = parseTracerouteHop(output)
             val rtt = parseTracerouteRtt(output)
             val line = when {
                 hopIp.isBlank() -> "%02d  *                超时".format(ttl)
-                rtt.isBlank() -> "%02d  %-16s".format(ttl, hopIp)
-                else -> "%02d  %-16s  %s".format(ttl, hopIp, rtt)
+                rtt.isBlank() -> "%02d  %-18s".format(ttl, hopIp)
+                else -> "%02d  %-18s  %s".format(ttl, hopIp, rtt)
             }
             hops += line
+            withContext(Dispatchers.Main) { onHop(line) }
             if (isTracerouteReached(output, targetIp)) break
         }
         TracketToolRecord(
             host = host,
             dnsServers = dns,
             targetIp = targetIp,
+            ipPolicy = policy.label,
+            maxHops = maxHops,
+            timeoutMs = timeoutMs,
             hops = hops,
             costMs = (System.currentTimeMillis() - start).coerceAtLeast(0L)
         )
     }.getOrElse { e ->
-        TracketToolRecord(host = host, dnsServers = dns, targetIp = "-", hops = emptyList(), costMs = (System.currentTimeMillis() - start).coerceAtLeast(0L), error = e.message ?: "追踪失败")
+        val msg = e.message ?: "追踪失败"
+        withContext(Dispatchers.Main) { onHop("错误：$msg") }
+        TracketToolRecord(
+            host = host,
+            dnsServers = dns,
+            targetIp = "-",
+            ipPolicy = policy.label,
+            maxHops = maxHops,
+            timeoutMs = timeoutMs,
+            hops = emptyList(),
+            costMs = (System.currentTimeMillis() - start).coerceAtLeast(0L),
+            error = msg
+        )
     }
 }
 
-private fun runPingWithTtl(host: String, ttl: Int, ipv6: Boolean): String {
-    val timeoutArgs = listOf("-c", "1", "-W", "2", "-t", ttl.toString(), host)
+private fun runPingWithTtl(host: String, ttl: Int, ipv6: Boolean, timeoutMs: Int = 1200): String {
+    val waitMs = timeoutMs.coerceIn(500, 10000)
+    val waitSeconds = ((waitMs + 999) / 1000).coerceIn(1, 10).toString()
+    val timeoutArgs = listOf("-c", "1", "-W", waitSeconds, "-t", ttl.toString(), host)
     val commands = if (ipv6) {
         listOf(
             listOf("/system/bin/ping6") + timeoutArgs,
@@ -6148,7 +6239,7 @@ private fun runPingWithTtl(host: String, ttl: Int, ipv6: Boolean): String {
         val text = runCatching {
             val process = ProcessBuilder(cmd).redirectErrorStream(true).start()
             val output = process.inputStream.bufferedReader().use { it.readText() }
-            process.waitFor(2400, TimeUnit.MILLISECONDS)
+            process.waitFor((waitMs + 800).toLong(), TimeUnit.MILLISECONDS)
             runCatching { process.destroy() }
             output
         }.getOrDefault("")
@@ -6179,6 +6270,43 @@ private fun isTracerouteReached(output: String, targetIp: String): Boolean {
     return output.contains("bytes from", ignoreCase = true) && output.contains(targetIp.substringBefore('%'), ignoreCase = true)
 }
 
+private fun NsLookupToolRecord.copyText(): String {
+    return buildString {
+        appendLine("NSLookup")
+        appendLine("时间：$timeText")
+        appendLine("目标：$host")
+        appendLine("本机DNS：$dnsServers")
+        appendLine("记录类型：$recordType")
+        appendLine("耗时：${costMs}ms")
+        if (error.isNotBlank()) {
+            appendLine("错误：$error")
+        } else {
+            appendLine("A：${ipv4.joinToString(" / ").ifBlank { "无" }}")
+            appendLine("AAAA：${ipv6.joinToString(" / ").ifBlank { "无" }}")
+        }
+    }.trim()
+}
+
+private fun TracketToolRecord.copyText(): String {
+    return buildString {
+        appendLine("Tracket 路由追踪")
+        appendLine("时间：$timeText")
+        appendLine("目标：$host")
+        appendLine("目标IP：$targetIp")
+        appendLine("本机DNS：$dnsServers")
+        appendLine("IP策略：$ipPolicy")
+        appendLine("跳数：$maxHops")
+        appendLine("超时：${timeoutMs}ms")
+        appendLine("耗时：${costMs}ms")
+        if (error.isNotBlank()) {
+            appendLine("错误：$error")
+        } else {
+            appendLine("经过IP：")
+            appendLine(hops.joinToString("\n").ifBlank { "无跳点结果" })
+        }
+    }.trim()
+}
+
 @Composable
 private fun NetworkToolShortcutRow(
     onOpenNsLookup: () -> Unit,
@@ -6190,7 +6318,7 @@ private fun NetworkToolShortcutRow(
     ) {
         NetworkToolShortcutCard(
             title = "NSLookup",
-            subtitle = "解析 + DNS",
+            subtitle = "DNS解析",
             mark = "host",
             color = Blue,
             bg = BlueSoft,
@@ -6199,7 +6327,7 @@ private fun NetworkToolShortcutRow(
         )
         NetworkToolShortcutCard(
             title = "Tracket",
-            subtitle = "IP 路由追踪",
+            subtitle = "路由追踪",
             mark = "target",
             color = Purple,
             bg = Color(0xFFF3E8FF),
@@ -6221,18 +6349,26 @@ private fun NetworkToolShortcutCard(
 ) {
     Row(
         modifier = modifier
-            .height(54.dp)
+            .height(56.dp)
             .background(Color(0xFFF8FAFC), ShapeM)
-            .border(1.dp, Border.copy(alpha = 0.72f), ShapeM)
+            .border(1.dp, Border.copy(alpha = 0.70f), ShapeM)
             .clickable(onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 7.dp),
+            .padding(horizontal = 8.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        MarkBox(mark, bg, color)
-        Spacer(Modifier.width(8.dp))
+        Box(
+            modifier = Modifier
+                .width(34.dp)
+                .height(34.dp)
+                .background(bg, RoundedCornerShape(12.dp)),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(iconFor(mark), contentDescription = null, tint = color, modifier = Modifier.width(17.dp).height(17.dp))
+        }
+        Spacer(Modifier.width(7.dp))
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.Center) {
-            Text(title, color = TextDark, fontWeight = FontWeight.Bold, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(subtitle, color = Muted, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(title, color = TextDark, fontWeight = FontWeight.ExtraBold, fontSize = 11.sp, lineHeight = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(subtitle, color = Muted, fontSize = 9.sp, lineHeight = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
     }
 }
@@ -6266,49 +6402,91 @@ private fun ToolPageHeader(title: String, subtitle: String, onBack: () -> Unit) 
 private fun NsLookupToolPage(onBack: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val clipboard = LocalClipboardManager.current
     val store = remember { NetToolHistoryStore(context.applicationContext) }
     var host by remember { mutableStateOf("www.baidu.com") }
     var running by remember { mutableStateOf(false) }
+    var recordType by remember { mutableStateOf(NsLookupRecordType.ALL) }
+    var timeoutMs by remember { mutableStateOf("1200") }
     var latest by remember { mutableStateOf<NsLookupToolRecord?>(null) }
     var records by remember { mutableStateOf(store.loadNsLookup()) }
     val localDns by remember { mutableStateOf(readLocalDnsServers(context.applicationContext)) }
+    val recentHosts = remember(records) { records.map { it.host }.distinct().take(8) }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize().padding(horizontal = 14.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        item { ToolPageHeader("NSLookup", "系统 DNS 解析 A / AAAA，并保存最近 10 条", onBack) }
+        item { ToolPageHeader("解析配置", "固定显示本机 DNS，解析域名 A / AAAA 记录", onBack) }
         item {
             SoftCard {
-                FieldLabel("本机 DNS")
-                Text(
-                    if (localDns.isEmpty()) "未读取到本机 DNS" else localDns.joinToString(" / "),
-                    color = TextDark,
-                    fontSize = 12.sp,
-                    maxLines = 1,
-                    softWrap = false,
-                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
+                ConfigLongRow(
+                    label = "目标",
+                    content = {
+                        HistoryTextField(
+                            value = host,
+                            onValueChange = { host = it },
+                            placeholder = "www.baidu.com",
+                            history = recentHosts,
+                            onPick = { host = it },
+                            onDelete = { deleted -> records = records.filterNot { it.host == deleted } },
+                            leadingMark = "host"
+                        )
+                    }
                 )
-                FieldLabel("域名")
-                CleanField(value = host, onValueChange = { host = it }, placeholder = "www.baidu.com", leadingMark = "host")
+                ConfigLongRow(
+                    label = "本机DNS",
+                    content = {
+                        ConfigInfoBox(
+                            text = if (localDns.isEmpty()) "未读取到本机 DNS" else localDns.joinToString(" / "),
+                            mark = "dns",
+                            color = Blue
+                        )
+                    }
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    ConfigColumn(label = "记录类型", modifier = Modifier.weight(1f)) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(5.dp), modifier = Modifier.fillMaxWidth()) {
+                            NsLookupRecordType.values().forEach { type ->
+                                MiniSelectPill(type.label, selected = recordType == type, modifier = Modifier.weight(1f)) { recordType = type }
+                            }
+                        }
+                    }
+                    ConfigColumn(label = "超时", modifier = Modifier.weight(1f)) {
+                        CleanField(
+                            value = timeoutMs,
+                            onValueChange = { timeoutMs = it.onlyDigits().take(5) },
+                            placeholder = "1200",
+                            keyboardType = KeyboardType.Number,
+                            leadingMark = "hourglass"
+                        )
+                    }
+                }
                 Button(
                     onClick = {
                         if (running) return@Button
                         running = true
                         scope.launch {
-                            val record = runNsLookupTool(context.applicationContext, host)
+                            val record = runNsLookupTool(context.applicationContext, host, localDns, recordType)
                             latest = record
                             store.addNsLookup(record)
                             records = store.loadNsLookup()
                             running = false
                         }
                     },
-                    modifier = Modifier.fillMaxWidth().height(40.dp),
-                    shape = ShapeM
-                ) { Text(if (running) "解析中..." else "开始解析", fontWeight = FontWeight.Bold) }
+                    modifier = Modifier.fillMaxWidth().height(48.dp),
+                    shape = RoundedCornerShape(18.dp)
+                ) { Text(if (running) "解析中..." else "开始解析", fontWeight = FontWeight.ExtraBold) }
             }
         }
-        latest?.let { item { NsLookupRecordCard(it, compact = false) } }
+        latest?.let { record ->
+            item {
+                NsLookupRecordCard(record, compact = false, onCopy = {
+                    clipboard.setText(AnnotatedString(record.copyText()))
+                    Toast.makeText(context, "已复制解析结果", Toast.LENGTH_SHORT).show()
+                })
+            }
+        }
         item { Text("解析记录", color = TextDark, fontWeight = FontWeight.Bold, fontSize = 15.sp, modifier = Modifier.padding(top = 4.dp)) }
         if (records.isEmpty()) {
             item { Text("暂无记录。", color = Muted, fontSize = 12.sp, modifier = Modifier.padding(vertical = 12.dp)) }
@@ -6318,7 +6496,10 @@ private fun NsLookupToolPage(onBack: () -> Unit) {
                     store.deleteNsLookup(record.id)
                     records = store.loadNsLookup()
                 }) {
-                    NsLookupRecordCard(record, compact = true)
+                    NsLookupRecordCard(record, compact = true, onCopy = {
+                        clipboard.setText(AnnotatedString(record.copyText()))
+                        Toast.makeText(context, "已复制解析结果", Toast.LENGTH_SHORT).show()
+                    })
                 }
             }
         }
@@ -6333,47 +6514,117 @@ private fun TracketToolPage(onBack: () -> Unit) {
     val store = remember { NetToolHistoryStore(context.applicationContext) }
     var host by remember { mutableStateOf("www.baidu.com") }
     var running by remember { mutableStateOf(false) }
-    var latest by remember { mutableStateOf<TracketToolRecord?>(null) }
+    var ipPolicy by remember { mutableStateOf(ToolIpPolicy.IPV6_FIRST) }
+    var maxHopsText by remember { mutableStateOf("16") }
+    var timeoutMsText by remember { mutableStateOf("1200") }
+    var liveHops by remember { mutableStateOf<List<String>>(emptyList()) }
+    var liveTitle by remember { mutableStateOf("追踪过程") }
     var records by remember { mutableStateOf(store.loadTracket()) }
+    var expandedIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
+    val localDns by remember { mutableStateOf(readLocalDnsServers(context.applicationContext)) }
+    val recentHosts = remember(records) { records.map { it.host }.distinct().take(8) }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize().padding(horizontal = 14.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        item { ToolPageHeader("Tracket", "通过 TTL Ping 追踪域名经过的 IP", onBack) }
+        item { ToolPageHeader("追踪配置", "逐跳追踪域名经过的 IP；结果以系统返回为准", onBack) }
         item {
             SoftCard {
-                FieldLabel("域名 / IP")
-                CleanField(value = host, onValueChange = { host = it }, placeholder = "www.baidu.com", leadingMark = "target")
-                Text("普通 Android APP 无 raw socket 权限，这里使用 ping TTL 方式做轻量追踪；部分 ROM 可能隐藏中间跳点。", color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
+                ConfigLongRow(
+                    label = "目标",
+                    content = {
+                        HistoryTextField(
+                            value = host,
+                            onValueChange = { host = it },
+                            placeholder = "www.baidu.com",
+                            history = recentHosts,
+                            onPick = { host = it },
+                            onDelete = { deleted -> records = records.filterNot { it.host == deleted } },
+                            leadingMark = "target"
+                        )
+                    }
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    ConfigColumn(label = "IP策略", modifier = Modifier.weight(1f)) {
+                        PolicyPicker(current = ipPolicy, onPick = { ipPolicy = it })
+                    }
+                    ConfigColumn(label = "跳数", modifier = Modifier.weight(1f)) {
+                        CleanField(
+                            value = maxHopsText,
+                            onValueChange = { maxHopsText = it.onlyDigits().take(2) },
+                            placeholder = "16",
+                            keyboardType = KeyboardType.Number,
+                            leadingMark = "chart"
+                        )
+                    }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    ConfigColumn(label = "超时", modifier = Modifier.weight(1f)) {
+                        CleanField(
+                            value = timeoutMsText,
+                            onValueChange = { timeoutMsText = it.onlyDigits().take(5) },
+                            placeholder = "1200",
+                            keyboardType = KeyboardType.Number,
+                            leadingMark = "hourglass"
+                        )
+                    }
+                    ConfigColumn(label = "说明", modifier = Modifier.weight(1f)) {
+                        ConfigInfoBox("显示经过IP", mark = "i", color = Blue)
+                    }
+                }
                 Button(
                     onClick = {
                         if (running) return@Button
                         running = true
+                        liveHops = emptyList()
+                        liveTitle = "正在追踪：第 0 / ${maxHopsText.safeInt(16, 1, 30)} 跳"
                         scope.launch {
-                            val record = runTracketTool(context.applicationContext, host)
-                            latest = record
+                            val maxHops = maxHopsText.safeInt(16, 1, 30)
+                            val timeout = timeoutMsText.safeInt(1200, 500, 10000)
+                            val record = runTracketToolLive(
+                                context = context.applicationContext,
+                                input = host,
+                                dnsSnapshot = localDns,
+                                policy = ipPolicy,
+                                maxHops = maxHops,
+                                timeoutMs = timeout,
+                                onHop = { line ->
+                                    liveHops = liveHops + line
+                                    liveTitle = if (line.startsWith("错误：")) "追踪失败" else "正在追踪：第 ${liveHops.size} / $maxHops 跳"
+                                }
+                            )
+                            if (record.error.isBlank()) liveTitle = "追踪完成：${record.hops.size} 跳 · ${record.costMs}ms"
                             store.addTracket(record)
                             records = store.loadTracket()
                             running = false
                         }
                     },
-                    modifier = Modifier.fillMaxWidth().height(40.dp),
-                    shape = ShapeM
-                ) { Text(if (running) "追踪中..." else "开始追踪", fontWeight = FontWeight.Bold) }
+                    modifier = Modifier.fillMaxWidth().height(48.dp),
+                    shape = RoundedCornerShape(18.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = Blue)
+                ) { Text(if (running) "追踪中..." else "开始追踪", fontWeight = FontWeight.ExtraBold) }
             }
         }
-        latest?.let { item { TracketRecordCard(it, compact = false) } }
-        item { Text("分析记录", color = TextDark, fontWeight = FontWeight.Bold, fontSize = 15.sp, modifier = Modifier.padding(top = 4.dp)) }
+        if (running || liveHops.isNotEmpty()) {
+            item { TracketLiveProcessCard(title = liveTitle, hops = liveHops) }
+        }
+        item { Text("追踪历史", color = TextDark, fontWeight = FontWeight.Bold, fontSize = 15.sp, modifier = Modifier.padding(top = 4.dp)) }
         if (records.isEmpty()) {
             item { Text("暂无记录。", color = Muted, fontSize = 12.sp, modifier = Modifier.padding(vertical = 12.dp)) }
         } else {
             items(records, key = { it.id }) { record ->
+                val expanded = expandedIds.contains(record.id)
                 SwipeDeleteToolBox(onDelete = {
                     store.deleteTracket(record.id)
                     records = store.loadTracket()
+                    expandedIds = expandedIds - record.id
                 }) {
-                    TracketRecordCard(record, compact = true)
+                    TracketRecordCard(
+                        record = record,
+                        expanded = expanded,
+                        onToggle = { expandedIds = if (expanded) expandedIds - record.id else expandedIds + record.id }
+                    )
                 }
             }
         }
@@ -6382,26 +6633,122 @@ private fun TracketToolPage(onBack: () -> Unit) {
 }
 
 @Composable
+private fun ConfigLongRow(label: String, content: @Composable () -> Unit) {
+    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, color = TextDark, fontWeight = FontWeight.Bold, fontSize = 13.sp, modifier = Modifier.width(56.dp))
+        Box(modifier = Modifier.weight(1f)) { content() }
+    }
+}
+
+@Composable
+private fun ConfigColumn(label: String, modifier: Modifier = Modifier, content: @Composable () -> Unit) {
+    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(5.dp)) {
+        FieldLabel(label)
+        content()
+    }
+}
+
+@Composable
+private fun ConfigInfoBox(text: String, mark: String, color: Color) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(52.dp)
+            .background(if (color == Blue) BlueSoft.copy(alpha = 0.62f) else Color(0xFFF8FAFC), ShapeM)
+            .border(1.dp, Border.copy(alpha = 0.78f), ShapeM)
+            .padding(horizontal = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        MarkBox(mark, color.copy(alpha = 0.10f), color)
+        Spacer(Modifier.width(8.dp))
+        Text(text, color = TextDark, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f).horizontalScroll(rememberScrollState()))
+    }
+}
+
+@Composable
+private fun MiniSelectPill(text: String, selected: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    Box(
+        modifier = modifier
+            .height(32.dp)
+            .background(if (selected) BlueSoft else Color(0xFFF8FAFC), RoundedCornerShape(12.dp))
+            .border(1.dp, if (selected) Blue.copy(alpha = 0.40f) else Border, RoundedCornerShape(12.dp))
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(text, color = if (selected) Blue else TextDark, fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+    }
+}
+
+@Composable
+private fun PolicyPicker(current: ToolIpPolicy, onPick: (ToolIpPolicy) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    Box {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(52.dp)
+                .background(Color.White, ShapeM)
+                .border(1.dp, Border.copy(alpha = 0.86f), ShapeM)
+                .clickable { open = true }
+                .padding(horizontal = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            MarkBox("wifi", BlueSoft, Blue)
+            Spacer(Modifier.width(8.dp))
+            Text(current.label, color = TextDark, fontWeight = FontWeight.Bold, fontSize = 13.sp, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text("⌄", color = Muted, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+        }
+        if (open) {
+            AlertDialog(
+                onDismissRequest = { open = false },
+                confirmButton = {},
+                title = { Text("IP策略", fontWeight = FontWeight.Bold, color = TextDark) },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        ToolIpPolicy.values().forEach { item ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(if (item == current) BlueSoft else Color(0xFFF8FAFC), ShapeM)
+                                    .clickable {
+                                        onPick(item)
+                                        open = false
+                                    }
+                                    .padding(horizontal = 12.dp, vertical = 11.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(item.label, color = if (item == current) Blue else TextDark, fontWeight = FontWeight.Bold, fontSize = 13.sp, modifier = Modifier.weight(1f))
+                                if (item == current) Icon(Icons.Filled.CheckCircle, contentDescription = null, tint = Blue, modifier = Modifier.width(16.dp).height(16.dp))
+                            }
+                        }
+                    }
+                },
+                shape = ShapeL
+            )
+        }
+    }
+}
+
+@Composable
 private fun SwipeDeleteToolBox(onDelete: () -> Unit, content: @Composable () -> Unit) {
-    val revealWidthPx = with(LocalDensity.current) { 70.dp.toPx() }
-    val thresholdPx = revealWidthPx * 0.35f
+    val revealWidthPx = with(LocalDensity.current) { 58.dp.toPx() }
+    val thresholdPx = revealWidthPx * 0.42f
     var dragOffset by remember { mutableStateOf(0f) }
-    val animatedOffset by animateFloatAsState(dragOffset, tween(180, easing = FastOutSlowInEasing), label = "toolSwipe")
+    val animatedOffset by animateFloatAsState(dragOffset, tween(190, easing = FastOutSlowInEasing), label = "toolSwipe")
     Box(modifier = Modifier.fillMaxWidth()) {
-        if (dragOffset <= -thresholdPx) {
-            Box(
-                modifier = Modifier
-                    .align(Alignment.CenterEnd)
-                    .width(64.dp)
-                    .heightIn(min = 72.dp)
-                    .background(ErrorRed, RoundedCornerShape(topEnd = 16.dp, bottomEnd = 16.dp, topStart = 8.dp, bottomStart = 8.dp))
-                    .clickable(onClick = onDelete),
-                contentAlignment = Alignment.Center
-            ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Icon(Icons.Filled.DeleteOutline, contentDescription = "删除", tint = Color.White, modifier = Modifier.width(18.dp).height(18.dp))
-                    Text("删除", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                }
+        Box(
+            modifier = Modifier
+                .align(Alignment.CenterEnd)
+                .width(52.dp)
+                .height(56.dp)
+                .background(RedSoft, RoundedCornerShape(16.dp))
+                .border(1.dp, ErrorRed.copy(alpha = 0.20f), RoundedCornerShape(16.dp))
+                .clickable(onClick = onDelete),
+            contentAlignment = Alignment.Center
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Icon(Icons.Filled.DeleteOutline, contentDescription = "删除", tint = ErrorRed, modifier = Modifier.width(17.dp).height(17.dp))
+                Text("删除", color = ErrorRed, fontSize = 9.sp, fontWeight = FontWeight.Bold)
             }
         }
         Box(
@@ -6422,42 +6769,77 @@ private fun SwipeDeleteToolBox(onDelete: () -> Unit, content: @Composable () -> 
 }
 
 @Composable
-private fun NsLookupRecordCard(record: NsLookupToolRecord, compact: Boolean) {
-    SoftCompactToolCard {
+private fun NsLookupRecordCard(record: NsLookupToolRecord, compact: Boolean, onCopy: () -> Unit) {
+    SoftCompactToolCard(modifier = Modifier.clickable(onClick = onCopy)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(record.host, color = TextDark, fontWeight = FontWeight.Bold, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+            Text(record.host, color = TextDark, fontWeight = FontWeight.ExtraBold, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
             Text("${record.costMs}ms", color = Blue, fontSize = 11.sp, fontWeight = FontWeight.Bold)
         }
-        Text(record.timeText, color = Muted, fontSize = 10.sp)
+        Text("${record.timeText} · ${record.recordType} · 点击复制", color = Muted, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
         ToolMonoLine("DNS", record.dnsServers)
         if (record.error.isNotBlank()) {
             Text("错误：${record.error}", color = ErrorRed, fontSize = 11.sp, maxLines = if (compact) 1 else 3, overflow = TextOverflow.Ellipsis)
         } else {
-            ToolMonoLine("A", record.ipv4.joinToString(" / ").ifBlank { "无" })
-            ToolMonoLine("AAAA", record.ipv6.joinToString(" / ").ifBlank { "无" })
+            if (record.recordType != NsLookupRecordType.AAAA.label) ToolMonoLine("A", record.ipv4.joinToString(" / ").ifBlank { "无" })
+            if (record.recordType != NsLookupRecordType.A.label) ToolMonoLine("AAAA", record.ipv6.joinToString(" / ").ifBlank { "无" })
         }
     }
 }
 
 @Composable
-private fun TracketRecordCard(record: TracketToolRecord, compact: Boolean) {
+private fun TracketLiveProcessCard(title: String, hops: List<String>) {
     SoftCompactToolCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(record.host, color = TextDark, fontWeight = FontWeight.Bold, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-            Text("${record.costMs}ms", color = Purple, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            Text("追踪过程", color = TextDark, fontWeight = FontWeight.ExtraBold, fontSize = 14.sp, modifier = Modifier.weight(1f))
+            Text(title.removePrefix("正在追踪："), color = Blue, fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
-        Text("${record.timeText} · ${record.targetIp}", color = Muted, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        ToolMonoLine("DNS", record.dnsServers)
+        Text(
+            hops.joinToString("\n").ifBlank { "等待第一跳返回..." },
+            color = TextDark,
+            fontSize = 11.sp,
+            lineHeight = 15.sp,
+            fontFamily = FontFamily.Monospace,
+            maxLines = 24,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
+        )
+    }
+}
+
+@Composable
+private fun TracketRecordCard(record: TracketToolRecord, expanded: Boolean, onToggle: () -> Unit) {
+    SoftCompactToolCard {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(record.host, color = TextDark, fontWeight = FontWeight.ExtraBold, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text("${record.timeText} · ${record.ipPolicy} · ${record.hops.size}/${record.maxHops}跳 · ${record.costMs}ms", color = Muted, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            IconButton(onClick = onToggle, modifier = Modifier.width(34.dp).height(34.dp)) {
+                Text(if (expanded) "⌃" else "⌄", color = Blue, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+            }
+        }
+        Text("目标IP：${record.targetIp}", color = Muted, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
         if (record.error.isNotBlank()) {
-            Text("错误：${record.error}", color = ErrorRed, fontSize = 11.sp, maxLines = if (compact) 1 else 3, overflow = TextOverflow.Ellipsis)
+            Text("错误：${record.error}", color = ErrorRed, fontSize = 11.sp, maxLines = if (expanded) 3 else 1, overflow = TextOverflow.Ellipsis)
+        } else if (expanded) {
+            SelectionContainer {
+                Text(
+                    record.copyText(),
+                    color = TextDark,
+                    fontSize = 11.sp,
+                    lineHeight = 15.sp,
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
+                )
+            }
         } else {
             Text(
-                record.hops.joinToString("\n").ifBlank { "无跳点结果" },
+                record.hops.take(3).joinToString("\n").ifBlank { "无跳点结果" },
                 color = TextDark,
                 fontSize = 11.sp,
                 lineHeight = 15.sp,
                 fontFamily = FontFamily.Monospace,
-                maxLines = if (compact) 4 else 32,
+                maxLines = 3,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
             )
@@ -6466,9 +6848,9 @@ private fun TracketRecordCard(record: TracketToolRecord, compact: Boolean) {
 }
 
 @Composable
-private fun SoftCompactToolCard(content: @Composable ColumnScope.() -> Unit) {
+private fun SoftCompactToolCard(modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) {
     Card(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = modifier.fillMaxWidth(),
         shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.98f)),
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
