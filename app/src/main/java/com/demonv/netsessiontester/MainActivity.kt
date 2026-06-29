@@ -50,6 +50,7 @@ import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -4807,9 +4808,13 @@ private fun LogsPage(
         item {
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 listOf("10", "30", "100").forEach { limit ->
-                    Box(modifier = Modifier.clickable { onHistoryLimitChange(limit) }) {
-                        StatusChip("显示 ${limit} 条", if (historyLimit == limit) BlueSoft else Color.White, if (historyLimit == limit) Blue else Muted, compact = true)
-                    }
+                    val selected = historyLimit == limit
+                    SoftChoicePill(
+                        text = "显示 ${limit} 条",
+                        selected = selected,
+                        onClick = { onHistoryLimitChange(limit) },
+                        compact = true
+                    )
                 }
             }
         }
@@ -4835,11 +4840,22 @@ private fun LogsPage(
 
 @Composable
 private fun PeriodCountChip(title: String, subtitle: String, bg: Color, fg: Color, selected: Boolean, onClick: () -> Unit) {
-    Card(
-        shape = ShapeM,
-        colors = CardDefaults.cardColors(containerColor = if (selected) bg else Color.White),
-        elevation = CardDefaults.cardElevation(defaultElevation = if (selected) 1.dp else 0.dp),
-        modifier = Modifier.width(104.dp).clickable(onClick = onClick)
+    val shape = ShapeM
+    val interactionSource = remember { MutableInteractionSource() }
+    Surface(
+        shape = shape,
+        color = if (selected) bg else Color.White,
+        tonalElevation = 0.dp,
+        shadowElevation = 0.dp,
+        border = BorderStroke(0.8.dp, if (selected) fg.copy(alpha = 0.18f) else Border.copy(alpha = 0.72f)),
+        modifier = Modifier
+            .width(104.dp)
+            .clip(shape)
+            .clickable(
+                interactionSource = interactionSource,
+                indication = null,
+                onClick = onClick
+            )
     ) {
         Column(Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
             Text(title, color = fg, fontWeight = FontWeight.Bold, fontSize = 12.sp, maxLines = 1)
@@ -5521,6 +5537,7 @@ private fun ModeSelector(mode: TestMode, onModeChange: (TestMode) -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .clip(ShapeM)
             .background(Color(0xFFF8FAFC), ShapeM)
             .padding(3.dp),
         horizontalArrangement = Arrangement.spacedBy(3.dp)
@@ -5528,11 +5545,17 @@ private fun ModeSelector(mode: TestMode, onModeChange: (TestMode) -> Unit) {
         val modes = listOf(TestMode.IPV4_ONLY, TestMode.IPV6_ONLY, TestMode.IPV4_THEN_IPV6)
         modes.forEach { item ->
             val selected = mode == item
+            val interactionSource = remember(item) { MutableInteractionSource() }
             Box(
                 modifier = Modifier
                     .weight(1f)
+                    .clip(ShapeM)
                     .background(if (selected) Color.White else Color.Transparent, ShapeM)
-                    .clickable { onModeChange(item) }
+                    .clickable(
+                        interactionSource = interactionSource,
+                        indication = null,
+                        onClick = { onModeChange(item) }
+                    )
                     .padding(vertical = 10.dp),
                 contentAlignment = Alignment.Center
             ) {
@@ -5596,14 +5619,12 @@ private fun ChartModeSelector(chartMode: ChartMode, onChartModeChange: (ChartMod
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
         ChartMode.entries.forEach { mode ->
             val selected = chartMode == mode
-            Box(
-                modifier = Modifier
-                    .background(if (selected) Color(0xFFEBDCFD) else Color.White, ShapeM)
-                    .clickable { onChartModeChange(mode) }
-                    .padding(horizontal = 12.dp, vertical = 7.dp)
-            ) {
-                Text(mode.label, color = if (selected) TextDark else Muted, fontWeight = FontWeight.Bold, fontSize = 12.sp)
-            }
+            SoftChoicePill(
+                text = mode.label,
+                selected = selected,
+                onClick = { onChartModeChange(mode) },
+                compact = true
+            )
         }
     }
 }
@@ -5945,11 +5966,22 @@ private fun NatDiagnosticDialog(
 
 @Composable
 private fun NatModeChip(label: String, selected: Boolean, modifier: Modifier, onClick: () -> Unit) {
-    Card(
-        shape = ShapeM,
-        colors = CardDefaults.cardColors(containerColor = if (selected) BlueSoft else Color.White),
-        elevation = CardDefaults.cardElevation(defaultElevation = if (selected) 1.dp else 0.dp),
-        modifier = modifier.height(44.dp).clickable(onClick = onClick)
+    val shape = ShapeM
+    val interactionSource = remember { MutableInteractionSource() }
+    Surface(
+        shape = shape,
+        color = if (selected) BlueSoft else Color.White,
+        tonalElevation = 0.dp,
+        shadowElevation = 0.dp,
+        border = BorderStroke(0.8.dp, if (selected) Blue.copy(alpha = 0.18f) else Border.copy(alpha = 0.72f)),
+        modifier = modifier
+            .height(44.dp)
+            .clip(shape)
+            .clickable(
+                interactionSource = interactionSource,
+                indication = null,
+                onClick = onClick
+            )
     ) {
         Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
             Text(label, color = if (selected) Blue else TextDark, fontWeight = FontWeight.Bold, fontSize = 13.sp)
@@ -6633,13 +6665,19 @@ private fun NetworkToolShortcutCard(
     onClick: () -> Unit
 ) {
     Surface(
-        modifier = modifier.heightIn(min = 58.dp),
+        modifier = modifier
+            .heightIn(min = 58.dp)
+            .clip(ShapeM)
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onClick
+            ),
         shape = ShapeM,
         color = Color(0xFFF8FAFC),
         border = BorderStroke(1.dp, Border.copy(alpha = 0.46f)),
         tonalElevation = 0.dp,
-        shadowElevation = 0.dp,
-        onClick = onClick
+        shadowElevation = 0.dp
     ) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
@@ -6661,14 +6699,22 @@ private fun ToolPageHeader(title: String, subtitle: String, onBack: () -> Unit) 
         modifier = Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 6.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
+        val backShape = RoundedCornerShape(14.dp)
         Surface(
-            modifier = Modifier.width(36.dp).height(36.dp),
-            shape = RoundedCornerShape(14.dp),
+            modifier = Modifier
+                .width(36.dp)
+                .height(36.dp)
+                .clip(backShape)
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = onBack
+                ),
+            shape = backShape,
             color = Color.White,
             border = BorderStroke(1.dp, Border),
             tonalElevation = 0.dp,
-            shadowElevation = 0.dp,
-            onClick = onBack
+            shadowElevation = 0.dp
         ) {
             Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
                 Text("‹", color = TextDark, fontWeight = FontWeight.Bold, fontSize = 28.sp)
@@ -6975,8 +7021,7 @@ private enum class MtuProbeMode(val label: String) {
     COMPREHENSIVE("综合"),
     ICMP("ICMP"),
     TCP("TCP"),
-    PLPMTUD("PLPMTUD"),
-    LOCAL("本地")
+    PMTU("PMTU")
 }
 
 private data class MtuStep(val mtu: Int, val success: Boolean, val detail: String)
@@ -7130,8 +7175,8 @@ private suspend fun runTcpBusinessMtuProbe(
     MtuTcpProbe(ok, host, port, cleanAddress, if (ipv6) "IPv6" else "IPv4", cost, estimatedMss, estimatedMtu, detail)
 }
 
-private fun appLayerPlpmtudNote(): String {
-    return "应用层 PLPMTUD 需要测试节点配合回包确认，适合 UDP/QUIC/RTC。当前版本先预留结果位，不把公共网站误判为应用层 MTU。"
+private fun pmtuModeNote(ipv6: Boolean): String {
+    return if (ipv6) "PMTU增强：IPv6 使用大包探测，依赖路径 Packet Too Big 语义；若系统 ping/网络策略限制，结果会降级参考。" else "PMTU增强：IPv4 优先使用 DF 禁止分片语义探测；若系统 ping 不支持 -M do，会显示降级或失败原因。"
 }
 
 private fun runMtuPing(address: String, ipv6: Boolean, mtu: Int, timeoutMs: Int, mode: MtuProbeMode): Pair<Boolean, String> {
@@ -7159,9 +7204,10 @@ private fun runMtuPing(address: String, ipv6: Boolean, mtu: Int, timeoutMs: Int,
         )
     }
     val commands = when (mode) {
-        MtuProbeMode.ICMP -> pmtuCommands
+        MtuProbeMode.ICMP -> fastCommands
+        MtuProbeMode.PMTU -> pmtuCommands
         MtuProbeMode.COMPREHENSIVE -> pmtuCommands + fastCommands
-        MtuProbeMode.TCP, MtuProbeMode.LOCAL, MtuProbeMode.PLPMTUD -> pmtuCommands
+        MtuProbeMode.TCP -> pmtuCommands
     }
     var last = ""
     var unsupported = false
@@ -7223,9 +7269,6 @@ private suspend fun runMtuProbeLive(
     val host = cleanToolHost(hostInput)
     val local = readLocalInterfaceMtu(context)
     val checkLines = mutableListOf<MtuCheckLine>()
-    if (probeMode == MtuProbeMode.COMPREHENSIVE || probeMode == MtuProbeMode.LOCAL) {
-        checkLines += MtuCheckLine("本地MTU", local.first?.toString() ?: "未读取到", local.second, local.first != null)
-    }
 
     val needTcp = probeMode == MtuProbeMode.COMPREHENSIVE || probeMode == MtuProbeMode.TCP
     val tcpProbe = if (needTcp) runTcpBusinessMtuProbe(context, host, policy, timeoutMs) else null
@@ -7235,41 +7278,6 @@ private suspend fun runMtuProbeLive(
             if (tcp.connected) "MSS≈${tcp.mss ?: "-"} / MTU≈${tcp.mtu ?: "-"}" else "连接失败",
             tcp.detail,
             tcp.connected
-        )
-    }
-
-    if (probeMode == MtuProbeMode.COMPREHENSIVE || probeMode == MtuProbeMode.PLPMTUD) {
-        val note = appLayerPlpmtudNote()
-        checkLines += MtuCheckLine("应用层PLPMTUD", "预留", note, true)
-        if (probeMode == MtuProbeMode.PLPMTUD) {
-            return@withContext MtuResult(
-                target = host,
-                address = "-",
-                protocol = policy.label,
-                method = probeMode.label,
-                mtu = null,
-                steps = emptyList(),
-                analysis = "应用层 PLPMTUD 需要专用 UDP/QUIC Echo 测试节点。当前版本先避免把公共网站误判为真实应用层 MTU。",
-                localMtu = local.first,
-                localDetail = local.second,
-                appLayerDetail = note,
-                checkLines = checkLines
-            )
-        }
-    }
-
-    if (probeMode == MtuProbeMode.LOCAL) {
-        return@withContext MtuResult(
-            target = host,
-            address = "-",
-            protocol = "本地接口",
-            method = probeMode.label,
-            mtu = local.first,
-            steps = emptyList(),
-            analysis = "本地 MTU 只代表手机当前网卡/链路上限，不能代表跨公网到目标服务器的真实路径 MTU。",
-            localMtu = local.first,
-            localDetail = local.second,
-            checkLines = checkLines
         )
     }
 
@@ -7306,7 +7314,7 @@ private suspend fun runMtuProbeLive(
         tcpMss = tcpProbe?.mss,
         tcpMtu = tcpProbe?.mtu,
         tcpDetail = tcpProbe?.detail.orEmpty(),
-        appLayerDetail = if (probeMode == MtuProbeMode.COMPREHENSIVE) appLayerPlpmtudNote() else "",
+        appLayerDetail = "",
         checkLines = checkLines
     )
     val ipv6 = address is Inet6Address
@@ -7318,7 +7326,8 @@ private suspend fun runMtuProbeLive(
     val steps = mutableListOf<MtuStep>()
     while (low <= high && currentCoroutineContext().isActive) {
         val mid = (low + high) / 2
-        val (ok, detail) = runMtuPing(address.hostAddress?.substringBefore('%') ?: host, ipv6, mid, timeoutMs, MtuProbeMode.ICMP)
+        val pingMode = if (probeMode == MtuProbeMode.ICMP) MtuProbeMode.ICMP else MtuProbeMode.PMTU
+        val (ok, detail) = runMtuPing(address.hostAddress?.substringBefore('%') ?: host, ipv6, mid, timeoutMs, pingMode)
         val step = MtuStep(mid, ok, detail.ifBlank { if (ok) "成功" else "失败/超时" })
         steps += step
         withContext(Dispatchers.Main) { onStep(step) }
@@ -7329,7 +7338,11 @@ private suspend fun runMtuProbeLive(
             high = mid - 1
         }
     }
-    checkLines += MtuCheckLine("ICMP路径", best?.let { "MTU≈$it" } ?: "未得到", analyzeMtu(best, ipv6), best != null)
+    val pathName = if (probeMode == MtuProbeMode.PMTU) "PMTU路径" else "ICMP路径"
+    checkLines += MtuCheckLine(pathName, best?.let { "MTU≈$it" } ?: "未得到", analyzeMtu(best, ipv6), best != null)
+    if (probeMode == MtuProbeMode.PMTU || probeMode == MtuProbeMode.COMPREHENSIVE) {
+        checkLines += MtuCheckLine("PMTU说明", if (best != null) "已尝试" else "受限", pmtuModeNote(ipv6), best != null)
+    }
     MtuResult(
         target = host,
         address = address.hostAddress?.substringBefore('%') ?: "-",
@@ -7343,7 +7356,7 @@ private suspend fun runMtuProbeLive(
         tcpMss = tcpProbe?.mss,
         tcpMtu = tcpProbe?.mtu,
         tcpDetail = tcpProbe?.detail.orEmpty(),
-        appLayerDetail = if (probeMode == MtuProbeMode.COMPREHENSIVE) appLayerPlpmtudNote() else "",
+        appLayerDetail = "",
         checkLines = checkLines
     )
 }
@@ -7587,7 +7600,7 @@ private fun MtuToolPage(onBack: () -> Unit) {
     var result by remember { mutableStateOf<MtuResult?>(null) }
 
     LazyColumn(modifier = Modifier.fillMaxSize().padding(horizontal = 14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        item { ToolPageHeader("MTU检测", "本地MTU / ICMP路径 / TCP业务 / PLPMTUD 四合一分析", onBack) }
+        item { ToolPageHeader("MTU检测", "综合 / ICMP / TCP / PMTU 路径分析", onBack) }
         item {
             SoftCard {
                 ConfigLongRow("目标") { CleanField(host, { host = it }, "www.qq.com", leadingMark = "host") }
@@ -7606,7 +7619,7 @@ private fun MtuToolPage(onBack: () -> Unit) {
                         }
                     }
                 }
-                Text("综合模式会同时给出本地网卡 MTU、ICMP 路径估测、TCP 业务 MSS 估算和应用层 PLPMTUD 预留说明。TCP 精确 MSS 后续可接 NDK TCP_MAXSEG；应用层 PLPMTUD 需要专用测试节点。", color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
+                Text("综合模式会同时给出 PMTU 增强探测、ICMP 路径估测和 TCP 业务 MSS/MTU 估算。TCP 精确 MSS 后续可接 NDK TCP_MAXSEG。", color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
                 Button(
                     onClick = {
                         if (running) return@Button
@@ -7639,7 +7652,7 @@ private fun MtuProcessCard(running: Boolean, steps: List<MtuStep>, result: MtuRe
             Text(if (running) "运行中" else "完成", color = if (running) Blue else Muted, fontSize = 11.sp, fontWeight = FontWeight.Bold)
         }
         if (steps.isEmpty()) {
-            Text("等待开始。综合模式会显示本地 MTU、TCP 业务、ICMP 路径和应用层 PLPMTUD 说明；IPv6 模式会自动解析 AAAA。", color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
+            Text("等待开始。综合模式会显示 PMTU 增强、ICMP 路径和 TCP 业务检测；IPv6 模式会自动解析 AAAA。", color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
         } else {
             Text(steps.joinToString("\n") { "尝试 ${it.mtu}：${if (it.success) "成功" else "失败"} ${it.detail}" }, color = TextDark, fontSize = 11.sp, lineHeight = 15.sp, fontFamily = FontFamily.Monospace, maxLines = 18, overflow = TextOverflow.Ellipsis, modifier = Modifier.horizontalScroll(rememberScrollState()))
         }
@@ -7671,7 +7684,6 @@ private fun MtuProcessCard(running: Boolean, steps: List<MtuStep>, result: MtuRe
                 ToolMonoLine("结果", r.mtu?.let { "有效 MTU ≈ $it" } ?: "未得到")
             }
             if (r.tcpDetail.isNotBlank()) Text("TCP：${r.tcpDetail}", color = Muted, fontSize = 10.sp, lineHeight = 14.sp)
-            if (r.appLayerDetail.isNotBlank()) Text("PLPMTUD：${r.appLayerDetail}", color = Muted, fontSize = 10.sp, lineHeight = 14.sp)
             if (r.error.isNotBlank()) Text("错误：${r.error}", color = ErrorRed, fontSize = 11.sp)
             Text("综合分析：${r.analysis}", color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
         }
@@ -8040,14 +8052,14 @@ private fun RoamingPingCanvas(plot: List<RoamingSample>, baseIndex: Int, onSelec
     Canvas(
         modifier = Modifier
             .fillMaxWidth()
-            .height(168.dp)
+            .height(184.dp)
             .clip(ShapeM)
             .background(Color.White, ShapeM)
             .pointerInput(plot.size) {
                 detectTapGestures { pos ->
                     if (plot.size <= 1) return@detectTapGestures
-                    val left = 50f
-                    val right = size.width - 16f
+                    val left = 64f
+                    val right = size.width - 24f
                     val ratio = ((pos.x - left) / (right - left).coerceAtLeast(1f)).coerceIn(0f, 1f)
                     val idx = (ratio * (plot.size - 1)).roundToInt().coerceIn(0, plot.lastIndex)
                     onSelect(baseIndex + idx)
@@ -8055,27 +8067,31 @@ private fun RoamingPingCanvas(plot: List<RoamingSample>, baseIndex: Int, onSelec
             }
     ) {
         if (plot.isEmpty()) return@Canvas
-        val left = 50f
-        val top = 18f
-        val right = size.width - 16f
-        val bottom = size.height - 34f
+        val left = 64f
+        val top = 28f
+        val right = size.width - 24f
+        val bottom = size.height - 48f
         val w = (right - left).coerceAtLeast(1f)
         val h = (bottom - top).coerceAtLeast(1f)
-        val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = AndroidColor.rgb(107, 114, 128); textSize = 26f }
+        val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = AndroidColor.rgb(107, 114, 128); textSize = 27f }
         val values = plot.flatMap { listOfNotNull(it.gatewayMs, it.externalMs) }
         val axisMax = roamingPingAxisMax(values)
         val yTicks = listOf(0, axisMax / 4, axisMax / 2, axisMax * 3 / 4, axisMax).distinct()
         yTicks.forEach { tick ->
             val yy = bottom - (tick / axisMax.toFloat()) * h
             drawLine(Border.copy(alpha = 0.72f), Offset(left, yy), Offset(right, yy), strokeWidth = 1f)
-            drawContext.canvas.nativeCanvas.drawText(tick.toString(), 6f, yy + 8f, textPaint)
+            textPaint.textAlign = Paint.Align.RIGHT
+            drawContext.canvas.nativeCanvas.drawText(tick.toString(), left - 10f, yy + 9f, textPaint)
+            textPaint.textAlign = Paint.Align.LEFT
         }
         val xTicks = roamingXTicks(plot.size)
         xTicks.forEach { idx ->
             val xx = left + (idx / (plot.size - 1).coerceAtLeast(1).toFloat()) * w
             drawLine(Border.copy(alpha = 0.45f), Offset(xx, top), Offset(xx, bottom), strokeWidth = 1f)
             val label = roamingTimeLabel(plot[idx].elapsedSec)
-            drawContext.canvas.nativeCanvas.drawText(label, (xx - 16f).coerceIn(6f, right - 46f), size.height - 9f, textPaint)
+            val labelWidth = textPaint.measureText(label)
+            val tx = (xx - labelWidth / 2f).coerceIn(left, right - labelWidth)
+            drawContext.canvas.nativeCanvas.drawText(label, tx, size.height - 18f, textPaint)
         }
         fun x(i: Int) = left + (i / (plot.size - 1).coerceAtLeast(1).toFloat()) * w
         fun y(v: Int?) = bottom - ((v ?: 0).coerceIn(0, axisMax) / axisMax.toFloat()) * h
@@ -8111,14 +8127,14 @@ private fun RoamingSignalCanvas(plot: List<RoamingSample>, baseIndex: Int, onSel
     Canvas(
         modifier = Modifier
             .fillMaxWidth()
-            .height(168.dp)
+            .height(184.dp)
             .clip(ShapeM)
             .background(Color.White, ShapeM)
             .pointerInput(plot.size) {
                 detectTapGestures { pos ->
                     if (plot.size <= 1) return@detectTapGestures
-                    val left = 50f
-                    val right = size.width - 16f
+                    val left = 64f
+                    val right = size.width - 24f
                     val ratio = ((pos.x - left) / (right - left).coerceAtLeast(1f)).coerceIn(0f, 1f)
                     val idx = (ratio * (plot.size - 1)).roundToInt().coerceIn(0, plot.lastIndex)
                     onSelect(baseIndex + idx)
@@ -8126,13 +8142,13 @@ private fun RoamingSignalCanvas(plot: List<RoamingSample>, baseIndex: Int, onSel
             }
     ) {
         if (plot.isEmpty()) return@Canvas
-        val left = 50f
-        val top = 18f
-        val right = size.width - 16f
-        val bottom = size.height - 34f
+        val left = 64f
+        val top = 28f
+        val right = size.width - 24f
+        val bottom = size.height - 48f
         val w = (right - left).coerceAtLeast(1f)
         val h = (bottom - top).coerceAtLeast(1f)
-        val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = AndroidColor.rgb(107, 114, 128); textSize = 26f }
+        val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = AndroidColor.rgb(107, 114, 128); textSize = 27f }
         val yTicks = listOf(-90, -75, -60, -45, -30)
         fun yRssi(v: Int?): Float {
             val value = (v ?: -90).coerceIn(-90, -30)
@@ -8141,14 +8157,18 @@ private fun RoamingSignalCanvas(plot: List<RoamingSample>, baseIndex: Int, onSel
         yTicks.forEach { tick ->
             val yy = yRssi(tick)
             drawLine(Border.copy(alpha = 0.72f), Offset(left, yy), Offset(right, yy), strokeWidth = 1f)
-            drawContext.canvas.nativeCanvas.drawText(tick.toString(), 6f, yy + 8f, textPaint)
+            textPaint.textAlign = Paint.Align.RIGHT
+            drawContext.canvas.nativeCanvas.drawText(tick.toString(), left - 10f, yy + 9f, textPaint)
+            textPaint.textAlign = Paint.Align.LEFT
         }
         val xTicks = roamingXTicks(plot.size)
         xTicks.forEach { idx ->
             val xx = left + (idx / (plot.size - 1).coerceAtLeast(1).toFloat()) * w
             drawLine(Border.copy(alpha = 0.45f), Offset(xx, top), Offset(xx, bottom), strokeWidth = 1f)
             val label = roamingTimeLabel(plot[idx].elapsedSec)
-            drawContext.canvas.nativeCanvas.drawText(label, (xx - 16f).coerceIn(6f, right - 46f), size.height - 9f, textPaint)
+            val labelWidth = textPaint.measureText(label)
+            val tx = (xx - labelWidth / 2f).coerceIn(left, right - labelWidth)
+            drawContext.canvas.nativeCanvas.drawText(label, tx, size.height - 18f, textPaint)
         }
         fun x(i: Int) = left + (i / (plot.size - 1).coerceAtLeast(1).toFloat()) * w
         val path = Path()
@@ -8257,14 +8277,21 @@ private fun ConfigInfoBox(text: String, mark: String, color: Color) {
 
 @Composable
 private fun MiniSelectPill(text: String, selected: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    val pillShape = RoundedCornerShape(12.dp)
     Surface(
-        modifier = modifier.height(32.dp),
-        shape = RoundedCornerShape(12.dp),
+        modifier = modifier
+            .height(32.dp)
+            .clip(pillShape)
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onClick
+            ),
+        shape = pillShape,
         color = if (selected) BlueSoft else Color(0xFFF8FAFC),
         border = BorderStroke(1.dp, if (selected) Blue.copy(alpha = 0.40f) else Border),
         tonalElevation = 0.dp,
-        shadowElevation = 0.dp,
-        onClick = onClick
+        shadowElevation = 0.dp
     ) {
         Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
             Text(text, color = if (selected) Blue else TextDark, fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1)
@@ -8589,12 +8616,18 @@ private fun InfoMetricTile(
     }
     if (onClick != null) {
         Surface(
-            modifier = modifier.heightIn(min = 58.dp),
+            modifier = modifier
+                .heightIn(min = 58.dp)
+                .clip(ShapeM)
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = onClick
+                ),
             shape = ShapeM,
             color = Color(0xFFF8FAFC),
             tonalElevation = 0.dp,
-            shadowElevation = 0.dp,
-            onClick = onClick
+            shadowElevation = 0.dp
         ) { TileContent() }
     } else {
         Surface(
@@ -9111,6 +9144,44 @@ private fun DetailItem(icon: androidx.compose.ui.graphics.vector.ImageVector, la
 
 
 @Composable
+private fun SoftChoicePill(
+    text: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    compact: Boolean = false
+) {
+    val shape = RoundedCornerShape(if (compact) 14.dp else 18.dp)
+    val interactionSource = remember { MutableInteractionSource() }
+    val bg = if (selected) Color(0xFFEBDCFD) else Color.White
+    val fg = if (selected) TextDark else Muted
+    Surface(
+        shape = shape,
+        color = bg,
+        tonalElevation = 0.dp,
+        shadowElevation = 0.dp,
+        border = BorderStroke(0.8.dp, if (selected) Blue.copy(alpha = 0.16f) else Border.copy(alpha = 0.66f)),
+        modifier = modifier
+            .clip(shape)
+            .clickable(
+                interactionSource = interactionSource,
+                indication = null,
+                onClick = onClick
+            )
+    ) {
+        Box(
+            modifier = Modifier.padding(
+                horizontal = if (compact) 10.dp else 12.dp,
+                vertical = if (compact) 6.dp else 8.dp
+            ),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(text, color = fg, fontWeight = FontWeight.Bold, fontSize = if (compact) 11.sp else 12.sp, maxLines = 1)
+        }
+    }
+}
+
+@Composable
 private fun StatusChip(text: String, bg: Color, fg: Color, compact: Boolean = false) {
     Box(
         modifier = Modifier
@@ -9209,12 +9280,19 @@ private fun BottomNav(selectedTab: MainTab, onSelect: (MainTab) -> Unit) {
                 MainTab.TEST -> Icons.Filled.PlayArrow
                 MainTab.LOGS -> Icons.Filled.Article
             }
+            val shape = RoundedCornerShape(24.dp)
+            val interactionSource = remember(tab) { MutableInteractionSource() }
             Column(
                 modifier = Modifier
                     .weight(1f)
                     .height(50.dp)
-                    .background(if (selected) Color(0xFFEBDCFD) else Color.Transparent, RoundedCornerShape(24.dp))
-                    .clickable { onSelect(tab) }
+                    .clip(shape)
+                    .background(if (selected) Color(0xFFEBDCFD) else Color.Transparent, shape)
+                    .clickable(
+                        interactionSource = interactionSource,
+                        indication = null,
+                        onClick = { onSelect(tab) }
+                    )
                     .padding(top = 5.dp, bottom = 4.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Center

@@ -1,16 +1,13 @@
 {
-  "versionCode": 115,
+  "versionCode": 121,
   "versionName": "V1.1.14",
-  "title": "发现新版本 V1.1.14 build115",
+  "title": "自测版本 V1.1.14 build121",
   "content": [
-    "NSLookup支持DNS1/DNS2自定义解析服务器，默认223.5.5.5和2400:3200::1",
-    "自定义DNS支持IPv4/IPv6地址，DNS1/DNS2各保存最近3条并可下拉删除",
-    "本机DNS仅固定展示，不再写入NSLookup查询历史",
-    "NSLookup解析历史保留15条，点击复制，左滑删除",
-    "Tracket默认跳数调整为30，追踪历史保留15条",
-    "首页NSLookup/Tracket入口统一为网络信息卡片字号与尺寸"
+    "修复底部设置/测试/历史导航按钮的方形点击阴影",
+    "修复测试页 IPv4/IPv6、增长曲线/峰值切换按钮的方形点击扩散",
+    "修复历史页今天/昨天/本周、10/30/100条筛选按钮的方形点击扩散"
   ],
-  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.1.14-115/NetSessionTester-V1.1.14-build115-signed.apk",
-  "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/latest",
+  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.1.14-121/NetSessionTester-V1.1.14-build121-signed.apk",
+  "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/tag/v1.1.14-121",
   "force": false
 }
