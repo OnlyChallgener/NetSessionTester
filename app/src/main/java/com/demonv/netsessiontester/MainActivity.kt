@@ -6,6 +6,7 @@ import android.Manifest
 import android.content.ContentValues
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
+import android.net.wifi.WifiManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -142,6 +143,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.zIndex
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
@@ -212,7 +215,9 @@ private enum class MainTab(val label: String, val mark: String) {
 private enum class AppToolPage {
     NONE,
     NSLOOKUP,
-    TRACKET
+    TRACKET,
+    MTU,
+    ROAMING
 }
 
 private enum class ChartMode(val label: String) {
@@ -3372,6 +3377,8 @@ private fun NetSessionTesterApp() {
             } else when (appToolPage) {
                 AppToolPage.NSLOOKUP -> NsLookupToolPage(onBack = { appToolPage = AppToolPage.NONE })
                 AppToolPage.TRACKET -> TracketToolPage(onBack = { appToolPage = AppToolPage.NONE })
+                AppToolPage.MTU -> MtuToolPage(onBack = { appToolPage = AppToolPage.NONE })
+                AppToolPage.ROAMING -> RoamingToolPage(onBack = { appToolPage = AppToolPage.NONE })
                 AppToolPage.NONE -> when (selectedTab) {
                 MainTab.SETTINGS -> SettingsPage(
                     host = host,
@@ -3396,6 +3403,8 @@ private fun NetSessionTesterApp() {
                     onOpenNatDiagnostics = { showNatDiagnosticDialog = true },
                     onOpenNsLookup = { appToolPage = AppToolPage.NSLOOKUP },
                     onOpenTracket = { appToolPage = AppToolPage.TRACKET },
+                    onOpenMtu = { appToolPage = AppToolPage.MTU },
+                    onOpenRoaming = { appToolPage = AppToolPage.ROAMING },
                     maskPrivacy = maskPrivacy,
                     onMaskPrivacyChange = { maskPrivacy = it },
                     onResolve = {
@@ -4184,11 +4193,12 @@ private fun ReorderableCardItem(
     Box(
         modifier = modifier
             .zIndex(if (isDragging) 20f else 0f)
+            .shadow(elevation.dp, ShapeL, clip = false)
+            .clip(ShapeL)
             .graphicsLayer {
                 translationY = if (isDragging) dragOffsetY else 0f
                 scaleX = scale
                 scaleY = scale
-                shadowElevation = elevation
             }
             .pointerInput(id, order) {
                 detectDragGesturesAfterLongPress(
@@ -4254,6 +4264,8 @@ private fun SettingsPage(
     onOpenNatDiagnostics: () -> Unit,
     onOpenNsLookup: () -> Unit,
     onOpenTracket: () -> Unit,
+    onOpenMtu: () -> Unit,
+    onOpenRoaming: () -> Unit,
     maskPrivacy: Boolean,
     onMaskPrivacyChange: (Boolean) -> Unit,
     onResolve: () -> Unit,
@@ -4340,7 +4352,9 @@ private fun SettingsPage(
                         onCopyPublicIpv6 = onCopyPublicIpv6,
                         onOpenNatDiagnostics = onOpenNatDiagnostics,
                         onOpenNsLookup = onOpenNsLookup,
-                        onOpenTracket = onOpenTracket
+                        onOpenTracket = onOpenTracket,
+                        onOpenMtu = onOpenMtu,
+                        onOpenRoaming = onOpenRoaming
                     )
                     "session" -> SoftCard {
                         SectionTitle("≡", "会话参数", Green)
@@ -5977,6 +5991,11 @@ private enum class NsLookupRecordType(val label: String) {
     AAAA("AAAA")
 }
 
+private enum class NsLookupMode(val label: String) {
+    LOCAL("本机DNS"),
+    CUSTOM("自定义DNS")
+}
+
 private const val DEFAULT_NS_DNS1 = "223.5.5.5"
 private const val DEFAULT_NS_DNS2 = "2400:3200::1"
 
@@ -6299,14 +6318,21 @@ private fun queryDnsAddressWithFallback(
     var lastError: Throwable? = null
     for ((label, server) in candidates) {
         val result = runCatching { queryDnsAddressByServer(host, server, qType, timeoutMs) }
-        if (result.isSuccess) return DnsToolQueryResult(result.getOrDefault(emptyList()), server, label)
-        lastError = result.exceptionOrNull()
+        if (result.isSuccess) {
+            val answers = result.getOrDefault(emptyList())
+            if (answers.isNotEmpty()) return DnsToolQueryResult(answers, server, label)
+            lastError = IllegalStateException("$label 无记录")
+        } else {
+            lastError = result.exceptionOrNull()
+        }
     }
-    error(lastError?.message ?: "自定义DNS查询失败")
+    return DnsToolQueryResult(emptyList(), candidates.first().second, candidates.first().first)
 }
 
 private suspend fun runNsLookupTool(
+    context: Context,
     input: String,
+    mode: NsLookupMode,
     dns1: String,
     dns2: String,
     recordType: NsLookupRecordType,
@@ -6315,6 +6341,31 @@ private suspend fun runNsLookupTool(
     val host = cleanToolHost(input)
     val timeout = timeoutMs.coerceIn(500, 10000)
     val start = System.currentTimeMillis()
+    if (mode == NsLookupMode.LOCAL) {
+        return@withContext runCatching {
+            val addresses = InetAddress.getAllByName(host).toList()
+            val ipv4 = addresses.filterIsInstance<Inet4Address>().mapNotNull { it.hostAddress }.distinct()
+            val ipv6 = addresses.filterIsInstance<Inet6Address>().mapNotNull { it.hostAddress?.substringBefore('%') }.distinct()
+            NsLookupToolRecord(
+                host = host,
+                dnsServers = "本机DNS",
+                recordType = recordType.label,
+                ipv4 = if (recordType == NsLookupRecordType.AAAA) emptyList() else ipv4,
+                ipv6 = if (recordType == NsLookupRecordType.A) emptyList() else ipv6,
+                costMs = (System.currentTimeMillis() - start).coerceAtLeast(0L)
+            )
+        }.getOrElse { e ->
+            NsLookupToolRecord(
+                host = host,
+                dnsServers = "本机DNS",
+                recordType = recordType.label,
+                ipv4 = emptyList(),
+                ipv6 = emptyList(),
+                costMs = (System.currentTimeMillis() - start).coerceAtLeast(0L),
+                error = e.message ?: "本机DNS解析失败"
+            )
+        }
+    }
     runCatching {
         val usedDns = linkedSetOf<String>()
         var ipv4 = emptyList<String>()
@@ -6512,30 +6563,51 @@ private fun TracketToolRecord.copyText(): String {
 @Composable
 private fun NetworkToolShortcutRow(
     onOpenNsLookup: () -> Unit,
-    onOpenTracket: () -> Unit
+    onOpenTracket: () -> Unit,
+    onOpenMtu: () -> Unit,
+    onOpenRoaming: () -> Unit
 ) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        NetworkToolShortcutCard(
-            title = "NSLookup",
-            subtitle = "DNS解析",
-            mark = "host",
-            color = Blue,
-            bg = BlueSoft,
-            modifier = Modifier.weight(1f),
-            onClick = onOpenNsLookup
-        )
-        NetworkToolShortcutCard(
-            title = "Tracket",
-            subtitle = "路由追踪",
-            mark = "target",
-            color = Purple,
-            bg = Color(0xFFF3E8FF),
-            modifier = Modifier.weight(1f),
-            onClick = onOpenTracket
-        )
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            NetworkToolShortcutCard(
+                title = "NSLookup",
+                subtitle = "DNS解析",
+                mark = "host",
+                color = Blue,
+                bg = BlueSoft,
+                modifier = Modifier.weight(1f),
+                onClick = onOpenNsLookup
+            )
+            NetworkToolShortcutCard(
+                title = "Tracket",
+                subtitle = "路由追踪",
+                mark = "target",
+                color = Purple,
+                bg = Color(0xFFF3E8FF),
+                modifier = Modifier.weight(1f),
+                onClick = onOpenTracket
+            )
+        }
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            NetworkToolShortcutCard(
+                title = "MTU检测",
+                subtitle = "路径MTU",
+                mark = "tune",
+                color = Orange,
+                bg = Color(0xFFFFF3E0),
+                modifier = Modifier.weight(1f),
+                onClick = onOpenMtu
+            )
+            NetworkToolShortcutCard(
+                title = "漫游测试",
+                subtitle = "WiFi漫游",
+                mark = "wifi",
+                color = Green,
+                bg = GreenSoft,
+                modifier = Modifier.weight(1f),
+                onClick = onOpenRoaming
+            )
+        }
     }
 }
 
@@ -6553,6 +6625,7 @@ private fun NetworkToolShortcutCard(
         verticalAlignment = Alignment.CenterVertically,
         modifier = modifier
             .heightIn(min = 58.dp)
+            .clip(ShapeM)
             .background(Color(0xFFF8FAFC), ShapeM)
             .clickable(onClick = onClick)
             .padding(9.dp)
@@ -6560,21 +6633,8 @@ private fun NetworkToolShortcutCard(
         MarkBox(mark, bg, color)
         Spacer(Modifier.width(8.dp))
         Column(Modifier.weight(1f)) {
-            Text(
-                title,
-                color = Muted,
-                fontSize = 11.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-            Text(
-                subtitle,
-                color = TextDark,
-                fontWeight = FontWeight.Bold,
-                fontSize = 14.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
+            Text(title, color = Muted, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(subtitle, color = TextDark, fontWeight = FontWeight.Bold, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
     }
 }
@@ -6614,6 +6674,7 @@ private fun NsLookupToolPage(onBack: () -> Unit) {
     var running by remember { mutableStateOf(false) }
     var recordType by remember { mutableStateOf(NsLookupRecordType.ALL) }
     var timeoutMs by remember { mutableStateOf("1200") }
+    var lookupMode by remember { mutableStateOf(NsLookupMode.LOCAL) }
     var dns1 by remember { mutableStateOf(DEFAULT_NS_DNS1) }
     var dns2 by remember { mutableStateOf(DEFAULT_NS_DNS2) }
     var dns1History by remember { mutableStateOf(store.loadNsDns(1)) }
@@ -6627,7 +6688,7 @@ private fun NsLookupToolPage(onBack: () -> Unit) {
         modifier = Modifier.fillMaxSize().padding(horizontal = 14.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        item { ToolPageHeader("解析配置", "固定显示本机 DNS，使用自定义 DNS 解析 A / AAAA", onBack) }
+        item { ToolPageHeader("解析配置", "可切换本机 DNS / 自定义 DNS 解析 A / AAAA", onBack) }
         item {
             SoftCard {
                 ConfigLongRow(
@@ -6654,6 +6715,17 @@ private fun NsLookupToolPage(onBack: () -> Unit) {
                         )
                     }
                 )
+                ConfigLongRow(
+                    label = "解析方式",
+                    content = {
+                        Row(horizontalArrangement = Arrangement.spacedBy(7.dp), modifier = Modifier.fillMaxWidth()) {
+                            NsLookupMode.values().forEach { mode ->
+                                MiniSelectPill(mode.label, selected = lookupMode == mode, modifier = Modifier.weight(1f)) { lookupMode = mode }
+                            }
+                        }
+                    }
+                )
+                if (lookupMode == NsLookupMode.CUSTOM) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                     ConfigColumn(label = "DNS1", modifier = Modifier.weight(1f)) {
                         HistoryTextField(
@@ -6684,6 +6756,7 @@ private fun NsLookupToolPage(onBack: () -> Unit) {
                         )
                     }
                 }
+                }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                     ConfigColumn(label = "记录类型", modifier = Modifier.weight(1f)) {
                         Row(horizontalArrangement = Arrangement.spacedBy(5.dp), modifier = Modifier.fillMaxWidth()) {
@@ -6708,11 +6781,13 @@ private fun NsLookupToolPage(onBack: () -> Unit) {
                         running = true
                         scope.launch {
                             val timeout = timeoutMs.safeInt(1200, 500, 10000)
-                            store.addNsDns(1, dns1)
-                            store.addNsDns(2, dns2)
-                            dns1History = store.loadNsDns(1)
-                            dns2History = store.loadNsDns(2)
-                            val record = runNsLookupTool(host, dns1, dns2, recordType, timeout)
+                            if (lookupMode == NsLookupMode.CUSTOM) {
+                                store.addNsDns(1, dns1)
+                                store.addNsDns(2, dns2)
+                                dns1History = store.loadNsDns(1)
+                                dns2History = store.loadNsDns(2)
+                            }
+                            val record = runNsLookupTool(context.applicationContext, host, lookupMode, dns1, dns2, recordType, timeout)
                             latest = record
                             store.addNsLookup(record)
                             records = store.loadNsLookup()
@@ -6874,6 +6949,375 @@ private fun TracketToolPage(onBack: () -> Unit) {
             }
         }
         item { Spacer(Modifier.height(18.dp)) }
+    }
+}
+
+
+private data class MtuStep(val mtu: Int, val success: Boolean, val detail: String)
+private data class MtuResult(
+    val target: String,
+    val address: String,
+    val protocol: String,
+    val mtu: Int?,
+    val steps: List<MtuStep>,
+    val analysis: String,
+    val error: String = ""
+)
+
+private data class RoamingSample(
+    val timeText: String,
+    val rssi: Int?,
+    val linkSpeed: Int?,
+    val bssid: String,
+    val gatewayMs: Int?,
+    val externalMs: Int?,
+    val loss: Boolean
+)
+
+private enum class RoamingTargetMode(val label: String) {
+    GATEWAY_AND_EXTERNAL("路由器+外网"),
+    GATEWAY("仅路由器"),
+    EXTERNAL("仅外网")
+}
+
+private suspend fun resolveMtuAddress(hostInput: String, policy: ToolIpPolicy): Pair<InetAddress?, String?> = withContext(Dispatchers.IO) {
+    val host = cleanToolHost(hostInput)
+    runCatching {
+        val addresses = InetAddress.getAllByName(host).filterNot { it.isLoopbackAddress }
+        val selected = chooseToolTargetAddress(addresses, policy)
+        selected to null
+    }.getOrElse { null to (it.message ?: "解析失败") }
+}
+
+private fun runMtuPing(address: String, ipv6: Boolean, mtu: Int, timeoutMs: Int): Pair<Boolean, String> {
+    val waitSec = ((timeoutMs.coerceIn(500, 10000) + 999) / 1000).coerceIn(1, 10).toString()
+    val payload = if (ipv6) (mtu - 48).coerceAtLeast(0) else (mtu - 28).coerceAtLeast(0)
+    val commands = if (ipv6) {
+        listOf(
+            listOf("/system/bin/ping6", "-c", "1", "-W", waitSec, "-s", payload.toString(), address),
+            listOf("ping6", "-c", "1", "-W", waitSec, "-s", payload.toString(), address),
+            listOf("/system/bin/ping", "-6", "-c", "1", "-W", waitSec, "-s", payload.toString(), address),
+            listOf("ping", "-6", "-c", "1", "-W", waitSec, "-s", payload.toString(), address)
+        )
+    } else {
+        listOf(
+            listOf("/system/bin/ping", "-M", "do", "-c", "1", "-W", waitSec, "-s", payload.toString(), address),
+            listOf("ping", "-M", "do", "-c", "1", "-W", waitSec, "-s", payload.toString(), address),
+            listOf("/system/bin/ping", "-c", "1", "-W", waitSec, "-s", payload.toString(), address),
+            listOf("ping", "-c", "1", "-W", waitSec, "-s", payload.toString(), address)
+        )
+    }
+    var last = ""
+    for (cmd in commands) {
+        val result = runCatching {
+            val process = ProcessBuilder(cmd).redirectErrorStream(true).start()
+            val finished = process.waitFor((timeoutMs + 900).toLong(), TimeUnit.MILLISECONDS)
+            if (!finished) process.destroyForcibly()
+            process.inputStream.bufferedReader().use { it.readText() }
+        }.getOrDefault("")
+        if (result.isBlank()) continue
+        last = result
+        val lower = result.lowercase(Locale.getDefault())
+        if (lower.contains("invalid option") || lower.contains("usage:")) continue
+        val ok = lower.contains("bytes from") || lower.contains("1 received") || lower.contains("1 packets received") || lower.contains("0% packet loss")
+        return ok to result.lineSequence().firstOrNull { it.contains("time") || it.contains("too big", true) || it.contains("frag", true) }?.take(80).orEmpty()
+    }
+    return false to last.lineSequence().firstOrNull()?.take(80).orEmpty().ifBlank { "无响应" }
+}
+
+private fun analyzeMtu(mtu: Int?, ipv6: Boolean): String {
+    if (mtu == null) return "未得到有效 MTU。可能目标不可达、系统 ping 能力受限，或当前网络拦截 ICMP。"
+    return when {
+        ipv6 && mtu < 1280 -> "低于 IPv6 最小链路 MTU 1280，结果不可靠，可能是系统命令或目标响应限制。"
+        mtu >= 1498 -> "接近标准以太网 1500，路径 MTU 表现正常。"
+        mtu in 1488..1497 -> "接近 PPPoE 常见 1492，可能经过宽带拨号或运营商封装链路。"
+        mtu in 1390..1460 -> "明显低于 1500，常见于 VPN、隧道、移动网络或中间链路封装。"
+        mtu in 1280..1389 -> "MTU 偏低，IPv6 保底可用但可能存在隧道、VPN 或链路质量问题。"
+        else -> "MTU 偏低，建议结合外网下载、丢包和延迟继续判断。"
+    }
+}
+
+private suspend fun runMtuProbeLive(
+    hostInput: String,
+    policy: ToolIpPolicy,
+    minMtuInput: Int,
+    maxMtuInput: Int,
+    timeoutMs: Int,
+    onStep: suspend (MtuStep) -> Unit
+): MtuResult = withContext(Dispatchers.IO) {
+    val host = cleanToolHost(hostInput)
+    val startResolve = resolveMtuAddress(host, policy)
+    val address = startResolve.first ?: return@withContext MtuResult(host, "-", policy.label, null, emptyList(), analyzeMtu(null, false), startResolve.second ?: "解析失败")
+    val ipv6 = address is Inet6Address
+    val minMtu = (if (ipv6) minMtuInput.coerceAtLeast(1280) else minMtuInput).coerceIn(576, 9000)
+    val maxMtu = maxMtuInput.coerceAtLeast(minMtu).coerceIn(minMtu, 9000)
+    var low = minMtu
+    var high = maxMtu
+    var best: Int? = null
+    val steps = mutableListOf<MtuStep>()
+    while (low <= high && currentCoroutineContext().isActive) {
+        val mid = (low + high) / 2
+        val (ok, detail) = runMtuPing(address.hostAddress?.substringBefore('%') ?: host, ipv6, mid, timeoutMs)
+        val step = MtuStep(mid, ok, detail.ifBlank { if (ok) "成功" else "失败/超时" })
+        steps += step
+        withContext(Dispatchers.Main) { onStep(step) }
+        if (ok) {
+            best = mid
+            low = mid + 1
+        } else {
+            high = mid - 1
+        }
+    }
+    MtuResult(
+        target = host,
+        address = address.hostAddress?.substringBefore('%') ?: "-",
+        protocol = if (ipv6) "IPv6" else "IPv4",
+        mtu = best,
+        steps = steps,
+        analysis = analyzeMtu(best, ipv6)
+    )
+}
+
+private fun intToIpv4(value: Int): String {
+    return listOf(value and 0xff, value shr 8 and 0xff, value shr 16 and 0xff, value shr 24 and 0xff).joinToString(".")
+}
+
+private fun readWifiSnapshot(context: Context): Triple<Int?, Int?, String> {
+    return runCatching {
+        val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+        val info = wifi.connectionInfo
+        val rssi = info?.rssi?.takeIf { it in -120..0 }
+        val speed = info?.linkSpeed?.takeIf { it > 0 }
+        val bssid = info?.bssid?.takeIf { it.isNotBlank() && it != "02:00:00:00:00:00" } ?: "未知"
+        Triple(rssi, speed, bssid)
+    }.getOrDefault(Triple(null, null, "未知"))
+}
+
+private fun readGatewayAddress(context: Context): String {
+    return runCatching {
+        val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+        val gateway = wifi.dhcpInfo?.gateway ?: 0
+        if (gateway == 0) "192.168.1.1" else intToIpv4(gateway)
+    }.getOrDefault("192.168.1.1")
+}
+
+private suspend fun pingForRoaming(target: String, timeoutMs: Int): Int? {
+    val resolved = resolvePingTarget(target, PingProtocolMode.AUTO)
+    if (resolved.error != null) return null
+    return icmpPingResolved(resolved.address, timeoutMs, resolved.protocol).latencyMs
+}
+
+@Composable
+private fun MtuToolPage(onBack: () -> Unit) {
+    val scope = rememberCoroutineScope()
+    var host by remember { mutableStateOf("www.baidu.com") }
+    var policy by remember { mutableStateOf(ToolIpPolicy.AUTO) }
+    var minMtu by remember { mutableStateOf("1280") }
+    var maxMtu by remember { mutableStateOf("1500") }
+    var timeoutMs by remember { mutableStateOf("1200") }
+    var running by remember { mutableStateOf(false) }
+    var steps by remember { mutableStateOf<List<MtuStep>>(emptyList()) }
+    var result by remember { mutableStateOf<MtuResult?>(null) }
+
+    LazyColumn(modifier = Modifier.fillMaxSize().padding(horizontal = 14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        item { ToolPageHeader("MTU检测", "二分法估测 IPv4 / IPv6 路径 MTU，IPv6 会优先使用 AAAA", onBack) }
+        item {
+            SoftCard {
+                ConfigLongRow("目标") { CleanField(host, { host = it }, "www.baidu.com", leadingMark = "host") }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    ConfigColumn("IP策略", Modifier.weight(1f)) { PolicyPicker(policy) { policy = it } }
+                    ConfigColumn("超时", Modifier.weight(1f)) { CleanField(timeoutMs, { timeoutMs = it.onlyDigits().take(5) }, "1200", keyboardType = KeyboardType.Number, leadingMark = "hourglass") }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    ConfigColumn("最小MTU", Modifier.weight(1f)) { CleanField(minMtu, { minMtu = it.onlyDigits().take(4) }, "1280", keyboardType = KeyboardType.Number, leadingMark = "tune") }
+                    ConfigColumn("最大MTU", Modifier.weight(1f)) { CleanField(maxMtu, { maxMtu = it.onlyDigits().take(4) }, "1500", keyboardType = KeyboardType.Number, leadingMark = "tune") }
+                }
+                Button(
+                    onClick = {
+                        if (running) return@Button
+                        running = true
+                        steps = emptyList()
+                        result = null
+                        scope.launch {
+                            val r = runMtuProbeLive(host, policy, minMtu.safeInt(1280, 576, 9000), maxMtu.safeInt(1500, 576, 9000), timeoutMs.safeInt(1200, 500, 10000)) { step ->
+                                steps = steps + step
+                            }
+                            result = r
+                            running = false
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth().height(48.dp),
+                    shape = RoundedCornerShape(18.dp)
+                ) { Text(if (running) "检测中..." else "开始检测", fontWeight = FontWeight.ExtraBold) }
+            }
+        }
+        item { MtuProcessCard(running, steps, result) }
+        item { Spacer(Modifier.height(16.dp)) }
+    }
+}
+
+@Composable
+private fun MtuProcessCard(running: Boolean, steps: List<MtuStep>, result: MtuResult?) {
+    SoftCompactToolCard {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("检测过程", color = TextDark, fontWeight = FontWeight.ExtraBold, fontSize = 14.sp, modifier = Modifier.weight(1f))
+            Text(if (running) "运行中" else "完成", color = if (running) Blue else Muted, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+        }
+        if (steps.isEmpty()) {
+            Text("等待开始。IPv6 模式会自动解析 AAAA；普通 Android 受 ping 命令能力影响，结果为路径 MTU 估测。", color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
+        } else {
+            Text(steps.joinToString("\n") { "尝试 ${it.mtu}：${if (it.success) "成功" else "失败"} ${it.detail}" }, color = TextDark, fontSize = 11.sp, lineHeight = 15.sp, fontFamily = FontFamily.Monospace, maxLines = 18, overflow = TextOverflow.Ellipsis, modifier = Modifier.horizontalScroll(rememberScrollState()))
+        }
+        result?.let { r ->
+            HorizontalDivider(color = Border)
+            ToolMonoLine("目标", r.target)
+            ToolMonoLine("地址", r.address)
+            ToolMonoLine("协议", r.protocol)
+            ToolMonoLine("结果", r.mtu?.let { "有效 MTU ≈ $it" } ?: "未得到")
+            if (r.error.isNotBlank()) Text("错误：${r.error}", color = ErrorRed, fontSize = 11.sp)
+            Text("分析：${r.analysis}", color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
+        }
+    }
+}
+
+@Composable
+private fun RoamingToolPage(onBack: () -> Unit) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var targetMode by remember { mutableStateOf(RoamingTargetMode.GATEWAY_AND_EXTERNAL) }
+    var externalTarget by remember { mutableStateOf("www.baidu.com") }
+    var intervalMs by remember { mutableStateOf("1000") }
+    var timeoutMs by remember { mutableStateOf("1000") }
+    var running by remember { mutableStateOf(false) }
+    var job by remember { mutableStateOf<Job?>(null) }
+    var samples by remember { mutableStateOf<List<RoamingSample>>(emptyList()) }
+    val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { }
+
+    fun stop() {
+        job?.cancel()
+        job = null
+        running = false
+    }
+
+    LazyColumn(modifier = Modifier.fillMaxSize().padding(horizontal = 14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        item { ToolPageHeader("漫游测试", "记录 RSSI、延迟、丢包、协商速率和 BSSID 切换", onBack) }
+        item {
+            SoftCard {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    ConfigColumn("目标", Modifier.weight(1f)) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(5.dp), modifier = Modifier.fillMaxWidth()) {
+                            RoamingTargetMode.values().forEach { m -> MiniSelectPill(m.label, targetMode == m, Modifier.weight(1f)) { targetMode = m } }
+                        }
+                    }
+                }
+                ConfigLongRow("外网") { CleanField(externalTarget, { externalTarget = it }, "www.baidu.com", leadingMark = "host") }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    ConfigColumn("采样ms", Modifier.weight(1f)) { CleanField(intervalMs, { intervalMs = it.onlyDigits().take(5) }, "1000", keyboardType = KeyboardType.Number, leadingMark = "time") }
+                    ConfigColumn("超时", Modifier.weight(1f)) { CleanField(timeoutMs, { timeoutMs = it.onlyDigits().take(5) }, "1000", keyboardType = KeyboardType.Number, leadingMark = "hourglass") }
+                }
+                OutlinedButton(
+                    onClick = {
+                        val perms = buildList {
+                            add(Manifest.permission.ACCESS_FINE_LOCATION)
+                            if (Build.VERSION.SDK_INT >= 33) add(Manifest.permission.NEARBY_WIFI_DEVICES)
+                        }.toTypedArray()
+                        permissionLauncher.launch(perms)
+                    },
+                    modifier = Modifier.fillMaxWidth().height(40.dp),
+                    shape = ShapeM
+                ) { Text("授权 WiFi / 定位信息（用于 BSSID、RSSI）", fontSize = 12.sp) }
+                Button(
+                    onClick = {
+                        if (running) {
+                            stop()
+                        } else {
+                            samples = emptyList()
+                            running = true
+                            val intv = intervalMs.safeInt(1000, 300, 10000).toLong()
+                            val timeout = timeoutMs.safeInt(1000, 300, 10000)
+                            job = scope.launch {
+                                while (currentCoroutineContext().isActive) {
+                                    val gateway = readGatewayAddress(context.applicationContext)
+                                    val wifi = readWifiSnapshot(context.applicationContext)
+                                    val gwMs = if (targetMode != RoamingTargetMode.EXTERNAL) pingForRoaming(gateway, timeout) else null
+                                    val extMs = if (targetMode != RoamingTargetMode.GATEWAY) pingForRoaming(externalTarget, timeout) else null
+                                    val sample = RoamingSample(
+                                        timeText = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date()),
+                                        rssi = wifi.first,
+                                        linkSpeed = wifi.second,
+                                        bssid = wifi.third,
+                                        gatewayMs = gwMs,
+                                        externalMs = extMs,
+                                        loss = (targetMode != RoamingTargetMode.EXTERNAL && gwMs == null) || (targetMode != RoamingTargetMode.GATEWAY && extMs == null)
+                                    )
+                                    samples = (samples + sample).takeLast(300)
+                                    delay(intv)
+                                }
+                            }
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth().height(48.dp),
+                    shape = RoundedCornerShape(18.dp)
+                ) { Text(if (running) "停止测试" else "开始测试", fontWeight = FontWeight.ExtraBold) }
+            }
+        }
+        item { RoamingLiveCard(samples, running) }
+        item { Spacer(Modifier.height(16.dp)) }
+    }
+}
+
+@Composable
+private fun RoamingLiveCard(samples: List<RoamingSample>, running: Boolean) {
+    val latest = samples.lastOrNull()
+    val lossCount = samples.count { it.loss }
+    val roamCount = samples.zipWithNext().count { it.first.bssid != it.second.bssid && it.first.bssid != "未知" && it.second.bssid != "未知" }
+    SoftCompactToolCard {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("实时结果", color = TextDark, fontWeight = FontWeight.ExtraBold, fontSize = 14.sp, modifier = Modifier.weight(1f))
+            Text(if (running) "运行中" else "停止", color = if (running) Blue else Muted, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+            MiniMetric("RSSI", latest?.rssi?.let { "$it dBm" } ?: "—", Blue, Modifier.weight(1f))
+            MiniMetric("速率", latest?.linkSpeed?.let { "$it Mbps" } ?: "—", Green, Modifier.weight(1f))
+            MiniMetric("丢包", if (samples.isEmpty()) "—" else "$lossCount", if (lossCount > 0) ErrorRed else Muted, Modifier.weight(1f))
+            MiniMetric("漫游", roamCount.toString(), Purple, Modifier.weight(1f))
+        }
+        ToolMonoLine("BSSID", latest?.bssid ?: "—")
+        ToolMonoLine("网关", latest?.gatewayMs?.let { "${it}ms" } ?: "—")
+        ToolMonoLine("外网", latest?.externalMs?.let { "${it}ms" } ?: "—")
+        RoamingMiniChart(samples)
+        Text("说明：漫游判断以 BSSID 切换为准；GPS/室内位置受系统权限和设备能力影响，第一版仅记录 WiFi 指标。", color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
+    }
+}
+
+@Composable
+private fun RoamingMiniChart(samples: List<RoamingSample>) {
+    Canvas(modifier = Modifier.fillMaxWidth().height(138.dp).background(Color(0xFFF8FAFC), ShapeM).padding(8.dp)) {
+        if (samples.size < 2) return@Canvas
+        val plot = samples.takeLast(90)
+        val w = size.width
+        val h = size.height
+        fun x(i: Int): Float = if (plot.size <= 1) 0f else (i.toFloat() / (plot.size - 1).coerceAtLeast(1)) * w
+        fun yLatency(v: Int?): Float {
+            val value = (v ?: 0).coerceIn(0, 300)
+            return h - (value / 300f) * h
+        }
+        fun yRssi(v: Int?): Float {
+            val value = (v ?: -95).coerceIn(-95, -35)
+            return h - ((value + 95) / 60f) * h
+        }
+        val p1 = Path()
+        plot.forEachIndexed { i, s -> if (i == 0) p1.moveTo(x(i), yLatency(s.externalMs ?: s.gatewayMs)) else p1.lineTo(x(i), yLatency(s.externalMs ?: s.gatewayMs)) }
+        drawPath(p1, Blue, style = Stroke(width = 3f, cap = StrokeCap.Round))
+        val p2 = Path()
+        plot.forEachIndexed { i, s -> if (i == 0) p2.moveTo(x(i), yRssi(s.rssi)) else p2.lineTo(x(i), yRssi(s.rssi)) }
+        drawPath(p2, Green, style = Stroke(width = 3f, cap = StrokeCap.Round))
+        plot.zipWithNext().forEachIndexed { i, pair ->
+            if (pair.first.bssid != pair.second.bssid && pair.first.bssid != "未知" && pair.second.bssid != "未知") {
+                val xx = x(i + 1)
+                drawLine(Orange, Offset(xx, 0f), Offset(xx, h), strokeWidth = 2f)
+            }
+        }
     }
 }
 
@@ -7133,7 +7577,9 @@ private fun NetworkEnvironmentSettingsCard(
     onCopyPublicIpv6: () -> Unit,
     onOpenNatDiagnostics: () -> Unit,
     onOpenNsLookup: () -> Unit,
-    onOpenTracket: () -> Unit
+    onOpenTracket: () -> Unit,
+    onOpenMtu: () -> Unit,
+    onOpenRoaming: () -> Unit
 ) {
     var expanded by remember { mutableStateOf(true) }
     SoftCard {
@@ -7154,10 +7600,10 @@ private fun NetworkEnvironmentSettingsCard(
                 InfoMetricTile("✓", "IPv6", ipv6Text, GreenSoft, Green, Modifier.weight(1f), onClick = onCopyPublicIpv6)
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                InfoMetricTile("N", "NAT", probeInfo.natType, Color(0xFFFFE4E6), ErrorRed, Modifier.weight(1f))
+                InfoMetricTile("N", "NAT", probeInfo.natType, Color(0xFFFFE4E6), ErrorRed, Modifier.weight(1f), onClick = onOpenNatDiagnostics)
                 InfoMetricTile("C", "运营商", probeInfo.carrier, Color(0xFFF3E8FF), Purple, Modifier.weight(1f))
             }
-            NetworkToolShortcutRow(onOpenNsLookup = onOpenNsLookup, onOpenTracket = onOpenTracket)
+            NetworkToolShortcutRow(onOpenNsLookup = onOpenNsLookup, onOpenTracket = onOpenTracket, onOpenMtu = onOpenMtu, onOpenRoaming = onOpenRoaming)
             Text("NAT类型需手动诊断；网络信息只做轻量展示。", color = Muted, fontSize = 11.sp, modifier = Modifier.fillMaxWidth(), maxLines = 1, overflow = TextOverflow.Ellipsis)
             return@SoftCard
         }
@@ -7173,7 +7619,7 @@ private fun NetworkEnvironmentSettingsCard(
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
             val mapped = if (publicIpResult.ipv4.isUsableIpText() && probeInfo.portText != "不可用" && probeInfo.portText != "待检测") "${publicIpResult.ipv4}:${probeInfo.portText}" else probeInfo.portText
             InfoMetricTile("M", "公网映射", if (maskPrivacy) maskIpText(mapped) else mapped, Color(0xFFE0F2FE), Blue, Modifier.weight(1f))
-            InfoMetricTile("N", "NAT类型", probeInfo.natType, Color(0xFFFFE4E6), ErrorRed, Modifier.weight(1f))
+            InfoMetricTile("N", "NAT类型", probeInfo.natType, Color(0xFFFFE4E6), ErrorRed, Modifier.weight(1f), onClick = onOpenNatDiagnostics)
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
             InfoMetricTile("↕", "优先级", probeInfo.priority, Color(0xFFFFF3E0), Orange, Modifier.weight(1f))
@@ -7187,7 +7633,7 @@ private fun NetworkEnvironmentSettingsCard(
             InfoMetricTile("C", "NAT置信度", probeInfo.confidence, Color(0xFFF8FAFC), Muted, Modifier.weight(1f))
             InfoMetricTile("C", "运营商", probeInfo.carrier, Color(0xFFF3E8FF), Purple, Modifier.weight(1f))
         }
-        NetworkToolShortcutRow(onOpenNsLookup = onOpenNsLookup, onOpenTracket = onOpenTracket)
+        NetworkToolShortcutRow(onOpenNsLookup = onOpenNsLookup, onOpenTracket = onOpenTracket, onOpenMtu = onOpenMtu, onOpenRoaming = onOpenRoaming)
         Text(
             probeInfo.diagnosis,
             color = if (probeInfo.proxyNotice.isNotBlank()) Purple else Muted,
@@ -7219,6 +7665,7 @@ private fun InfoMetricTile(
         verticalAlignment = Alignment.CenterVertically,
         modifier = modifier
             .heightIn(min = 58.dp)
+            .clip(ShapeM)
             .background(Color(0xFFF8FAFC), ShapeM)
             .then(clickableModifier)
             .padding(9.dp)
@@ -7757,7 +8204,9 @@ private fun StatusChip(text: String, bg: Color, fg: Color, compact: Boolean = fa
 private fun iconFor(mark: String) = when (mark) {
     "◎", "target" -> Icons.Filled.Assessment
     "∿", "ping" -> Icons.Filled.SignalCellularAlt
-    "≡", "mode" -> Icons.Filled.Tune
+    "≡", "mode", "tune", "dns" -> Icons.Filled.Tune
+    "wifi" -> Icons.Filled.SignalCellularAlt
+    "hourglass" -> Icons.Filled.History
     "□", "log" -> Icons.Filled.Article
     "▮" -> Icons.Filled.SignalCellularAlt
     "!" -> Icons.Filled.WarningAmber
