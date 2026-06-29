@@ -112,3 +112,7 @@
 - 修复漫游测试 Ping表/信号表 X/Y 轴数字被圆角区域遮挡：增加 Canvas 高度、安全边距，X 轴按文字宽度居中并自动避让。
 - MTU 检测去掉 PLPMTUD、本地，模式改为 综合 / ICMP / TCP / PMTU。
 - 常用网络信息入口卡片、NAT 卡片、返回按钮、模式小按钮改为无方形 ripple/阴影扩散。
+
+## V1.1.15 build122 compile hotfix
+- 修复 MainActivity.kt 1174 行 Regex 非法转义导致的 Kotlin 编译失败。
+- 漫游测试 WiFi 事件区文案改为“网络事件 / 能力变化 / 链路变化”，并显示具体含义。

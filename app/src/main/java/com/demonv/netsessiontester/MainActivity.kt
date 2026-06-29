@@ -1171,7 +1171,7 @@ private fun syncPingLatencyMs(address: String, timeoutMs: Int): Int? {
             return@runCatching null
         }
         val output = process.inputStream.bufferedReader().use { it.readText() }
-        Regex("time[=<]([0-9.]+)\s*ms")
+        Regex("""time[=<]([0-9.]+)\s*ms""")
             .find(output)
             ?.groupValues
             ?.getOrNull(1)
@@ -7784,25 +7784,34 @@ private fun RoamingToolPage(onBack: () -> Unit) {
             val cm = context.getSystemService(ConnectivityManager::class.java)
             val callback = object : ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: Network) {
-                    scope.launch { appendNetworkEvent("网络可用") }
+                    scope.launch { appendNetworkEvent("网络事件：默认网络可用") }
                 }
 
                 override fun onLost(network: Network) {
-                    scope.launch { appendNetworkEvent("网络丢失/切换") }
+                    scope.launch { appendNetworkEvent("网络事件：网络丢失/可能切换") }
                 }
 
                 override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
-                    val label = when {
-                        networkCapabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "WiFi能力变化"
-                        networkCapabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "切到蜂窝网络"
-                        else -> "网络能力变化"
+                    val transport = when {
+                        networkCapabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "WiFi"
+                        networkCapabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "蜂窝"
+                        networkCapabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN) -> "VPN"
+                        networkCapabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "以太网"
+                        else -> "未知网络"
                     }
-                    scope.launch { appendNetworkEvent(label) }
+                    val internet = if (networkCapabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) "有Internet" else "无Internet"
+                    val validated = if (networkCapabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) "已验证" else "未验证"
+                    val metered = if (networkCapabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)) "非计费" else "可能计费"
+                    val vpn = if (networkCapabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) " · VPN" else ""
+                    scope.launch { appendNetworkEvent("能力变化：$transport · $internet · $validated · $metered$vpn") }
                 }
 
                 override fun onLinkPropertiesChanged(network: Network, linkProperties: LinkProperties) {
                     val dnsCount = linkProperties.dnsServers.size
-                    scope.launch { appendNetworkEvent("链路属性变化 · DNS ${dnsCount}个") }
+                    val iface = linkProperties.interfaceName ?: "未知接口"
+                    val mtu = linkProperties.mtu
+                    val hasIpv6 = linkProperties.linkAddresses.any { it.address is Inet6Address }
+                    scope.launch { appendNetworkEvent("链路变化：$iface · DNS ${dnsCount}个 · MTU $mtu · IPv6 ${if (hasIpv6) "有" else "无"}") }
                 }
             }
             runCatching { cm?.registerDefaultNetworkCallback(callback) }
@@ -7947,7 +7956,7 @@ private fun RoamingLiveCard(
         ToolMonoLine("网关", latest?.gatewayMs?.let { "${it}ms" } ?: "—")
         ToolMonoLine("外网", latest?.externalMs?.let { "${it}ms" } ?: "—")
         if (networkEvents.isNotEmpty()) {
-            Text("网络事件", color = TextDark, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+            Text("网络事件 / 能力变化 / 链路变化", color = TextDark, fontWeight = FontWeight.Bold, fontSize = 12.sp)
             networkEvents.takeLast(3).forEach { e ->
                 Text("${e.timeText} · ${e.label}", color = Muted, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
@@ -7961,7 +7970,7 @@ private fun RoamingLiveCard(
         if (!running && samples.isNotEmpty()) {
             RoamingSummaryCard(samples, events)
         }
-        Text("说明：漫游判断以 BSSID 切换为准；竖线表示 BSSID 漫游切换；网络事件来自 ConnectivityManager，只作为辅助监听。", color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
+        Text("说明：漫游判断以 BSSID 切换为准；竖线表示 BSSID 漫游切换；网络事件=网络可用/丢失；能力变化=WiFi/蜂窝/VPN、Internet、验证状态；链路变化=DNS、接口、MTU、IPv6 地址变化。", color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
     }
 }
 
@@ -8034,7 +8043,7 @@ private fun RoamingHistoryItem(
                     record.eventLines.take(8).forEach { Text(it, color = Muted, fontSize = 10.sp, lineHeight = 14.sp) }
                 }
                 if (record.networkEventLines.isNotEmpty()) {
-                    Text("网络事件", color = TextDark, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                    Text("网络事件 / 能力变化 / 链路变化", color = TextDark, fontWeight = FontWeight.Bold, fontSize = 11.sp)
                     record.networkEventLines.takeLast(6).forEach { Text(it, color = Muted, fontSize = 10.sp, lineHeight = 14.sp) }
                 }
             }
