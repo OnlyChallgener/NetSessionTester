@@ -950,7 +950,14 @@ private fun buildNetworkProbeInfo(
     }
     val stun = if (full && !env.hasVpn) runCatching { stunBindingProbe() }.getOrNull() else null
     val publicV4 = publicV4FromHttp ?: stun?.mappedIp?.takeIf { isUsableIpv4(it) }
-    val latencyMs = if (full) runCatching { tcpConnectLatencyMs(targetHost, targetPort.coerceIn(1, 65535), 1500) }.getOrNull() else null
+    // V1.1.15：延迟从完整 NAT/STUN 诊断中拆出。
+    // 首页网络信息轻量刷新 full=false 时也会跑一次轻量延迟检测，避免长期显示“不可用”。
+    val latencyMs = if (full) {
+        runCatching { tcpConnectLatencyMs(targetHost, targetPort.coerceIn(1, 65535), 1500) }.getOrNull()
+            ?: lightweightLatencyMs(targetHost, targetPort.coerceIn(1, 65535), 1200)
+    } else {
+        lightweightLatencyMs(targetHost, targetPort.coerceIn(1, 65535), 1200)
+    }
     val tcpPort = if (full) runCatching { detectTcpLocalPort(targetHost, targetPort.coerceIn(1, 65535), 1500) }.getOrNull() else null
 
     val priority = when {
@@ -1139,6 +1146,40 @@ private fun tcpConnectLatencyMs(host: String, port: Int, timeoutMs: Int): Int {
         socket.connect(InetSocketAddress(host, port), timeoutMs)
     }
     return (System.currentTimeMillis() - start).toInt().coerceAtLeast(1)
+}
+
+private fun lightweightLatencyMs(targetHost: String, targetPort: Int, timeoutMs: Int): Int? {
+    // 优先用国内稳定 IP 做 ICMP 轻量延迟；失败再用当前目标 TCP 连接延迟兜底。
+    val icmpTargets = listOf("223.5.5.5", "119.29.29.29")
+    for (target in icmpTargets) {
+        val latency = syncPingLatencyMs(target, timeoutMs)
+        if (latency != null) return latency
+    }
+    return runCatching { tcpConnectLatencyMs(targetHost, targetPort.coerceIn(1, 65535), timeoutMs) }.getOrNull()
+}
+
+private fun syncPingLatencyMs(address: String, timeoutMs: Int): Int? {
+    val timeoutSec = ((timeoutMs.coerceIn(300, 10_000) + 999) / 1000).coerceAtLeast(1)
+    return runCatching {
+        val startedAt = System.nanoTime()
+        val process = ProcessBuilder("ping", "-c", "1", "-W", timeoutSec.toString(), address)
+            .redirectErrorStream(true)
+            .start()
+        val finished = process.waitFor((timeoutMs + 900).toLong(), TimeUnit.MILLISECONDS)
+        if (!finished) {
+            process.destroyForcibly()
+            return@runCatching null
+        }
+        val output = process.inputStream.bufferedReader().use { it.readText() }
+        Regex("time[=<]([0-9.]+)\s*ms")
+            .find(output)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.toDoubleOrNull()
+            ?.roundToInt()
+            ?.coerceAtLeast(1)
+            ?: if (process.exitValue() == 0) ((System.nanoTime() - startedAt) / 1_000_000L).toInt().coerceAtLeast(1) else null
+    }.getOrNull()
 }
 
 private fun detectTcpLocalPort(host: String, port: Int, timeoutMs: Int): Int {

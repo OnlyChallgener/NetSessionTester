@@ -1,13 +1,14 @@
 {
-  "versionCode": 121,
-  "versionName": "V1.1.14",
-  "title": "自测版本 V1.1.14 build121",
+  "versionCode": 122,
+  "versionName": "V1.1.15",
+  "title": "发现新版本 V1.1.15 build122",
   "content": [
-    "修复底部设置/测试/历史导航按钮的方形点击阴影",
-    "修复测试页 IPv4/IPv6、增长曲线/峰值切换按钮的方形点击扩散",
-    "修复历史页今天/昨天/本周、10/30/100条筛选按钮的方形点击扩散"
+    "修复网络信息轻量刷新时延迟显示不可用的问题",
+    "首页延迟改为独立轻量检测，不再依赖完整 NAT/STUN 手动诊断",
+    "保留 build121 的底部导航、模式切换和历史筛选按钮圆角点击修复",
+    "保留 MTU 综合/ICMP/TCP/PMTU 与 WiFi 漫游图表/历史功能"
   ],
-  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.1.14-121/NetSessionTester-V1.1.14-build121-signed.apk",
-  "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/tag/v1.1.14-121",
+  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.1.15-122/NetSessionTester-V1.1.15-build122-signed.apk",
+  "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/tag/v1.1.15-122",
   "force": false
 }

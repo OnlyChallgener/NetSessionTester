@@ -1,5 +1,20 @@
 # NetSessionTester
 
+## V1.1.15 build122
+
+- versionName: V1.1.15
+- versionCode: 122
+- Release tag: v1.1.15-122
+- APK name: NetSessionTester-V1.1.15-build122-signed.apk
+
+### 发布重点
+
+- 修复首页网络信息轻量刷新时延迟显示“不可用”。
+- 延迟检测独立于完整 NAT/STUN 手动诊断，避免首页刷新触发 NAT 误判。
+- 轻量延迟优先检测国内稳定 IP，失败后回退 TCP 连接延迟。
+- 保留 build121 的按钮圆角点击修复、MTU 与漫游测试自测功能。
+
+
 ## V1.1.14 build115
 
 - versionName: V1.1.14
