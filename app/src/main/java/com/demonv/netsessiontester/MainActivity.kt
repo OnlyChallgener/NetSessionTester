@@ -5,6 +5,8 @@ package com.demonv.netsessiontester
 import android.Manifest
 import android.content.ContentValues
 import android.net.ConnectivityManager
+import android.net.LinkProperties
+import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.wifi.WifiManager
 import android.content.Context
@@ -19,6 +21,7 @@ import android.graphics.Typeface
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.provider.MediaStore
 import android.provider.Settings
 import android.telephony.TelephonyManager
@@ -119,6 +122,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -6968,12 +6972,15 @@ private fun TracketToolPage(onBack: () -> Unit) {
 
 
 private enum class MtuProbeMode(val label: String) {
-    COMPLEMENT("互补"),
-    FAST("快速估测"),
-    PMTU("PMTU增强")
+    COMPREHENSIVE("综合"),
+    ICMP("ICMP"),
+    TCP("TCP"),
+    PLPMTUD("PLPMTUD"),
+    LOCAL("本地")
 }
 
 private data class MtuStep(val mtu: Int, val success: Boolean, val detail: String)
+private data class MtuCheckLine(val name: String, val value: String, val detail: String, val ok: Boolean = true)
 private data class MtuResult(
     val target: String,
     val address: String,
@@ -6982,7 +6989,14 @@ private data class MtuResult(
     val mtu: Int?,
     val steps: List<MtuStep>,
     val analysis: String,
-    val error: String = ""
+    val error: String = "",
+    val localMtu: Int? = null,
+    val localDetail: String = "",
+    val tcpMss: Int? = null,
+    val tcpMtu: Int? = null,
+    val tcpDetail: String = "",
+    val appLayerDetail: String = "",
+    val checkLines: List<MtuCheckLine> = emptyList()
 )
 
 private data class RoamingSample(
@@ -7008,6 +7022,28 @@ private data class RoamingEventInfo(
     val maxLatencyMs: Int?
 )
 
+private data class RoamingNetworkEvent(
+    val timeText: String,
+    val elapsedSec: Int,
+    val label: String
+)
+
+private data class RoamingHistoryRecord(
+    val id: Long,
+    val timeText: String,
+    val targetText: String,
+    val durationText: String,
+    val sampleCount: Int,
+    val lossCount: Int,
+    val gatewaySummary: String,
+    val externalSummary: String,
+    val rssiSummary: String,
+    val speedSummary: String,
+    val roamingSummary: String,
+    val eventLines: List<String>,
+    val networkEventLines: List<String>
+)
+
 private enum class RoamingTargetMode(val label: String) {
     GATEWAY_AND_EXTERNAL("路由器+外网"),
     GATEWAY("仅路由器"),
@@ -7021,6 +7057,81 @@ private suspend fun resolveMtuAddress(hostInput: String, policy: ToolIpPolicy): 
         val selected = chooseToolTargetAddress(addresses, policy)
         selected to null
     }.getOrElse { null to (it.message ?: "解析失败") }
+}
+
+private fun readLocalInterfaceMtu(context: Context): Pair<Int?, String> {
+    return runCatching {
+        val cm = context.getSystemService(ConnectivityManager::class.java)
+        val network = cm?.activeNetwork
+        val lp = network?.let { cm.getLinkProperties(it) }
+        val ifaceName = lp?.interfaceName
+        val lpMtu = lp?.mtu?.takeIf { it > 0 }
+        val ifaceMtu = ifaceName?.let { name ->
+            runCatching { NetworkInterface.getByName(name)?.mtu?.takeIf { it > 0 } }.getOrNull()
+        }
+        val fallback = runCatching {
+            java.util.Collections.list(NetworkInterface.getNetworkInterfaces())
+                .filter { it.isUp && !it.isLoopback }
+                .mapNotNull { it.mtu.takeIf { mtu -> mtu > 0 } }
+                .maxOrNull()
+        }.getOrNull()
+        val mtu = lpMtu ?: ifaceMtu ?: fallback
+        val source = when {
+            lpMtu != null -> "LinkProperties.getMtu()"
+            ifaceMtu != null -> "NetworkInterface ${ifaceName ?: "active"}"
+            fallback != null -> "NetworkInterface fallback"
+            else -> "未读取到"
+        }
+        mtu to "$source；本地网卡/链路上限，仅作路径探测天花板参考"
+    }.getOrElse { null to (it.message ?: "读取本地 MTU 失败") }
+}
+
+private data class MtuTcpProbe(
+    val connected: Boolean,
+    val host: String,
+    val port: Int,
+    val address: String,
+    val protocol: String,
+    val costMs: Long,
+    val mss: Int?,
+    val mtu: Int?,
+    val detail: String
+)
+
+private suspend fun runTcpBusinessMtuProbe(
+    context: Context,
+    hostInput: String,
+    policy: ToolIpPolicy,
+    timeoutMs: Int,
+    port: Int = 443
+): MtuTcpProbe = withContext(Dispatchers.IO) {
+    val host = cleanToolHost(hostInput)
+    val resolved = resolveMtuAddress(host, policy)
+    val address = resolved.first ?: return@withContext MtuTcpProbe(false, host, port, "-", policy.label, 0L, null, null, "解析失败：${resolved.second ?: "无可用地址"}")
+    val ipv6 = address is Inet6Address
+    val cleanAddress = address.hostAddress?.substringBefore('%') ?: host
+    val localMtu = readLocalInterfaceMtu(context).first
+    val start = SystemClock.elapsedRealtime()
+    val socket = Socket()
+    val ok = runCatching {
+        socket.tcpNoDelay = true
+        socket.connect(InetSocketAddress(address, port), timeoutMs.coerceIn(500, 10000))
+        true
+    }.getOrElse { false }
+    runCatching { socket.close() }
+    val cost = SystemClock.elapsedRealtime() - start
+    val estimatedMss = if (ok) localMtu?.let { (it - if (ipv6) 60 else 40).coerceAtLeast(0) } else null
+    val estimatedMtu = estimatedMss?.let { it + if (ipv6) 60 else 40 }
+    val detail = if (ok) {
+        "TCP ${host}:$port 连接成功 ${cost}ms；Android Java 层无法直接读取 TCP_MAXSEG，当前以本地 MTU 估算 MSS，后续可接 NDK getsockopt(TCP_MAXSEG) 精确读取"
+    } else {
+        "TCP ${host}:$port 连接失败或超时；不代表 ICMP/UDP 不可达"
+    }
+    MtuTcpProbe(ok, host, port, cleanAddress, if (ipv6) "IPv6" else "IPv4", cost, estimatedMss, estimatedMtu, detail)
+}
+
+private fun appLayerPlpmtudNote(): String {
+    return "应用层 PLPMTUD 需要测试节点配合回包确认，适合 UDP/QUIC/RTC。当前版本先预留结果位，不把公共网站误判为应用层 MTU。"
 }
 
 private fun runMtuPing(address: String, ipv6: Boolean, mtu: Int, timeoutMs: Int, mode: MtuProbeMode): Pair<Boolean, String> {
@@ -7048,9 +7159,9 @@ private fun runMtuPing(address: String, ipv6: Boolean, mtu: Int, timeoutMs: Int,
         )
     }
     val commands = when (mode) {
-        MtuProbeMode.PMTU -> pmtuCommands
-        MtuProbeMode.FAST -> fastCommands
-        MtuProbeMode.COMPLEMENT -> pmtuCommands + fastCommands
+        MtuProbeMode.ICMP -> pmtuCommands
+        MtuProbeMode.COMPREHENSIVE -> pmtuCommands + fastCommands
+        MtuProbeMode.TCP, MtuProbeMode.LOCAL, MtuProbeMode.PLPMTUD -> pmtuCommands
     }
     var last = ""
     var unsupported = false
@@ -7100,6 +7211,7 @@ private fun analyzeMtu(mtu: Int?, ipv6: Boolean): String {
 }
 
 private suspend fun runMtuProbeLive(
+    context: Context,
     hostInput: String,
     policy: ToolIpPolicy,
     probeMode: MtuProbeMode,
@@ -7109,8 +7221,94 @@ private suspend fun runMtuProbeLive(
     onStep: suspend (MtuStep) -> Unit
 ): MtuResult = withContext(Dispatchers.IO) {
     val host = cleanToolHost(hostInput)
+    val local = readLocalInterfaceMtu(context)
+    val checkLines = mutableListOf<MtuCheckLine>()
+    if (probeMode == MtuProbeMode.COMPREHENSIVE || probeMode == MtuProbeMode.LOCAL) {
+        checkLines += MtuCheckLine("本地MTU", local.first?.toString() ?: "未读取到", local.second, local.first != null)
+    }
+
+    val needTcp = probeMode == MtuProbeMode.COMPREHENSIVE || probeMode == MtuProbeMode.TCP
+    val tcpProbe = if (needTcp) runTcpBusinessMtuProbe(context, host, policy, timeoutMs) else null
+    tcpProbe?.let { tcp ->
+        checkLines += MtuCheckLine(
+            "TCP业务",
+            if (tcp.connected) "MSS≈${tcp.mss ?: "-"} / MTU≈${tcp.mtu ?: "-"}" else "连接失败",
+            tcp.detail,
+            tcp.connected
+        )
+    }
+
+    if (probeMode == MtuProbeMode.COMPREHENSIVE || probeMode == MtuProbeMode.PLPMTUD) {
+        val note = appLayerPlpmtudNote()
+        checkLines += MtuCheckLine("应用层PLPMTUD", "预留", note, true)
+        if (probeMode == MtuProbeMode.PLPMTUD) {
+            return@withContext MtuResult(
+                target = host,
+                address = "-",
+                protocol = policy.label,
+                method = probeMode.label,
+                mtu = null,
+                steps = emptyList(),
+                analysis = "应用层 PLPMTUD 需要专用 UDP/QUIC Echo 测试节点。当前版本先避免把公共网站误判为真实应用层 MTU。",
+                localMtu = local.first,
+                localDetail = local.second,
+                appLayerDetail = note,
+                checkLines = checkLines
+            )
+        }
+    }
+
+    if (probeMode == MtuProbeMode.LOCAL) {
+        return@withContext MtuResult(
+            target = host,
+            address = "-",
+            protocol = "本地接口",
+            method = probeMode.label,
+            mtu = local.first,
+            steps = emptyList(),
+            analysis = "本地 MTU 只代表手机当前网卡/链路上限，不能代表跨公网到目标服务器的真实路径 MTU。",
+            localMtu = local.first,
+            localDetail = local.second,
+            checkLines = checkLines
+        )
+    }
+
+    if (probeMode == MtuProbeMode.TCP) {
+        return@withContext MtuResult(
+            target = host,
+            address = tcpProbe?.address ?: "-",
+            protocol = tcpProbe?.protocol ?: policy.label,
+            method = probeMode.label,
+            mtu = tcpProbe?.mtu,
+            steps = emptyList(),
+            analysis = if (tcpProbe?.connected == true) "TCP 业务连通性正常。当前 Java 实现显示 MSS 估算值，后续可接 NDK TCP_MAXSEG 获取更准确的 TCP MSS。" else "TCP 连接失败，可能目标端口不可达或网络策略限制；可结合 ICMP 路径探测继续判断。",
+            localMtu = local.first,
+            localDetail = local.second,
+            tcpMss = tcpProbe?.mss,
+            tcpMtu = tcpProbe?.mtu,
+            tcpDetail = tcpProbe?.detail.orEmpty(),
+            checkLines = checkLines
+        )
+    }
+
     val startResolve = resolveMtuAddress(host, policy)
-    val address = startResolve.first ?: return@withContext MtuResult(host, "-", policy.label, probeMode.label, null, emptyList(), analyzeMtu(null, false), startResolve.second ?: "解析失败")
+    val address = startResolve.first ?: return@withContext MtuResult(
+        host,
+        "-",
+        policy.label,
+        probeMode.label,
+        null,
+        emptyList(),
+        analyzeMtu(null, false),
+        startResolve.second ?: "解析失败",
+        localMtu = local.first,
+        localDetail = local.second,
+        tcpMss = tcpProbe?.mss,
+        tcpMtu = tcpProbe?.mtu,
+        tcpDetail = tcpProbe?.detail.orEmpty(),
+        appLayerDetail = if (probeMode == MtuProbeMode.COMPREHENSIVE) appLayerPlpmtudNote() else "",
+        checkLines = checkLines
+    )
     val ipv6 = address is Inet6Address
     val minMtu = (if (ipv6) minMtuInput.coerceAtLeast(1280) else minMtuInput).coerceIn(576, 9000)
     val maxMtu = maxMtuInput.coerceAtLeast(minMtu).coerceIn(minMtu, 9000)
@@ -7120,7 +7318,7 @@ private suspend fun runMtuProbeLive(
     val steps = mutableListOf<MtuStep>()
     while (low <= high && currentCoroutineContext().isActive) {
         val mid = (low + high) / 2
-        val (ok, detail) = runMtuPing(address.hostAddress?.substringBefore('%') ?: host, ipv6, mid, timeoutMs, probeMode)
+        val (ok, detail) = runMtuPing(address.hostAddress?.substringBefore('%') ?: host, ipv6, mid, timeoutMs, MtuProbeMode.ICMP)
         val step = MtuStep(mid, ok, detail.ifBlank { if (ok) "成功" else "失败/超时" })
         steps += step
         withContext(Dispatchers.Main) { onStep(step) }
@@ -7131,6 +7329,7 @@ private suspend fun runMtuProbeLive(
             high = mid - 1
         }
     }
+    checkLines += MtuCheckLine("ICMP路径", best?.let { "MTU≈$it" } ?: "未得到", analyzeMtu(best, ipv6), best != null)
     MtuResult(
         target = host,
         address = address.hostAddress?.substringBefore('%') ?: "-",
@@ -7138,8 +7337,23 @@ private suspend fun runMtuProbeLive(
         method = probeMode.label,
         mtu = best,
         steps = steps,
-        analysis = analyzeMtu(best, ipv6)
+        analysis = buildMtuOverallAnalysis(local.first, best, tcpProbe?.mtu, ipv6),
+        localMtu = local.first,
+        localDetail = local.second,
+        tcpMss = tcpProbe?.mss,
+        tcpMtu = tcpProbe?.mtu,
+        tcpDetail = tcpProbe?.detail.orEmpty(),
+        appLayerDetail = if (probeMode == MtuProbeMode.COMPREHENSIVE) appLayerPlpmtudNote() else "",
+        checkLines = checkLines
     )
+}
+
+private fun buildMtuOverallAnalysis(localMtu: Int?, icmpMtu: Int?, tcpMtu: Int?, ipv6: Boolean): String {
+    val effective = listOfNotNull(icmpMtu, tcpMtu).minOrNull()
+    val base = analyzeMtu(icmpMtu ?: tcpMtu, ipv6)
+    val localHint = localMtu?.let { "本地上限 $it；" }.orEmpty()
+    val effectiveHint = effective?.let { "建议应用层单包保守控制在 ${max(1200, it - 80)} 字节以内。" }.orEmpty()
+    return "$localHint$base $effectiveHint".trim()
 }
 
 private fun intToIpv4(value: Int): String {
@@ -7218,6 +7432,121 @@ private fun buildRoamingEvents(samples: List<RoamingSample>): List<RoamingEventI
 
 private fun roamingAverage(values: List<Int>): Int? = values.takeIf { it.isNotEmpty() }?.average()?.roundToInt()
 
+private fun roamingDurationText(samples: List<RoamingSample>): String {
+    val sec = samples.lastOrNull()?.elapsedSec ?: 0
+    return when {
+        sec < 60 -> "${sec}s"
+        sec % 60 == 0 -> "${sec / 60}分"
+        else -> "${sec / 60}分${sec % 60}秒"
+    }
+}
+
+private fun roamingStatsText(label: String, values: List<Int>, unit: String): String {
+    if (values.isEmpty()) return "$label：—"
+    return "$label：最小${values.minOrNull()}$unit / 最大${values.maxOrNull()}$unit / 平均${roamingAverage(values)}$unit"
+}
+
+private fun roamingRssiStatsText(values: List<Int>): String {
+    if (values.isEmpty()) return "RSSI：—"
+    return "RSSI：最强${values.maxOrNull()}dBm / 最弱${values.minOrNull()}dBm / 平均${roamingAverage(values)}dBm"
+}
+
+private fun buildRoamingHistoryRecord(
+    targetMode: RoamingTargetMode,
+    externalTarget: String,
+    samples: List<RoamingSample>,
+    events: List<RoamingEventInfo>,
+    networkEvents: List<RoamingNetworkEvent>
+): RoamingHistoryRecord {
+    val gateway = samples.mapNotNull { it.gatewayMs }
+    val external = samples.mapNotNull { it.externalMs }
+    val rssi = samples.mapNotNull { it.rssi }
+    val speed = samples.mapNotNull { it.linkSpeed }
+    val targetText = if (targetMode == RoamingTargetMode.GATEWAY) targetMode.label else "${targetMode.label} · ${externalTarget.ifBlank { "223.5.5.5" }}"
+    val eventLines = events.map { e ->
+        "${e.timeText}  ${e.oldBssid} → ${e.newBssid} · ${e.durationText} · 丢包${e.lossCount} · 最高延迟${e.maxLatencyMs?.let { "${it}ms" } ?: "—"}"
+    }
+    val networkLines = networkEvents.map { "${it.timeText}  ${it.label}" }
+    return RoamingHistoryRecord(
+        id = System.currentTimeMillis(),
+        timeText = SimpleDateFormat("MM-dd HH:mm:ss", Locale.getDefault()).format(Date()),
+        targetText = targetText,
+        durationText = roamingDurationText(samples),
+        sampleCount = samples.size,
+        lossCount = samples.count { it.loss },
+        gatewaySummary = roamingStatsText("网关", gateway, "ms"),
+        externalSummary = roamingStatsText("外网", external, "ms"),
+        rssiSummary = roamingRssiStatsText(rssi),
+        speedSummary = roamingStatsText("速率", speed, "Mbps"),
+        roamingSummary = "漫游切换：${events.size}次 · 切换附近总丢包${events.sumOf { it.lossCount }}",
+        eventLines = eventLines,
+        networkEventLines = networkLines
+    )
+}
+
+private fun loadRoamingHistory(context: Context): List<RoamingHistoryRecord> {
+    val raw = context.getSharedPreferences("net_tools_history", Context.MODE_PRIVATE).getString("roaming_history_v1", "[]") ?: "[]"
+    val arr = runCatching { JSONArray(raw) }.getOrDefault(JSONArray())
+    return buildList {
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            fun strList(key: String): List<String> {
+                val a = o.optJSONArray(key) ?: return emptyList()
+                return buildList { for (j in 0 until a.length()) add(a.optString(j)) }
+            }
+            add(
+                RoamingHistoryRecord(
+                    id = o.optLong("id"),
+                    timeText = o.optString("timeText"),
+                    targetText = o.optString("targetText"),
+                    durationText = o.optString("durationText"),
+                    sampleCount = o.optInt("sampleCount"),
+                    lossCount = o.optInt("lossCount"),
+                    gatewaySummary = o.optString("gatewaySummary"),
+                    externalSummary = o.optString("externalSummary"),
+                    rssiSummary = o.optString("rssiSummary"),
+                    speedSummary = o.optString("speedSummary"),
+                    roamingSummary = o.optString("roamingSummary"),
+                    eventLines = strList("eventLines"),
+                    networkEventLines = strList("networkEventLines")
+                )
+            )
+        }
+    }
+}
+
+private fun saveRoamingHistory(context: Context, record: RoamingHistoryRecord) {
+    val next = (listOf(record) + loadRoamingHistory(context).filterNot { it.id == record.id }).take(10)
+    writeRoamingHistory(context, next)
+}
+
+private fun deleteRoamingHistory(context: Context, id: Long) {
+    writeRoamingHistory(context, loadRoamingHistory(context).filterNot { it.id == id })
+}
+
+private fun writeRoamingHistory(context: Context, records: List<RoamingHistoryRecord>) {
+    val arr = JSONArray()
+    records.forEach { r ->
+        arr.put(
+            JSONObject()
+                .put("id", r.id)
+                .put("timeText", r.timeText)
+                .put("targetText", r.targetText)
+                .put("durationText", r.durationText)
+                .put("sampleCount", r.sampleCount)
+                .put("lossCount", r.lossCount)
+                .put("gatewaySummary", r.gatewaySummary)
+                .put("externalSummary", r.externalSummary)
+                .put("rssiSummary", r.rssiSummary)
+                .put("speedSummary", r.speedSummary)
+                .put("roamingSummary", r.roamingSummary)
+                .put("eventLines", JSONArray(r.eventLines))
+                .put("networkEventLines", JSONArray(r.networkEventLines))
+        )
+    }
+    context.getSharedPreferences("net_tools_history", Context.MODE_PRIVATE).edit().putString("roaming_history_v1", arr.toString()).apply()
+}
+
 private fun roamingPingAxisMax(values: List<Int>): Int {
     val maxValue = values.maxOrNull() ?: return 50
     return when {
@@ -7245,22 +7574,23 @@ private fun roamingXTicks(size: Int): List<Int> {
 
 @Composable
 private fun MtuToolPage(onBack: () -> Unit) {
+    val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var host by remember { mutableStateOf("www.baidu.com") }
+    var host by remember { mutableStateOf("www.qq.com") }
     var policy by remember { mutableStateOf(ToolIpPolicy.AUTO) }
     var minMtu by remember { mutableStateOf("1280") }
     var maxMtu by remember { mutableStateOf("1500") }
     var timeoutMs by remember { mutableStateOf("1200") }
-    var probeMode by remember { mutableStateOf(MtuProbeMode.COMPLEMENT) }
+    var probeMode by remember { mutableStateOf(MtuProbeMode.COMPREHENSIVE) }
     var running by remember { mutableStateOf(false) }
     var steps by remember { mutableStateOf<List<MtuStep>>(emptyList()) }
     var result by remember { mutableStateOf<MtuResult?>(null) }
 
     LazyColumn(modifier = Modifier.fillMaxSize().padding(horizontal = 14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        item { ToolPageHeader("MTU检测", "二分法估测 IPv4 / IPv6 路径 MTU，IPv6 会优先使用 AAAA", onBack) }
+        item { ToolPageHeader("MTU检测", "本地MTU / ICMP路径 / TCP业务 / PLPMTUD 四合一分析", onBack) }
         item {
             SoftCard {
-                ConfigLongRow("目标") { CleanField(host, { host = it }, "www.baidu.com", leadingMark = "host") }
+                ConfigLongRow("目标") { CleanField(host, { host = it }, "www.qq.com", leadingMark = "host") }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                     ConfigColumn("IP策略", Modifier.weight(1f)) { PolicyPicker(policy) { policy = it } }
                     ConfigColumn("超时", Modifier.weight(1f)) { CleanField(timeoutMs, { timeoutMs = it.onlyDigits().take(5) }, "1200", keyboardType = KeyboardType.Number, leadingMark = "hourglass") }
@@ -7270,13 +7600,13 @@ private fun MtuToolPage(onBack: () -> Unit) {
                     ConfigColumn("最大MTU", Modifier.weight(1f)) { CleanField(maxMtu, { maxMtu = it.onlyDigits().take(4) }, "1500", keyboardType = KeyboardType.Number, leadingMark = "tune") }
                 }
                 ConfigColumn("检测方式") {
-                    Row(horizontalArrangement = Arrangement.spacedBy(5.dp), modifier = Modifier.fillMaxWidth()) {
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
                         MtuProbeMode.values().forEach { mode ->
-                            MiniSelectPill(mode.label, probeMode == mode, Modifier.weight(1f)) { probeMode = mode }
+                            MiniSelectPill(mode.label, probeMode == mode, Modifier.width(74.dp)) { probeMode = mode }
                         }
                     }
                 }
-                Text("互补模式会先尝试 PMTU/DF 语义探测，系统不支持或失败时再降级快速估测；结果仍受 Android ping 能力和 ICMP 策略影响。", color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
+                Text("综合模式会同时给出本地网卡 MTU、ICMP 路径估测、TCP 业务 MSS 估算和应用层 PLPMTUD 预留说明。TCP 精确 MSS 后续可接 NDK TCP_MAXSEG；应用层 PLPMTUD 需要专用测试节点。", color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
                 Button(
                     onClick = {
                         if (running) return@Button
@@ -7284,7 +7614,7 @@ private fun MtuToolPage(onBack: () -> Unit) {
                         steps = emptyList()
                         result = null
                         scope.launch {
-                            val r = runMtuProbeLive(host, policy, probeMode, minMtu.safeInt(1280, 576, 9000), maxMtu.safeInt(1500, 576, 9000), timeoutMs.safeInt(1200, 500, 10000)) { step ->
+                            val r = runMtuProbeLive(context.applicationContext, host, policy, probeMode, minMtu.safeInt(1280, 576, 9000), maxMtu.safeInt(1500, 576, 9000), timeoutMs.safeInt(1200, 500, 10000)) { step ->
                                 steps = steps + step
                             }
                             result = r
@@ -7309,7 +7639,7 @@ private fun MtuProcessCard(running: Boolean, steps: List<MtuStep>, result: MtuRe
             Text(if (running) "运行中" else "完成", color = if (running) Blue else Muted, fontSize = 11.sp, fontWeight = FontWeight.Bold)
         }
         if (steps.isEmpty()) {
-            Text("等待开始。IPv6 模式会自动解析 AAAA；普通 Android 受 ping 命令能力影响，结果为路径 MTU 估测。", color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
+            Text("等待开始。综合模式会显示本地 MTU、TCP 业务、ICMP 路径和应用层 PLPMTUD 说明；IPv6 模式会自动解析 AAAA。", color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
         } else {
             Text(steps.joinToString("\n") { "尝试 ${it.mtu}：${if (it.success) "成功" else "失败"} ${it.detail}" }, color = TextDark, fontSize = 11.sp, lineHeight = 15.sp, fontFamily = FontFamily.Monospace, maxLines = 18, overflow = TextOverflow.Ellipsis, modifier = Modifier.horizontalScroll(rememberScrollState()))
         }
@@ -7319,9 +7649,31 @@ private fun MtuProcessCard(running: Boolean, steps: List<MtuStep>, result: MtuRe
             ToolMonoLine("地址", r.address)
             ToolMonoLine("协议", r.protocol)
             ToolMonoLine("方式", r.method)
-            ToolMonoLine("结果", r.mtu?.let { "有效 MTU ≈ $it" } ?: "未得到")
+            if (r.checkLines.isNotEmpty()) {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    r.checkLines.forEach { line ->
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = if (line.ok) BlueSoft else RedSoft,
+                            border = BorderStroke(0.6.dp, if (line.ok) Color(0xFFD9E8FF) else Color(0xFFFECACA))
+                        ) {
+                            Column(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 7.dp)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(line.name, color = TextDark, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                                    Text(line.value, color = if (line.ok) Blue else ErrorRed, fontSize = 12.sp, fontWeight = FontWeight.ExtraBold)
+                                }
+                                Text(line.detail, color = Muted, fontSize = 10.sp, lineHeight = 14.sp)
+                            }
+                        }
+                    }
+                }
+            } else {
+                ToolMonoLine("结果", r.mtu?.let { "有效 MTU ≈ $it" } ?: "未得到")
+            }
+            if (r.tcpDetail.isNotBlank()) Text("TCP：${r.tcpDetail}", color = Muted, fontSize = 10.sp, lineHeight = 14.sp)
+            if (r.appLayerDetail.isNotBlank()) Text("PLPMTUD：${r.appLayerDetail}", color = Muted, fontSize = 10.sp, lineHeight = 14.sp)
             if (r.error.isNotBlank()) Text("错误：${r.error}", color = ErrorRed, fontSize = 11.sp)
-            Text("分析：${r.analysis}", color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
+            Text("综合分析：${r.analysis}", color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
         }
     }
 }
@@ -7337,12 +7689,86 @@ private fun RoamingToolPage(onBack: () -> Unit) {
     var running by remember { mutableStateOf(false) }
     var job by remember { mutableStateOf<Job?>(null) }
     var samples by remember { mutableStateOf<List<RoamingSample>>(emptyList()) }
+    var networkEvents by remember { mutableStateOf<List<RoamingNetworkEvent>>(emptyList()) }
+    var runStartMs by remember { mutableStateOf<Long?>(null) }
+    var savedRunId by remember { mutableStateOf<Long?>(null) }
+    var history by remember { mutableStateOf(loadRoamingHistory(context.applicationContext)) }
+    var showHistory by remember { mutableStateOf(false) }
+    var expandedHistoryIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
     val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { }
+
+    fun appendNetworkEvent(label: String) {
+        val now = System.currentTimeMillis()
+        val elapsed = runStartMs?.let { ((now - it) / 1000L).toInt().coerceAtLeast(0) } ?: 0
+        networkEvents = (networkEvents + RoamingNetworkEvent(
+            timeText = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(now)),
+            elapsedSec = elapsed,
+            label = label
+        )).takeLast(40)
+    }
+
+    fun saveCurrentRunIfNeeded() {
+        val runId = runStartMs ?: return
+        if (savedRunId == runId || samples.isEmpty()) return
+        val events = buildRoamingEvents(samples)
+        val record = buildRoamingHistoryRecord(targetMode, externalTarget, samples, events, networkEvents)
+        saveRoamingHistory(context.applicationContext, record)
+        history = loadRoamingHistory(context.applicationContext)
+        savedRunId = runId
+    }
 
     fun stop() {
         job?.cancel()
         job = null
+        if (running) saveCurrentRunIfNeeded()
         running = false
+    }
+
+    DisposableEffect(running, runStartMs) {
+        if (!running) {
+            onDispose { }
+        } else {
+            val cm = context.getSystemService(ConnectivityManager::class.java)
+            val callback = object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) {
+                    scope.launch { appendNetworkEvent("网络可用") }
+                }
+
+                override fun onLost(network: Network) {
+                    scope.launch { appendNetworkEvent("网络丢失/切换") }
+                }
+
+                override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
+                    val label = when {
+                        networkCapabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "WiFi能力变化"
+                        networkCapabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "切到蜂窝网络"
+                        else -> "网络能力变化"
+                    }
+                    scope.launch { appendNetworkEvent(label) }
+                }
+
+                override fun onLinkPropertiesChanged(network: Network, linkProperties: LinkProperties) {
+                    val dnsCount = linkProperties.dnsServers.size
+                    scope.launch { appendNetworkEvent("链路属性变化 · DNS ${dnsCount}个") }
+                }
+            }
+            runCatching { cm?.registerDefaultNetworkCallback(callback) }
+            onDispose { runCatching { cm?.unregisterNetworkCallback(callback) } }
+        }
+    }
+
+    if (showHistory) {
+        RoamingHistoryDialog(
+            records = history,
+            expandedIds = expandedHistoryIds,
+            onDismiss = { showHistory = false },
+            onToggle = { id -> expandedHistoryIds = if (id in expandedHistoryIds) expandedHistoryIds - id else expandedHistoryIds + id },
+            onDelete = { id ->
+                deleteRoamingHistory(context.applicationContext, id)
+                history = loadRoamingHistory(context.applicationContext)
+                expandedHistoryIds = expandedHistoryIds - id
+            }
+        )
     }
 
     LazyColumn(modifier = Modifier.fillMaxSize().padding(horizontal = 14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -7361,6 +7787,13 @@ private fun RoamingToolPage(onBack: () -> Unit) {
                     ConfigColumn("采样ms", Modifier.weight(1f)) { CleanField(intervalMs, { intervalMs = it.onlyDigits().take(5) }, "1000", keyboardType = KeyboardType.Number, leadingMark = "time") }
                     ConfigColumn("超时", Modifier.weight(1f)) { CleanField(timeoutMs, { timeoutMs = it.onlyDigits().take(5) }, "1000", keyboardType = KeyboardType.Number, leadingMark = "hourglass") }
                 }
+                ConfigColumn("采样模式") {
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+                        MiniSelectPill("标准1s", intervalMs == "1000", Modifier.weight(1f)) { intervalMs = "1000" }
+                        MiniSelectPill("高频500ms", intervalMs == "500", Modifier.weight(1f)) { intervalMs = "500" }
+                        MiniSelectPill("低频2s", intervalMs == "2000", Modifier.weight(1f)) { intervalMs = "2000" }
+                    }
+                }
                 OutlinedButton(
                     onClick = {
                         val perms = buildList {
@@ -7372,63 +7805,83 @@ private fun RoamingToolPage(onBack: () -> Unit) {
                     modifier = Modifier.fillMaxWidth().height(40.dp),
                     shape = ShapeM
                 ) { Text("授权 WiFi / 定位信息（用于 BSSID、RSSI）", fontSize = 12.sp) }
-                Button(
-                    onClick = {
-                        if (running) {
-                            stop()
-                        } else {
-                            if (!isCurrentNetworkWifi(context.applicationContext)) {
-                                Toast.makeText(context, "请连接WIFI", Toast.LENGTH_SHORT).show()
-                                return@Button
-                            }
-                            samples = emptyList()
-                            running = true
-                            val intv = intervalMs.safeInt(1000, 300, 10000).toLong()
-                            val timeout = timeoutMs.safeInt(1000, 300, 10000)
-                            val startMs = System.currentTimeMillis()
-                            job = scope.launch {
-                                while (currentCoroutineContext().isActive) {
-                                    val now = System.currentTimeMillis()
-                                    val gateway = readGatewayAddress(context.applicationContext)
-                                    val wifi = readWifiSnapshot(context.applicationContext)
-                                    val extTarget = externalTarget.trim().ifBlank { "223.5.5.5" }
-                                    val gwMs = if (targetMode != RoamingTargetMode.EXTERNAL) pingForRoaming(gateway, timeout) else null
-                                    val extMs = if (targetMode != RoamingTargetMode.GATEWAY) pingForRoaming(extTarget, timeout) else null
-                                    val sample = RoamingSample(
-                                        timeText = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(now)),
-                                        epochMs = now,
-                                        elapsedSec = ((now - startMs) / 1000L).toInt(),
-                                        rssi = wifi.first,
-                                        linkSpeed = wifi.second,
-                                        bssid = wifi.third,
-                                        gatewayMs = gwMs,
-                                        externalMs = extMs,
-                                        loss = (targetMode != RoamingTargetMode.EXTERNAL && gwMs == null) || (targetMode != RoamingTargetMode.GATEWAY && extMs == null)
-                                    )
-                                    samples = (samples + sample).takeLast(900)
-                                    delay(intv)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    OutlinedButton(
+                        onClick = {
+                            history = loadRoamingHistory(context.applicationContext)
+                            showHistory = true
+                        },
+                        modifier = Modifier.weight(1f).height(46.dp),
+                        shape = RoundedCornerShape(18.dp)
+                    ) { Text("漫游历史", fontWeight = FontWeight.Bold) }
+                    Button(
+                        onClick = {
+                            if (running) {
+                                stop()
+                            } else {
+                                if (!isCurrentNetworkWifi(context.applicationContext)) {
+                                    Toast.makeText(context, "请连接WIFI", Toast.LENGTH_SHORT).show()
+                                    return@Button
+                                }
+                                samples = emptyList()
+                                networkEvents = emptyList()
+                                val start = System.currentTimeMillis()
+                                runStartMs = start
+                                savedRunId = null
+                                running = true
+                                appendNetworkEvent("开始监听网络事件")
+                                val intv = intervalMs.safeInt(1000, 300, 10000).toLong()
+                                val timeout = timeoutMs.safeInt(1000, 300, 10000)
+                                job = scope.launch {
+                                    while (currentCoroutineContext().isActive) {
+                                        val now = System.currentTimeMillis()
+                                        val gateway = readGatewayAddress(context.applicationContext)
+                                        val wifi = readWifiSnapshot(context.applicationContext)
+                                        val extTarget = externalTarget.trim().ifBlank { "223.5.5.5" }
+                                        val gwMs = if (targetMode != RoamingTargetMode.EXTERNAL) pingForRoaming(gateway, timeout) else null
+                                        val extMs = if (targetMode != RoamingTargetMode.GATEWAY) pingForRoaming(extTarget, timeout) else null
+                                        val sample = RoamingSample(
+                                            timeText = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(now)),
+                                            epochMs = now,
+                                            elapsedSec = ((now - start) / 1000L).toInt(),
+                                            rssi = wifi.first,
+                                            linkSpeed = wifi.second,
+                                            bssid = wifi.third,
+                                            gatewayMs = gwMs,
+                                            externalMs = extMs,
+                                            loss = (targetMode != RoamingTargetMode.EXTERNAL && gwMs == null) || (targetMode != RoamingTargetMode.GATEWAY && extMs == null)
+                                        )
+                                        samples = (samples + sample).takeLast(900)
+                                        delay(intv)
+                                    }
                                 }
                             }
-                        }
-                    },
-                    modifier = Modifier.fillMaxWidth().height(48.dp),
-                    shape = RoundedCornerShape(18.dp)
-                ) { Text(if (running) "停止测试" else "开始测试", fontWeight = FontWeight.ExtraBold) }
+                        },
+                        modifier = Modifier.weight(1.45f).height(46.dp),
+                        shape = RoundedCornerShape(18.dp)
+                    ) { Text(if (running) "停止测试" else "开始测试", fontWeight = FontWeight.ExtraBold) }
+                }
             }
         }
-        item { RoamingLiveCard(samples, running) }
+        item { RoamingLiveCard(samples, running, networkEvents, onHistoryClick = { history = loadRoamingHistory(context.applicationContext); showHistory = true }) }
         item { Spacer(Modifier.height(16.dp)) }
     }
 }
 
 @Composable
-private fun RoamingLiveCard(samples: List<RoamingSample>, running: Boolean) {
+private fun RoamingLiveCard(
+    samples: List<RoamingSample>,
+    running: Boolean,
+    networkEvents: List<RoamingNetworkEvent>,
+    onHistoryClick: () -> Unit
+) {
     val latest = samples.lastOrNull()
     val lossCount = samples.count { it.loss }
     val events = remember(samples) { buildRoamingEvents(samples) }
     SoftCompactToolCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("实时结果", color = TextDark, fontWeight = FontWeight.ExtraBold, fontSize = 14.sp, modifier = Modifier.weight(1f))
+            TextButton(onClick = onHistoryClick) { Text("漫游历史", fontSize = 11.sp, fontWeight = FontWeight.Bold) }
             Text(if (running) "运行中" else "停止", color = if (running) Blue else Muted, fontSize = 11.sp, fontWeight = FontWeight.Bold)
         }
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
@@ -7440,6 +7893,12 @@ private fun RoamingLiveCard(samples: List<RoamingSample>, running: Boolean) {
         ToolMonoLine("BSSID", latest?.bssid ?: "—")
         ToolMonoLine("网关", latest?.gatewayMs?.let { "${it}ms" } ?: "—")
         ToolMonoLine("外网", latest?.externalMs?.let { "${it}ms" } ?: "—")
+        if (networkEvents.isNotEmpty()) {
+            Text("网络事件", color = TextDark, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+            networkEvents.takeLast(3).forEach { e ->
+                Text("${e.timeText} · ${e.label}", color = Muted, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+        }
         RoamingPingChartCard(samples)
         RoamingSignalChartCard(samples)
         if (events.isNotEmpty()) {
@@ -7449,7 +7908,84 @@ private fun RoamingLiveCard(samples: List<RoamingSample>, running: Boolean) {
         if (!running && samples.isNotEmpty()) {
             RoamingSummaryCard(samples, events)
         }
-        Text("说明：漫游判断以 BSSID 切换为准；曲线点击会显示当时采样数据。第一版以当前 WiFi 连接信息为主，不依赖高频 WiFi 扫描。", color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
+        Text("说明：漫游判断以 BSSID 切换为准；竖线表示 BSSID 漫游切换；网络事件来自 ConnectivityManager，只作为辅助监听。", color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
+    }
+}
+
+@Composable
+private fun RoamingHistoryDialog(
+    records: List<RoamingHistoryRecord>,
+    expandedIds: Set<Long>,
+    onDismiss: () -> Unit,
+    onToggle: (Long) -> Unit,
+    onDelete: (Long) -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("漫游历史", fontWeight = FontWeight.ExtraBold) },
+        text = {
+            if (records.isEmpty()) {
+                Text("暂无漫游测试历史。停止一次测试后会自动保存，最多保留10条。", color = Muted, fontSize = 12.sp)
+            } else {
+                LazyColumn(
+                    modifier = Modifier.heightIn(max = 460.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(records, key = { it.id }) { record ->
+                        RoamingHistoryItem(
+                            record = record,
+                            expanded = record.id in expandedIds,
+                            onToggle = { onToggle(record.id) },
+                            onDelete = { onDelete(record.id) }
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } }
+    )
+}
+
+@Composable
+private fun RoamingHistoryItem(
+    record: RoamingHistoryRecord,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    onDelete: () -> Unit
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = ShapeM,
+        color = Color.White,
+        tonalElevation = 1.dp,
+        shadowElevation = 1.dp,
+        border = BorderStroke(1.dp, Border.copy(alpha = 0.72f))
+    ) {
+        Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(record.timeText, color = TextDark, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                    Text("${record.durationText} · ${record.targetText} · 漫游${record.eventLines.size}次", color = Muted, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                IconButton(onClick = onDelete) { Icon(Icons.Filled.DeleteOutline, contentDescription = null, tint = ErrorRed) }
+                TextButton(onClick = onToggle) { Text(if (expanded) "收起" else "展开", fontSize = 11.sp) }
+            }
+            if (expanded) {
+                Text(record.gatewaySummary, color = TextDark, fontSize = 11.sp)
+                Text(record.externalSummary, color = TextDark, fontSize = 11.sp)
+                Text(record.rssiSummary, color = TextDark, fontSize = 11.sp)
+                Text(record.speedSummary, color = TextDark, fontSize = 11.sp)
+                Text(record.roamingSummary, color = if (record.eventLines.isEmpty()) Muted else Orange, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                if (record.eventLines.isNotEmpty()) {
+                    Text("切换详情", color = TextDark, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                    record.eventLines.take(8).forEach { Text(it, color = Muted, fontSize = 10.sp, lineHeight = 14.sp) }
+                }
+                if (record.networkEventLines.isNotEmpty()) {
+                    Text("网络事件", color = TextDark, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                    record.networkEventLines.takeLast(6).forEach { Text(it, color = Muted, fontSize = 10.sp, lineHeight = 14.sp) }
+                }
+            }
+        }
     }
 }
 
@@ -7469,7 +8005,7 @@ private fun RoamingPingChartCard(samples: List<RoamingSample>) {
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("Ping表", color = TextDark, fontWeight = FontWeight.Bold, fontSize = 13.sp, modifier = Modifier.weight(1f))
-            Text("网关 / 外网 · 点击曲线查看", color = Muted, fontSize = 10.sp)
+            Text("网关/外网 · 竖线=漫游", color = Muted, fontSize = 11.sp)
         }
         RoamingPingCanvas(plot = plot, baseIndex = baseIndex, onSelect = { selectedIndex = it })
         selected?.let { RoamingSampleDetailLine(it) }
@@ -7492,7 +8028,7 @@ private fun RoamingSignalChartCard(samples: List<RoamingSample>) {
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("信号表", color = TextDark, fontWeight = FontWeight.Bold, fontSize = 13.sp, modifier = Modifier.weight(1f))
-            Text("RSSI / 漫游切换", color = Muted, fontSize = 10.sp)
+            Text("RSSI · 竖线=切换", color = Muted, fontSize = 11.sp)
         }
         RoamingSignalCanvas(plot = plot, baseIndex = baseIndex, onSelect = { selectedIndex = it })
         selected?.let { RoamingSampleDetailLine(it) }
@@ -7510,8 +8046,8 @@ private fun RoamingPingCanvas(plot: List<RoamingSample>, baseIndex: Int, onSelec
             .pointerInput(plot.size) {
                 detectTapGestures { pos ->
                     if (plot.size <= 1) return@detectTapGestures
-                    val left = 34f
-                    val right = size.width - 8f
+                    val left = 50f
+                    val right = size.width - 16f
                     val ratio = ((pos.x - left) / (right - left).coerceAtLeast(1f)).coerceIn(0f, 1f)
                     val idx = (ratio * (plot.size - 1)).roundToInt().coerceIn(0, plot.lastIndex)
                     onSelect(baseIndex + idx)
@@ -7519,27 +8055,27 @@ private fun RoamingPingCanvas(plot: List<RoamingSample>, baseIndex: Int, onSelec
             }
     ) {
         if (plot.isEmpty()) return@Canvas
-        val left = 34f
-        val top = 12f
-        val right = size.width - 8f
-        val bottom = size.height - 24f
+        val left = 50f
+        val top = 18f
+        val right = size.width - 16f
+        val bottom = size.height - 34f
         val w = (right - left).coerceAtLeast(1f)
         val h = (bottom - top).coerceAtLeast(1f)
-        val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = AndroidColor.rgb(107, 114, 128); textSize = 22f }
+        val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = AndroidColor.rgb(107, 114, 128); textSize = 26f }
         val values = plot.flatMap { listOfNotNull(it.gatewayMs, it.externalMs) }
         val axisMax = roamingPingAxisMax(values)
         val yTicks = listOf(0, axisMax / 4, axisMax / 2, axisMax * 3 / 4, axisMax).distinct()
         yTicks.forEach { tick ->
             val yy = bottom - (tick / axisMax.toFloat()) * h
             drawLine(Border.copy(alpha = 0.72f), Offset(left, yy), Offset(right, yy), strokeWidth = 1f)
-            drawContext.canvas.nativeCanvas.drawText(tick.toString(), 2f, yy + 7f, textPaint)
+            drawContext.canvas.nativeCanvas.drawText(tick.toString(), 6f, yy + 8f, textPaint)
         }
         val xTicks = roamingXTicks(plot.size)
         xTicks.forEach { idx ->
             val xx = left + (idx / (plot.size - 1).coerceAtLeast(1).toFloat()) * w
             drawLine(Border.copy(alpha = 0.45f), Offset(xx, top), Offset(xx, bottom), strokeWidth = 1f)
             val label = roamingTimeLabel(plot[idx].elapsedSec)
-            drawContext.canvas.nativeCanvas.drawText(label, (xx - 12f).coerceIn(0f, right - 30f), size.height - 5f, textPaint)
+            drawContext.canvas.nativeCanvas.drawText(label, (xx - 16f).coerceIn(6f, right - 46f), size.height - 9f, textPaint)
         }
         fun x(i: Int) = left + (i / (plot.size - 1).coerceAtLeast(1).toFloat()) * w
         fun y(v: Int?) = bottom - ((v ?: 0).coerceIn(0, axisMax) / axisMax.toFloat()) * h
@@ -7581,8 +8117,8 @@ private fun RoamingSignalCanvas(plot: List<RoamingSample>, baseIndex: Int, onSel
             .pointerInput(plot.size) {
                 detectTapGestures { pos ->
                     if (plot.size <= 1) return@detectTapGestures
-                    val left = 38f
-                    val right = size.width - 8f
+                    val left = 50f
+                    val right = size.width - 16f
                     val ratio = ((pos.x - left) / (right - left).coerceAtLeast(1f)).coerceIn(0f, 1f)
                     val idx = (ratio * (plot.size - 1)).roundToInt().coerceIn(0, plot.lastIndex)
                     onSelect(baseIndex + idx)
@@ -7590,13 +8126,13 @@ private fun RoamingSignalCanvas(plot: List<RoamingSample>, baseIndex: Int, onSel
             }
     ) {
         if (plot.isEmpty()) return@Canvas
-        val left = 38f
-        val top = 12f
-        val right = size.width - 8f
-        val bottom = size.height - 24f
+        val left = 50f
+        val top = 18f
+        val right = size.width - 16f
+        val bottom = size.height - 34f
         val w = (right - left).coerceAtLeast(1f)
         val h = (bottom - top).coerceAtLeast(1f)
-        val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = AndroidColor.rgb(107, 114, 128); textSize = 22f }
+        val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = AndroidColor.rgb(107, 114, 128); textSize = 26f }
         val yTicks = listOf(-90, -75, -60, -45, -30)
         fun yRssi(v: Int?): Float {
             val value = (v ?: -90).coerceIn(-90, -30)
@@ -7605,14 +8141,14 @@ private fun RoamingSignalCanvas(plot: List<RoamingSample>, baseIndex: Int, onSel
         yTicks.forEach { tick ->
             val yy = yRssi(tick)
             drawLine(Border.copy(alpha = 0.72f), Offset(left, yy), Offset(right, yy), strokeWidth = 1f)
-            drawContext.canvas.nativeCanvas.drawText(tick.toString(), 2f, yy + 7f, textPaint)
+            drawContext.canvas.nativeCanvas.drawText(tick.toString(), 6f, yy + 8f, textPaint)
         }
         val xTicks = roamingXTicks(plot.size)
         xTicks.forEach { idx ->
             val xx = left + (idx / (plot.size - 1).coerceAtLeast(1).toFloat()) * w
             drawLine(Border.copy(alpha = 0.45f), Offset(xx, top), Offset(xx, bottom), strokeWidth = 1f)
             val label = roamingTimeLabel(plot[idx].elapsedSec)
-            drawContext.canvas.nativeCanvas.drawText(label, (xx - 12f).coerceIn(0f, right - 30f), size.height - 5f, textPaint)
+            drawContext.canvas.nativeCanvas.drawText(label, (xx - 16f).coerceIn(6f, right - 46f), size.height - 9f, textPaint)
         }
         fun x(i: Int) = left + (i / (plot.size - 1).coerceAtLeast(1).toFloat()) * w
         val path = Path()
