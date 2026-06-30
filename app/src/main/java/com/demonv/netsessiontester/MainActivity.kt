@@ -68,6 +68,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
@@ -127,6 +128,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -2159,8 +2161,10 @@ private fun NetSessionTesterApp() {
     val logStore = remember { LogStore(context.applicationContext) }
     val settingsStore = remember { SettingsStore(context.applicationContext) }
 
-    var selectedTab by remember { mutableStateOf(MainTab.SETTINGS) }
-    var appToolPage by remember { mutableStateOf(AppToolPage.NONE) }
+    var selectedTab by rememberSaveable { mutableStateOf(MainTab.SETTINGS) }
+    var appToolPage by rememberSaveable { mutableStateOf(AppToolPage.NONE) }
+    val settingsListState = rememberSaveable(saver = LazyListState.Saver) { LazyListState() }
+    var networkInfoExpanded by rememberSaveable { mutableStateOf(true) }
     var runningJob by remember { mutableStateOf<Job?>(null) }
     var state by remember { mutableStateOf(AppUiState()) }
     var pendingCsv by remember { mutableStateOf<String?>(null) }
@@ -3434,6 +3438,9 @@ private fun NetSessionTesterApp() {
                 AppToolPage.ROAMING -> RoamingToolPage(onBack = { appToolPage = AppToolPage.NONE })
                 AppToolPage.NONE -> when (selectedTab) {
                 MainTab.SETTINGS -> SettingsPage(
+                    listState = settingsListState,
+                    networkInfoExpanded = networkInfoExpanded,
+                    onNetworkInfoExpandedChange = { networkInfoExpanded = it },
                     host = host,
                     onHostChange = { host = it },
                     hostHistory = hostHistory,
@@ -4299,6 +4306,9 @@ private fun ReorderableCardItem(
 
 @Composable
 private fun SettingsPage(
+    listState: LazyListState,
+    networkInfoExpanded: Boolean,
+    onNetworkInfoExpandedChange: (Boolean) -> Unit,
     host: String,
     onHostChange: (String) -> Unit,
     hostHistory: List<String>,
@@ -4365,6 +4375,7 @@ private fun SettingsPage(
     }
 
     LazyColumn(
+        state = listState,
         modifier = Modifier
             .fillMaxSize()
             .padding(horizontal = 14.dp),
@@ -4407,7 +4418,9 @@ private fun SettingsPage(
                         onOpenNsLookup = onOpenNsLookup,
                         onOpenTracket = onOpenTracket,
                         onOpenMtu = onOpenMtu,
-                        onOpenRoaming = onOpenRoaming
+                        onOpenRoaming = onOpenRoaming,
+                        expanded = networkInfoExpanded,
+                        onExpandedChange = onNetworkInfoExpandedChange
                     )
                     "session" -> SoftCard {
                         SectionTitle("≡", "会话参数", Green)
@@ -8562,16 +8575,17 @@ private fun NetworkEnvironmentSettingsCard(
     onOpenNsLookup: () -> Unit,
     onOpenTracket: () -> Unit,
     onOpenMtu: () -> Unit,
-    onOpenRoaming: () -> Unit
+    onOpenRoaming: () -> Unit,
+    expanded: Boolean,
+    onExpandedChange: (Boolean) -> Unit
 ) {
-    var expanded by remember { mutableStateOf(true) }
     SoftCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
             SectionTitle("i", "网络信息", Purple)
             Spacer(Modifier.weight(1f))
             TextButton(onClick = onOpenNatDiagnostics) { Text("NAT诊断", fontSize = 12.sp) }
             TextButton(onClick = onRefresh) { Text(if (publicIpLoading) "检测中" else "刷新", fontSize = 12.sp) }
-            IconButton(onClick = { expanded = !expanded }, modifier = Modifier.width(32.dp).height(32.dp)) {
+            IconButton(onClick = { onExpandedChange(!expanded) }, modifier = Modifier.width(32.dp).height(32.dp)) {
                 Text(if (expanded) "⌃" else "⌄", color = TextDark, fontSize = 19.sp, fontWeight = FontWeight.Bold)
             }
         }

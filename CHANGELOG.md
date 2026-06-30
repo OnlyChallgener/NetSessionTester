@@ -1,3 +1,10 @@
+## V1.1.15 build123 selftest
+
+- 修复从网络信息小卡片二级页返回后，网络信息卡片折叠状态被重置的问题。
+- 修复从 NSLookup / Tracket / MTU / 漫游测试返回主页后，设置页滚动位置跳回顶部的问题。
+- 将网络信息展开状态提升到主 App 层并用 rememberSaveable 保存。
+- 将设置页 LazyColumn 滚动状态提升到主 App 层并用 LazyListState.Saver 保存。
+
 ## V1.1.15 build122 release
 
 - 发布版本号更新为 V1.1.15 / build122。
