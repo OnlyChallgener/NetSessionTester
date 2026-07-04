@@ -1,14 +1,14 @@
 {
-  "versionCode": 128,
+  "versionCode": 129,
   "versionName": "V1.1.15",
-  "title": "自测版本 V1.1.15 build128",
+  "title": "自测版本 V1.1.15 build129",
   "content": [
-    "Ping 历史最多保存 12 条，历史页标题显示条数和占用空间",
-    "Ping 历史单条支持删除",
-    "连接数测试启动时，Ping 自动同步连接数测试目标地址",
-    "Ping 图低延迟场景启用局部 Y 轴放大，改善路由器低延迟曲线观感"
+    "Ping 信息栏改为：目标、抖动、瞬时速率、平均速率、窗口、引擎、状态",
+    "Ping X 轴前期动态窗口：15秒、30秒、60秒，超过1分钟显示最新1分钟",
+    "TCP Socket 高频探测改为准备阶段不计时、端口只预探测一次、固定节拍并发发包",
+    "瞬时速率和平均速率分开显示，避免启动预热拖低实时速度"
   ],
-  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.1.15-128/NetSessionTester-V1.1.15-build128-signed.apk",
-  "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/tag/v1.1.15-128",
+  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.1.15-129/NetSessionTester-V1.1.15-build129-signed.apk",
+  "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/tag/v1.1.15-129",
   "force": false
 }

@@ -2848,12 +2848,12 @@ private fun NetSessionTesterApp() {
         if (reset) {
             pingPoints = emptyList()
             pingJitterMs = null
-            pingSessionStartedAt = sessionId
+            pingSessionStartedAt = 0L
             pingSessionEndedAt = 0L
             pingDurationTick = sessionId
         }
         pingRunning = true
-        pingIntervalLabel = "解析中"
+        pingIntervalLabel = "准备中"
         pingActiveTargetLabel = target
         pingTargetHistory = rememberTargetHistoryItem(context.applicationContext, "ping_target_history_v1", target)
         appendPingLog(PingLogEntry(
@@ -2876,7 +2876,7 @@ private fun NetSessionTesterApp() {
             }
             pingIntervalLabel = "${resolved.displayProtocol} · ${interval}ms"
             pingActiveTargetLabel = "$target · ${resolved.displayProtocol}"
-            val startedAt = System.currentTimeMillis()
+            var startedAt = sessionId
             var sent = 0
             val highFrequency = interval < 200L
             val bucketSizeMs = if (highFrequency) 250L else 1_000L
@@ -2884,6 +2884,15 @@ private fun NetSessionTesterApp() {
             val bucketSamples = mutableListOf<Int?>()
             val pendingLogs = mutableListOf<PingLogEntry>()
             val jitterWindow = RttJitterWindow(maxSize = 50)
+
+            fun markOfficialStart() {
+                val official = System.currentTimeMillis()
+                startedAt = official
+                currentBucketMs = 0L
+                pingSessionStartedAt = official
+                pingSessionEndedAt = 0L
+                pingDurationTick = official
+            }
 
             fun flushBucket(bucketMs: Long) {
                 if (activePingSessionId != sessionId) {
@@ -2947,15 +2956,42 @@ private fun NetSessionTesterApp() {
                             note = "普通APP无法使用ICMP Raw Socket，已用TCP Socket高频探测",
                             sessionId = sessionId
                         ))
-                        while (currentCoroutineContext().isActive && (finiteCount == null || sent < finiteCount)) {
-                            val loopStart = System.currentTimeMillis()
-                            val result = tcpSocketPingResolved(resolved.address, tcpProbe.port, timeout)
-                            handlePingResult(result.latencyMs, result.failure, System.currentTimeMillis())
-                            val cost = System.currentTimeMillis() - loopStart
-                            delay((interval - cost).coerceAtLeast(0L))
+                        markOfficialStart()
+                        var scheduled = 0
+                        var inFlight = 0
+                        var nextTick = SystemClock.elapsedRealtime()
+                        val maxInFlight = when {
+                            interval <= 30L -> 8
+                            interval < 100L -> 6
+                            else -> 4
                         }
+                        val tcpTimeout = when {
+                            interval <= 50L -> timeout.coerceAtMost(500)
+                            interval < 200L -> timeout.coerceAtMost(800)
+                            else -> timeout
+                        }
+                        val finiteJobs = mutableListOf<Job>()
+                        while (currentCoroutineContext().isActive && (finiteCount == null || scheduled < finiteCount)) {
+                            val waitMs = nextTick - SystemClock.elapsedRealtime()
+                            if (waitMs > 0L) delay(waitMs)
+                            nextTick += interval
+                            if (inFlight >= maxInFlight) continue
+                            scheduled++
+                            inFlight++
+                            val job = launch {
+                                try {
+                                    val result = tcpSocketPingResolved(resolved.address, tcpProbe.port, tcpTimeout)
+                                    handlePingResult(result.latencyMs, result.failure, System.currentTimeMillis())
+                                } finally {
+                                    inFlight = (inFlight - 1).coerceAtLeast(0)
+                                }
+                            }
+                            if (finiteCount != null) finiteJobs.add(job)
+                        }
+                        finiteJobs.forEach { it.join() }
                     } else {
                         pingIntervalLabel = "ICMP高频${interval}ms"
+                        markOfficialStart()
                         pendingLogs.add(PingLogEntry(
                             target = target,
                             protocol = resolved.displayProtocol,
@@ -2990,6 +3026,7 @@ private fun NetSessionTesterApp() {
                         }
                     }
                 } else {
+                    markOfficialStart()
                     while (currentCoroutineContext().isActive && (maxCount == null || sent < maxCount)) {
                         val loopStart = System.currentTimeMillis()
                         val result = icmpPingResolved(resolved.address, timeout, resolved.protocol)
@@ -9150,9 +9187,13 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
     val allPoints = points.sortedBy { it.elapsedMs }
     val latestMs = allPoints.lastOrNull()?.elapsedMs ?: 0L
     val earliestMs = allPoints.firstOrNull()?.elapsedMs ?: 0L
-    val windowSpanMs = 60_000L
+    val windowSpanMs = when {
+        latestMs <= 15_000L -> 15_000L
+        latestMs <= 30_000L -> 30_000L
+        else -> 60_000L
+    }
     var autoFollow by remember { mutableStateOf(true) }
-    var viewEndMs by remember { mutableStateOf(latestMs.coerceAtLeast(windowSpanMs)) }
+    var viewEndMs by remember { mutableStateOf(windowSpanMs) }
     var chartWidthPx by remember { mutableStateOf(1f) }
     var selectedPoint by remember { mutableStateOf<PingPoint?>(null) }
     val firstPointKey = allPoints.firstOrNull()?.timeEpochMs ?: 0L
@@ -9175,20 +9216,36 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
     val maxY = yRange.max
     val sampleTotal = visible.sumOf { it.sampleCount }
     val lossTotal = visible.sumOf { it.lossCount }
-    val visibleSeconds = (windowSpanMs / 1000f).coerceAtLeast(1f)
-    val rateText = if (sampleTotal > 0) "实际${String.format(java.util.Locale.US, "%.1f", sampleTotal / visibleSeconds)}次/s" else ""
+    val instantStartMs = (latestMs - 2_000L).coerceAtLeast(0L)
+    val instantSamples = allPoints.filter { it.elapsedMs >= instantStartMs && it.elapsedMs <= latestMs }.sumOf { it.sampleCount }
+    val instantSpanSec = ((latestMs - instantStartMs).coerceAtLeast(1_000L) / 1000f).coerceAtLeast(1f)
+    val totalSamples = allPoints.sumOf { it.sampleCount }
+    val averageSpanSec = (latestMs.coerceAtLeast(1_000L) / 1000f).coerceAtLeast(1f)
+    val instantRateText = if (instantSamples > 0) "瞬时${String.format(java.util.Locale.US, "%.1f", instantSamples / instantSpanSec)}/s" else "瞬时—"
+    val averageRateText = if (totalSamples > 0) "平均${String.format(java.util.Locale.US, "%.1f", totalSamples / averageSpanSec)}/s" else "平均—"
     val rangeText = when {
         running && autoFollow -> "实时"
         running -> "查看历史 ${formatPingAxisTime(viewStartMs)}-${formatPingAxisTime(viewEndMs)}"
         else -> "已停止 ${formatPingAxisTime(viewStartMs)}-${formatPingAxisTime(viewEndMs)}"
     }
+    val labelParts = activeTargetLabel.split(" · ").map { it.trim() }.filter { it.isNotBlank() }
+    val targetDisplay = labelParts.firstOrNull().orEmpty()
+    val engineDisplay = labelParts.firstOrNull { it.startsWith("TCP:", ignoreCase = true) } ?: "ICMP"
     val selected = selectedPoint
 
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.weight(1f).horizontalScroll(rememberScrollState())) {
                 Text(
-                    listOf(activeTargetLabel.takeIf { it.isNotBlank() }, jitterMs?.let { "抖动${formatPingJitter(it)}" }, rateText.takeIf { it.isNotBlank() }, "窗口${formatPingDuration(windowSpanMs)}", rangeText).filterNotNull().joinToString(" · "),
+                    listOf(
+                        targetDisplay.takeIf { it.isNotBlank() },
+                        jitterMs?.let { "抖动${formatPingJitter(it)}" } ?: "抖动—",
+                        instantRateText,
+                        averageRateText,
+                        "窗口${formatPingDuration(windowSpanMs)}",
+                        engineDisplay,
+                        rangeText
+                    ).filterNotNull().joinToString(" · "),
                     color = Muted,
                     fontSize = 10.sp,
                     maxLines = 1
