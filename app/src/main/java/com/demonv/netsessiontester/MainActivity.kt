@@ -141,6 +141,7 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalClipboardManager
@@ -270,7 +271,10 @@ private data class PingPoint(
     val lossCount: Int = 0,
     val highLatency: Boolean = false,
     val sampleCount: Int = 1,
-    val timeEpochMs: Long = System.currentTimeMillis()
+    val timeEpochMs: Long = System.currentTimeMillis(),
+    val elapsedMs: Long = elapsedSec * 1_000L,
+    val minLatencyMs: Int? = latencyMs,
+    val maxLatencyMs: Int? = latencyMs
 )
 
 private enum class PingProtocolMode(val label: String) {
@@ -2620,29 +2624,42 @@ private fun NetSessionTesterApp() {
         lastChartSampleAt = lastChartSampleAt + (stats.protocol to now)
     }
 
-    fun appendPingSecond(sec: Int, samples: List<Int?>) {
+    fun appendPingBucket(bucketElapsedMs: Long, samples: List<Int?>) {
         val valid = samples.mapNotNull { it }
         val avg = valid.takeIf { it.isNotEmpty() }?.average()?.roundToInt()
+        val min = valid.minOrNull()
+        val max = valid.maxOrNull()
         val lossCount = samples.count { it == null }
         val highLatency = valid.any { it >= 100 }
-        pingPoints = (pingPoints.filterNot { it.elapsedSec == sec } + PingPoint(
+        val sec = (bucketElapsedMs / 1_000L).toInt().coerceAtLeast(0)
+        pingPoints = (pingPoints.filterNot { it.elapsedMs == bucketElapsedMs } + PingPoint(
             elapsedSec = sec,
             latencyMs = avg,
             lossCount = lossCount,
             highLatency = highLatency,
-            sampleCount = samples.size.coerceAtLeast(1)
+            sampleCount = samples.size.coerceAtLeast(1),
+            elapsedMs = bucketElapsedMs,
+            minLatencyMs = min,
+            maxLatencyMs = max
         ))
-            .sortedBy { it.elapsedSec }
-            .takeLast(360)
+            .sortedBy { it.elapsedMs }
+            .takeLast(2400)
+    }
+
+    fun appendPingSecond(sec: Int, samples: List<Int?>) {
+        appendPingBucket(sec * 1_000L, samples)
     }
 
     fun alignPingWithSessionEnd() {
         val started = currentStartedAt
         if (started <= 0L) return
-        val elapsed = ((System.currentTimeMillis() - started) / 1_000L).toInt().coerceAtLeast(0)
+        val elapsedMs = (System.currentTimeMillis() - started).coerceAtLeast(0L)
         val last = pingPoints.lastOrNull()
-        if (last != null && last.elapsedSec < elapsed) {
-            pingPoints = (pingPoints + last.copy(elapsedSec = elapsed)).takeLast(360)
+        if (last != null && last.elapsedMs < elapsedMs) {
+            pingPoints = (pingPoints + last.copy(
+                elapsedSec = (elapsedMs / 1_000L).toInt(),
+                elapsedMs = elapsedMs
+            )).takeLast(2400)
         }
     }
 
@@ -2670,14 +2687,18 @@ private fun NetSessionTesterApp() {
     }
 
     fun appendPingPoint(sec: Int, latencyMs: Int?) {
-        pingPoints = (pingPoints.filterNot { it.elapsedSec == sec } + PingPoint(
+        val ms = sec * 1_000L
+        pingPoints = (pingPoints.filterNot { it.elapsedMs == ms } + PingPoint(
             elapsedSec = sec,
             latencyMs = latencyMs,
             lossCount = if (latencyMs == null) 1 else 0,
-            highLatency = (latencyMs ?: 0) >= 100
+            highLatency = (latencyMs ?: 0) >= 100,
+            elapsedMs = ms,
+            minLatencyMs = latencyMs,
+            maxLatencyMs = latencyMs
         ))
-            .sortedBy { it.elapsedSec }
-            .takeLast(360)
+            .sortedBy { it.elapsedMs }
+            .takeLast(2400)
     }
 
     fun startPingMonitor(reset: Boolean = false) {
@@ -2717,14 +2738,16 @@ private fun NetSessionTesterApp() {
             pingActiveTargetLabel = "$target · ${resolved.displayProtocol}"
             val startedAt = System.currentTimeMillis()
             var sent = 0
-            var currentSec = 0
-            val secSamples = mutableListOf<Int?>()
+            val highFrequency = interval < 200L
+            val bucketSizeMs = if (highFrequency) 250L else 1_000L
+            var currentBucketMs = 0L
+            val bucketSamples = mutableListOf<Int?>()
             val pendingLogs = mutableListOf<PingLogEntry>()
 
-            fun flushSecond(sec: Int) {
-                if (secSamples.isNotEmpty()) {
-                    appendPingSecond(sec, secSamples.toList())
-                    secSamples.clear()
+            fun flushBucket(bucketMs: Long) {
+                if (bucketSamples.isNotEmpty()) {
+                    appendPingBucket(bucketMs, bucketSamples.toList())
+                    bucketSamples.clear()
                 }
                 if (pendingLogs.isNotEmpty()) {
                     appendPingLogs(pendingLogs.toList())
@@ -2733,13 +2756,14 @@ private fun NetSessionTesterApp() {
             }
 
             fun handlePingResult(latency: Int?, failure: String?, eventTime: Long = System.currentTimeMillis()) {
-                val elapsed = ((eventTime - startedAt) / 1_000L).toInt().coerceAtLeast(0)
-                if (elapsed != currentSec) {
-                    flushSecond(currentSec)
-                    currentSec = elapsed
+                val elapsedMs = (eventTime - startedAt).coerceAtLeast(0L)
+                val bucketMs = (elapsedMs / bucketSizeMs) * bucketSizeMs
+                if (bucketMs != currentBucketMs) {
+                    flushBucket(currentBucketMs)
+                    currentBucketMs = bucketMs
                 }
                 sent++
-                secSamples.add(latency)
+                bucketSamples.add(latency)
                 val status = when {
                     latency == null -> failure ?: "超时"
                     latency >= 100 -> "高延迟"
@@ -2758,7 +2782,7 @@ private fun NetSessionTesterApp() {
 
             try {
                 val finiteCount = maxCount
-                if (interval <= 200L && finiteCount != null) {
+                if (interval < 200L && finiteCount != null) {
                     pingIntervalLabel = "${resolved.displayProtocol} · 高频${interval}ms"
                     val streamed = streamIcmpPingResolved(resolved.address, timeout, resolved.protocol, interval, finiteCount) { event ->
                         handlePingResult(event.latencyMs, event.failure, event.timeEpochMs)
@@ -2783,7 +2807,7 @@ private fun NetSessionTesterApp() {
                     }
                 }
             } finally {
-                flushSecond(currentSec)
+                flushBucket(currentBucketMs)
                 pingRunning = false
                 pingIntervalLabel = if (sent > 0) "已停止 · ${sent}次" else "停止"
                 appendPingLog(PingLogEntry(target = target, protocol = resolved.displayProtocol, latencyMs = null, status = "停止", note = "共${sent}次", sessionId = sessionId))
@@ -4489,7 +4513,7 @@ private fun SettingsPage(
                             }
                         }
                         Text(
-                            if ((pingIntervalMs.toIntOrNull() ?: 1000) < 1000) "高频 Ping 已启用，界面将按秒聚合显示。" else "会话测试期间 Ping 仍可独立运行；高频 Ping 建议间隔不低于 1000ms。",
+                            if ((pingIntervalMs.toIntOrNull() ?: 1000) < 200) "自动高频：后台高频采样，图形按像素聚合显示。" else "自动低频：间隔 ≥200ms，图形按普通折线显示。",
                             color = Muted,
                             fontSize = 12.sp,
                             lineHeight = 16.sp
@@ -8720,8 +8744,8 @@ private fun PingCompactChartCard(
     val successes = pingPoints.mapNotNull { it.latencyMs }
     val current = successes.lastOrNull()
     val avg = successes.takeIf { it.isNotEmpty() }?.average()?.roundToInt()
-    val max = successes.maxOrNull()
-    val min = successes.minOrNull()
+    val max = pingPoints.mapNotNull { it.maxLatencyMs ?: it.latencyMs }.maxOrNull()
+    val min = pingPoints.mapNotNull { it.minLatencyMs ?: it.latencyMs }.minOrNull()
     val sampleTotal = pingPoints.sumOf { it.sampleCount }.coerceAtLeast(0)
     val lossTotal = pingPoints.sumOf { it.lossCount }
     val loss = if (sampleTotal > 0) ((lossTotal * 100f) / sampleTotal).roundToInt() else 0
@@ -8778,99 +8802,246 @@ private fun MiniMetric(label: String, value: String, color: Color, modifier: Mod
 
 @Composable
 private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "") {
-    val allPoints = points.sortedBy { it.elapsedSec }
-    val windowEnd = maxOf(1, allPoints.lastOrNull()?.elapsedSec ?: 1)
-    val windowStart = if (windowEnd > 120) windowEnd - 120 else 0
-    val sorted = allPoints.filter { it.elapsedSec in windowStart..windowEnd }
-    val values = sorted.mapNotNull { it.latencyMs }
+    val allPoints = points.sortedBy { it.elapsedMs }
+    val latestMs = allPoints.lastOrNull()?.elapsedMs ?: 0L
+    val earliestMs = allPoints.firstOrNull()?.elapsedMs ?: 0L
+    val highFrequency = allPoints.any { it.sampleCount > 1 } || allPoints.zipWithNext().any { (a, b) -> (b.elapsedMs - a.elapsedMs) in 1 until 200 }
+    val windowSpanMs = when {
+        highFrequency -> 60_000L
+        latestMs <= 60_000L -> 60_000L
+        latestMs <= 5 * 60_000L -> 120_000L
+        else -> 5 * 60_000L
+    }
+    var autoFollow by remember { mutableStateOf(true) }
+    var viewEndMs by remember { mutableStateOf(latestMs.coerceAtLeast(windowSpanMs)) }
+    var chartWidthPx by remember { mutableStateOf(1f) }
+    var selectedPoint by remember { mutableStateOf<PingPoint?>(null) }
+
+    LaunchedEffect(latestMs, windowSpanMs, autoFollow) {
+        if (autoFollow) viewEndMs = latestMs.coerceAtLeast(windowSpanMs)
+        else viewEndMs = viewEndMs.coerceIn((earliestMs + windowSpanMs).coerceAtLeast(windowSpanMs), latestMs.coerceAtLeast(windowSpanMs))
+    }
+
+    val viewStartMs = (viewEndMs - windowSpanMs).coerceAtLeast(0L)
+    val visible = allPoints.filter { it.elapsedMs in viewStartMs..viewEndMs }
+    val values = visible.flatMap { listOfNotNull(it.minLatencyMs ?: it.latencyMs, it.latencyMs, it.maxLatencyMs ?: it.latencyMs) }
     val maxY = pingMainAxisMax(values)
-    val minX = windowStart
-    val maxX = maxOf(minX + 1, windowEnd)
-    val ticks = pingTimeLabels(minX, maxX)
-    val visibleSamples = sorted.sumOf { it.sampleCount }
-    val visibleSeconds = (maxX - minX).coerceAtLeast(1)
-    val rateText = if (visibleSamples > 0) {
-        val hz = visibleSamples / visibleSeconds.toFloat()
-        "实际${String.format(java.util.Locale.US, "%.1f", hz)}次/s"
-    } else ""
-    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-        Text(
-            listOf("延迟(ms)", activeTargetLabel.takeIf { it.isNotBlank() }, rateText.takeIf { it.isNotBlank() }).filterNotNull().joinToString(" · "),
+    val sampleTotal = visible.sumOf { it.sampleCount }
+    val lossTotal = visible.sumOf { it.lossCount }
+    val visibleSeconds = (windowSpanMs / 1000f).coerceAtLeast(1f)
+    val rateText = if (sampleTotal > 0) "实际${String.format(java.util.Locale.US, "%.1f", sampleTotal / visibleSeconds)}次/s" else ""
+    val modeText = if (highFrequency) "自动高频" else "自动低频"
+    val rangeText = if (autoFollow) "实时" else "历史 ${formatPingAxisTime(viewStartMs)}-${formatPingAxisTime(viewEndMs)}"
+    val selected = selectedPoint
+
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                listOf("延迟波形", modeText, activeTargetLabel.takeIf { it.isNotBlank() }, rateText.takeIf { it.isNotBlank() }).filterNotNull().joinToString(" · "),
+                color = Muted,
+                fontSize = 10.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+            SoftChoicePill(text = if (autoFollow) "实时中" else "回实时", selected = autoFollow, onClick = { autoFollow = true }, compact = true)
+        }
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(188.dp)
+                .background(Color(0xFFF8FAFC), ShapeM)
+                .clip(ShapeM)
+        ) {
+            Canvas(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .onSizeChanged { chartWidthPx = it.width.toFloat().coerceAtLeast(1f) }
+                    .pointerInput(visible, viewStartMs, viewEndMs, windowSpanMs, latestMs) {
+                        detectTapGestures(
+                            onDoubleTap = { autoFollow = true },
+                            onTap = { offset ->
+                                val left = 44f
+                                val right = size.width - 12f
+                                val plotW = (right - left).coerceAtLeast(1f)
+                                val x = offset.x.coerceIn(left, right)
+                                val targetMs = viewStartMs + (((x - left) / plotW) * windowSpanMs).toLong()
+                                selectedPoint = visible.minByOrNull { kotlin.math.abs(it.elapsedMs - targetMs) }
+                            }
+                        )
+                    }
+                    .pointerInput(latestMs, earliestMs, windowSpanMs, chartWidthPx) {
+                        detectHorizontalDragGestures { _, dragAmount ->
+                            val left = 44f
+                            val rightPad = 12f
+                            val plotW = (chartWidthPx - left - rightPad).coerceAtLeast(1f)
+                            val deltaMs = (dragAmount / plotW * windowSpanMs).toLong()
+                            autoFollow = false
+                            val minEnd = (earliestMs + windowSpanMs).coerceAtLeast(windowSpanMs)
+                            val maxEnd = latestMs.coerceAtLeast(windowSpanMs)
+                            viewEndMs = (viewEndMs - deltaMs).coerceIn(minEnd, maxEnd)
+                        }
+                    }
+            ) {
+                val left = 44f
+                val top = 14f
+                val right = size.width - 12f
+                val bottom = size.height - 28f
+                val plotW = (right - left).coerceAtLeast(1f)
+                val plotH = (bottom - top).coerceAtLeast(1f)
+
+                fun xOf(ms: Long): Float = left + ((ms - viewStartMs).toFloat() / windowSpanMs.toFloat()).coerceIn(0f, 1f) * plotW
+                fun yOf(value: Int): Float {
+                    val clipped = value.coerceIn(0, maxY)
+                    return bottom - (clipped.toFloat() / maxY.toFloat()) * plotH
+                }
+
+                val gridPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = AndroidColor.rgb(226, 232, 240)
+                    strokeWidth = 1f
+                    textSize = 23f
+                    typeface = Typeface.create(Typeface.DEFAULT, Typeface.NORMAL)
+                }
+                val axisPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = AndroidColor.rgb(100, 116, 139)
+                    textSize = 23f
+                    typeface = Typeface.create(Typeface.DEFAULT, Typeface.NORMAL)
+                }
+
+                axisLabels(maxY).forEach { tick ->
+                    val y = yOf(tick)
+                    drawLine(Border.copy(alpha = 0.45f), Offset(left, y), Offset(right, y), strokeWidth = 1f)
+                    val label = tick.toString()
+                    val tw = axisPaint.measureText(label)
+                    drawContext.canvas.nativeCanvas.drawText(label, (left - 8f - tw).coerceAtLeast(2f), y + 8f, axisPaint)
+                }
+
+                pingAxisTicks(viewStartMs, viewEndMs, plotW).forEach { tickMs ->
+                    val x = xOf(tickMs)
+                    drawLine(Border.copy(alpha = 0.25f), Offset(x, top), Offset(x, bottom), strokeWidth = 1f)
+                    val label = if (autoFollow) formatPingRelativeLabel(tickMs - viewEndMs) else formatPingAxisTime(tickMs)
+                    val tw = axisPaint.measureText(label)
+                    val tx = (x - tw / 2f).coerceIn(left, right - tw)
+                    drawContext.canvas.nativeCanvas.drawText(label, tx, size.height - 8f, axisPaint)
+                }
+
+                // 丢包密集时改用淡红背景区块；低密度则使用红点/红线，避免高频模式糊成一团。
+                val lossRanges = buildPingLossRanges(visible, viewStartMs, viewEndMs)
+                lossRanges.forEach { (startMs, endMs, count) ->
+                    val sx = xOf(startMs)
+                    val ex = xOf(endMs).coerceAtLeast(sx + 2f)
+                    if (count >= 3 || ex - sx > 8f) {
+                        drawRect(ErrorRed.copy(alpha = 0.10f), topLeft = Offset(sx, top), size = androidx.compose.ui.geometry.Size(ex - sx, plotH))
+                    }
+                }
+
+                val linePoints = visible.filter { it.latencyMs != null }
+                if (linePoints.isNotEmpty()) {
+                    val path = Path()
+                    var started = false
+                    var prev: PingPoint? = null
+                    linePoints.forEach { p ->
+                        val latency = p.latencyMs ?: return@forEach
+                        val o = Offset(xOf(p.elapsedMs), yOf(latency))
+                        val gapTooLarge = prev?.let { p.elapsedMs - it.elapsedMs > maxOf(1_500L, windowSpanMs / 24L) } ?: false
+                        if (!started || gapTooLarge || (prev?.lossCount ?: 0) > 0) {
+                            path.moveTo(o.x, o.y)
+                            started = true
+                        } else {
+                            path.lineTo(o.x, o.y)
+                        }
+                        prev = p
+                    }
+                    drawPath(path, color = Blue, style = Stroke(width = 2.6f, cap = StrokeCap.Round))
+
+                    linePoints.forEach { p ->
+                        val latency = p.latencyMs ?: return@forEach
+                        val x = xOf(p.elapsedMs)
+                        val y = yOf(latency)
+                        if (p.highLatency || latency >= maxY * 0.85f) drawCircle(Orange, radius = 3.8f, center = Offset(x, y))
+                        if (p.lossCount > 0 && !lossRanges.any { p.elapsedMs in it.first..it.second && it.third >= 3 }) {
+                            val lossY = bottom - 3f
+                            drawLine(ErrorRed, Offset(x, lossY - 10f), Offset(x, lossY), strokeWidth = 2.2f)
+                            drawCircle(ErrorRed, radius = 2.8f, center = Offset(x, lossY))
+                        }
+                    }
+                }
+
+                selected?.takeIf { it.elapsedMs in viewStartMs..viewEndMs }?.let { p ->
+                    val x = xOf(p.elapsedMs)
+                    drawLine(Color(0xFF334155).copy(alpha = 0.45f), Offset(x, top), Offset(x, bottom), strokeWidth = 1.5f)
+                    p.latencyMs?.let { drawCircle(Navy, radius = 4.5f, center = Offset(x, yOf(it))) }
+                }
+            }
+        }
+        selected?.let { p ->
+            val time = DateTimeFormatter.ofPattern("HH:mm:ss")
+                .withZone(ZoneId.systemDefault())
+                .format(Instant.ofEpochMilli(p.timeEpochMs))
+            val text = if (p.sampleCount > 1) {
+                "$time · 聚合${p.sampleCount}次 · 平均${p.latencyMs?.let { "${it}ms" } ?: "—"} · 最小${p.minLatencyMs?.let { "${it}ms" } ?: "—"} · 最大${p.maxLatencyMs?.let { "${it}ms" } ?: "—"} · 丢包${p.lossCount}"
+            } else {
+                "$time · ${p.latencyMs?.let { "延迟 ${it}ms" } ?: "丢包/超时"} · 丢包${p.lossCount}"
+            }
+            Text(text, color = TextDark, fontSize = 11.sp, fontWeight = FontWeight.Bold, lineHeight = 15.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        } ?: Text(
+            if (autoFollow) "$rangeText · 红色=丢包，橙色=高延迟；拖动查看历史，双击回实时" else "$rangeText · 拖动查看，点回实时返回最新",
             color = Muted,
             fontSize = 10.sp,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
         )
-        Row(modifier = Modifier.fillMaxWidth().height(154.dp), verticalAlignment = Alignment.CenterVertically) {
-            Column(modifier = Modifier.width(34.dp).height(142.dp), verticalArrangement = Arrangement.SpaceBetween) {
-                axisLabels(maxY).forEach { Text(it.toString(), color = Muted, fontSize = 9.sp, maxLines = 1) }
-            }
-            Canvas(modifier = Modifier.weight(1f).height(142.dp).background(Color(0xFFF8FAFC), ShapeS).padding(6.dp)) {
-                val w = size.width
-                val h = size.height
-                repeat(4) { idx ->
-                    val y = h * (idx + 1) / 5f
-                    drawLine(Border.copy(alpha = 0.55f), Offset(0f, y), Offset(w, y), strokeWidth = 1f)
-                }
-                if (sorted.isNotEmpty()) {
-                    fun toOffset(p: PingPoint): Offset? {
-                        val latency = p.latencyMs ?: return null
-                        val x = w * ((p.elapsedSec - minX).toFloat() / (maxX - minX).toFloat())
-                        val clipped = latency.coerceIn(0, maxY)
-                        val y = h - h * (clipped.toFloat() / maxY.toFloat())
-                        return Offset(x, y)
-                    }
-
-                    val segments = mutableListOf<MutableList<Pair<PingPoint, Offset>>>()
-                    var current = mutableListOf<Pair<PingPoint, Offset>>()
-                    var previous: PingPoint? = null
-                    sorted.forEach { p ->
-                        val offset = toOffset(p)
-                        if (offset == null) {
-                            val x = w * ((p.elapsedSec - minX).toFloat() / (maxX - minX).toFloat())
-                            if (p.lossCount > 0) drawCircle(ErrorRed, radius = 4f, center = Offset(x, h - 5f))
-                            if (current.isNotEmpty()) segments.add(current)
-                            current = mutableListOf()
-                            previous = p
-                        } else {
-                            val gap = previous?.let { p.elapsedSec - it.elapsedSec } ?: 0
-                            if (gap > 3 && current.isNotEmpty()) {
-                                segments.add(current)
-                                current = mutableListOf()
-                            }
-                            current.add(p to offset)
-                            previous = p
-                        }
-                    }
-                    if (current.isNotEmpty()) segments.add(current)
-
-                    segments.forEach { segment ->
-                        if (segment.size == 1) {
-                            drawCircle(Blue, radius = 3.2f, center = segment.first().second)
-                        } else {
-                            val path = Path()
-                            path.moveTo(segment.first().second.x, segment.first().second.y)
-                            for (i in 1 until segment.size) {
-                                val prev = segment[i - 1].second
-                                val next = segment[i].second
-                                val midX = (prev.x + next.x) / 2f
-                                path.cubicTo(midX, prev.y, midX, next.y, next.x, next.y)
-                            }
-                            drawPath(path, color = Blue, style = Stroke(width = 3f, cap = StrokeCap.Round))
-                        }
-                        segment.forEach { (p, o) ->
-                            if (p.highLatency || (p.latencyMs ?: 0) > maxY) drawCircle(Orange, radius = 4.2f, center = o)
-                            else drawCircle(Blue, radius = 2.6f, center = o)
-                            if (p.lossCount > 0) drawCircle(ErrorRed, radius = 3.6f, center = Offset(o.x, h - 5f))
-                        }
-                    }
-                }
-            }
-        }
-        Row(modifier = Modifier.fillMaxWidth().padding(start = 34.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-            ticks.forEach { Text("${it}s", color = Muted, fontSize = 10.sp) }
-        }
     }
+}
+
+private fun pingAxisTicks(startMs: Long, endMs: Long, plotWidthPx: Float): List<Long> {
+    val maxCount = when {
+        plotWidthPx < 320f -> 4
+        plotWidthPx < 520f -> 5
+        else -> 6
+    }
+    val span = (endMs - startMs).coerceAtLeast(1L)
+    val count = maxCount.coerceAtLeast(3)
+    return (0 until count).map { idx -> startMs + (span * idx / (count - 1)) }
+}
+
+private fun formatPingRelativeLabel(deltaMs: Long): String {
+    val abs = kotlin.math.abs(deltaMs)
+    return when {
+        abs < 1_000L -> "现在"
+        abs < 60_000L -> "-${abs / 1_000}s"
+        else -> "-${abs / 60_000}m"
+    }
+}
+
+private fun formatPingAxisTime(ms: Long): String {
+    val totalSec = (ms / 1_000L).coerceAtLeast(0L)
+    return if (totalSec < 60L) "${totalSec}s" else "${totalSec / 60}m${(totalSec % 60).toString().padStart(2, '0')}"
+}
+
+private fun buildPingLossRanges(points: List<PingPoint>, startMs: Long, endMs: Long): List<Triple<Long, Long, Int>> {
+    val loss = points.filter { it.lossCount > 0 }.sortedBy { it.elapsedMs }
+    if (loss.isEmpty()) return emptyList()
+    val ranges = mutableListOf<Triple<Long, Long, Int>>()
+    var s = loss.first().elapsedMs
+    var e = s
+    var c = loss.first().lossCount
+    var prev = loss.first()
+    loss.drop(1).forEach { p ->
+        val close = p.elapsedMs - prev.elapsedMs <= 1_100L
+        if (close) {
+            e = p.elapsedMs
+            c += p.lossCount
+        } else {
+            ranges += Triple(s.coerceAtLeast(startMs), e.coerceAtMost(endMs), c)
+            s = p.elapsedMs
+            e = p.elapsedMs
+            c = p.lossCount
+        }
+        prev = p
+    }
+    ranges += Triple(s.coerceAtLeast(startMs), e.coerceAtMost(endMs), c)
+    return ranges
 }
 
 @Composable
