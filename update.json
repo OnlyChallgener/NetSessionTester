@@ -1,14 +1,15 @@
 {
-  "versionCode": 123,
+  "versionCode": 125,
   "versionName": "V1.1.15",
-  "title": "发现新版本 V1.1.15 build124",
+  "title": "自测版本 V1.1.15 build125",
   "content": [
-    "修复网络信息轻量刷新时延迟显示不可用的问题",
-    "首页延迟改为独立轻量检测，不再依赖完整 NAT/STUN 手动诊断",
-    "保留 build121 的底部导航、模式切换和历史筛选按钮圆角点击修复",
-    "保留 MTU 综合/ICMP/TCP/PMTU 与 WiFi 漫游图表/历史功能"
+    "Ping 图表修复：X/Y 轴安全边距、信息栏横向滑动、停止状态显示修正",
+    "新增实时抖动：最近 50 个成功 RTT 的相邻差平均值，丢包/超时不参与",
+    "统计区改为单行横向滑动，增加抖动和时长卡片",
+    "开始新 Ping 测试时清空旧曲线和状态，避免接续上次图形",
+    "Ping 历史标题栏支持横向滑动并显示时长"
   ],
-  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.1.15-124/NetSessionTester-V1.1.15-build124-signed.apk",
-  "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/tag/v1.1.15-124",
+  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.1.15-125/NetSessionTester-V1.1.15-build125-signed.apk",
+  "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/tag/v1.1.15-125",
   "force": false
 }
