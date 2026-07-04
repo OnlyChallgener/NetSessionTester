@@ -1,15 +1,14 @@
 {
-  "versionCode": 126,
+  "versionCode": 128,
   "versionName": "V1.1.15",
-  "title": "自测版本 V1.1.15 build126",
+  "title": "自测版本 V1.1.15 build128",
   "content": [
-    "Ping 图表修复：X/Y 轴安全边距、信息栏横向滑动、停止状态显示修正",
-    "新增实时抖动：最近 50 个成功 RTT 的相邻差平均值，丢包/超时不参与",
-    "统计区改为单行横向滑动，增加抖动和时长卡片",
-    "开始新 Ping 测试时清空旧曲线和状态，避免接续上次图形",
-    "Ping 历史标题栏支持横向滑动并显示时长"
+    "Ping 历史最多保存 12 条，历史页标题显示条数和占用空间",
+    "Ping 历史单条支持删除",
+    "连接数测试启动时，Ping 自动同步连接数测试目标地址",
+    "Ping 图低延迟场景启用局部 Y 轴放大，改善路由器低延迟曲线观感"
   ],
-  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.1.15-126/NetSessionTester-V1.1.15-build126-signed.apk",
-  "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/tag/v1.1.15-126",
+  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.1.15-128/NetSessionTester-V1.1.15-build128-signed.apk",
+  "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/tag/v1.1.15-128",
   "force": false
 }
