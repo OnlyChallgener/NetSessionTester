@@ -162,6 +162,9 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.core.view.WindowCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.LifecycleOwner
 import com.demonv.netsessiontester.data.HistoryStore
 import com.demonv.netsessiontester.data.HistoryCounts
 import com.demonv.netsessiontester.data.LogStore
@@ -199,6 +202,7 @@ import java.io.OutputStreamWriter
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.HttpURLConnection
+import java.net.IDN
 import java.net.Inet4Address
 import java.net.Inet6Address
 import java.net.InetAddress
@@ -2033,6 +2037,74 @@ private fun looksLikeIpv4Literal(value: String): Boolean {
 
 private fun looksLikeIpv6Literal(value: String): Boolean = value.contains(':')
 
+private data class NormalizedNetworkTarget(
+    val host: String,
+    val port: Int? = null,
+    val error: String? = null
+)
+
+private fun normalizeNetworkTargetInput(raw: String, defaultHost: String = "223.5.5.5"): NormalizedNetworkTarget {
+    var value = raw.trim()
+    if (value.isBlank()) return NormalizedNetworkTarget(defaultHost)
+    if (value.any { it.isWhitespace() }) return NormalizedNetworkTarget(defaultHost, error = "地址格式不正确，请输入域名或 IP")
+
+    var parsedPort: Int? = null
+
+    if (value.contains("://")) {
+        val uri = runCatching { Uri.parse(value) }.getOrNull()
+        val host = uri?.host?.trim()?.trim('[', ']')
+        if (host.isNullOrBlank()) return NormalizedNetworkTarget(defaultHost, error = "地址格式不正确，请输入域名或 IP")
+        parsedPort = uri.port.takeIf { it in 1..65535 }
+        value = host
+    } else {
+        // 支持用户粘贴 example.com/path，测试目标只取 host 部分。
+        value = value.substringBefore('/').substringBefore('?').substringBefore('#')
+        if (value.startsWith("[") && value.contains("]")) {
+            val end = value.indexOf(']')
+            val hostPart = value.substring(1, end)
+            val rest = value.substring(end + 1)
+            if (rest.startsWith(":")) parsedPort = rest.drop(1).toIntOrNull()?.takeIf { it in 1..65535 }
+            value = hostPart
+        } else {
+            val colonCount = value.count { it == ':' }
+            if (colonCount == 1) {
+                val hostPart = value.substringBefore(':')
+                val portPart = value.substringAfter(':')
+                val portValue = portPart.toIntOrNull()
+                if (portValue != null && portValue in 1..65535) {
+                    parsedPort = portValue
+                    value = hostPart
+                } else if (portPart.isNotBlank()) {
+                    return NormalizedNetworkTarget(defaultHost, error = "端口格式不正确")
+                }
+            }
+        }
+    }
+
+    value = value.trim().trim('[', ']')
+    if (value.isBlank()) return NormalizedNetworkTarget(defaultHost, error = "请输入目标地址")
+    if (value.any { it.isWhitespace() || it == '/' || it == '\\' }) {
+        return NormalizedNetworkTarget(defaultHost, error = "地址格式不正确，请输入域名或 IP")
+    }
+
+    val normalizedHost = when {
+        looksLikeIpv4Literal(value) || looksLikeIpv6Literal(value) -> value
+        else -> {
+            val ascii = runCatching { IDN.toASCII(value) }.getOrNull()
+            if (ascii.isNullOrBlank() || ascii.length > 253) return NormalizedNetworkTarget(defaultHost, error = "域名格式不正确")
+            val labelOk = ascii.split('.').all { label ->
+                label.isNotBlank() && label.length <= 63 &&
+                    label.first() != '-' && label.last() != '-' &&
+                    label.all { ch -> ch.isLetterOrDigit() || ch == '-' }
+            }
+            if (!labelOk) return NormalizedNetworkTarget(defaultHost, error = "域名格式不正确")
+            ascii
+        }
+    }
+
+    return NormalizedNetworkTarget(normalizedHost, parsedPort)
+}
+
 private data class ResolvedPingTarget(
     val address: String,
     val protocol: PingProtocolMode,
@@ -2052,7 +2124,7 @@ private data class PingStreamEvent(
 )
 
 private suspend fun resolvePingTarget(host: String, protocol: PingProtocolMode): ResolvedPingTarget = withContext(Dispatchers.IO) {
-    val target = host.trim().trim('[', ']').ifBlank { "223.5.5.5" }
+    val target = normalizeNetworkTargetInput(host, "223.5.5.5").host
     runCatching {
         if (looksLikeIpv4Literal(target)) {
             val literal = InetAddress.getByName(target) as? Inet4Address
@@ -2837,7 +2909,16 @@ private fun NetSessionTesterApp() {
     }
 
     fun startPingMonitor(reset: Boolean = false, targetOverride: String? = null) {
-        val target = targetOverride?.trim()?.takeIf { it.isNotBlank() } ?: pingTarget.trim().ifBlank { host.ifBlank { "223.5.5.5" } }
+        val rawTarget = targetOverride?.trim()?.takeIf { it.isNotBlank() } ?: pingTarget.trim().ifBlank { host.ifBlank { "223.5.5.5" } }
+        val normalizedTarget = normalizeNetworkTargetInput(rawTarget, "223.5.5.5")
+        if (normalizedTarget.error != null) {
+            pingRunning = false
+            pingIntervalLabel = normalizedTarget.error
+            pingActiveTargetLabel = rawTarget
+            scope.launch { snackbarHostState.showSnackbar(normalizedTarget.error) }
+            return
+        }
+        val target = normalizedTarget.host
         val interval = safePingIntervalMs()
         val timeout = safePingTimeoutMs()
         val maxCount = safePingCount()
@@ -3048,13 +3129,27 @@ private fun NetSessionTesterApp() {
         }
     }
 
-    fun stopPingMonitor() {
+    fun stopPingMonitor(reason: String = "手动停止") {
+        val wasRunning = pingRunning
+        val sessionId = activePingSessionId
+        val stoppedAt = System.currentTimeMillis()
         pingJob?.cancel()
         pingJob = null
         pingRunning = false
-        pingSessionEndedAt = System.currentTimeMillis()
+        pingSessionEndedAt = stoppedAt
         pingDurationTick = pingSessionEndedAt
-        pingIntervalLabel = "已停止"
+        pingIntervalLabel = if (reason == "手动停止") "已停止" else "已中断"
+        if (wasRunning && reason != "手动停止" && sessionId != 0L) {
+            appendPingLog(PingLogEntry(
+                timeEpochMs = stoppedAt,
+                target = pingTarget.ifBlank { pingActiveTargetLabel.ifBlank { "Ping" } },
+                protocol = pingProtocolSetting.label,
+                latencyMs = null,
+                status = "中断",
+                note = reason,
+                sessionId = sessionId
+            ))
+        }
     }
 
     fun clearPingData() {
@@ -3075,6 +3170,22 @@ private fun NetSessionTesterApp() {
         scope.launch { snackbarHostState.showSnackbar("已删除 1 条 Ping 历史") }
     }
 
+    DisposableEffect(context, pingRunning, state.isAdding) {
+        val lifecycleOwner = context as? LifecycleOwner
+        if (lifecycleOwner == null) {
+            onDispose { }
+        } else {
+            val observer = LifecycleEventObserver { _, event ->
+                if (event == Lifecycle.Event.ON_STOP && pingRunning && !state.isAdding) {
+                    // 准确优先：普通 Ping 测试退后台/锁屏后不伪装连续数据，直接中断并保存部分记录。
+                    stopPingMonitor("APP进入后台/锁屏，准确优先已中断；后台区间不计入统计")
+                }
+            }
+            lifecycleOwner.lifecycle.addObserver(observer)
+            onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+        }
+    }
+
     fun ensureNotificationPermission() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
@@ -3084,10 +3195,15 @@ private fun NetSessionTesterApp() {
     }
 
     fun buildConfig(): SessionConfig? {
+        val normalizedHost = normalizeNetworkTargetInput(host.ifBlank { "www.baidu.com" }, "www.baidu.com")
+        if (normalizedHost.error != null) {
+            scope.launch { snackbarHostState.showSnackbar(normalizedHost.error) }
+            return null
+        }
         val config = runCatching {
             SessionConfig(
-                host = host.ifBlank { "www.baidu.com" },
-                port = port.toIntOrNull() ?: 80,
+                host = normalizedHost.host,
+                port = normalizedHost.port ?: (port.toIntOrNull() ?: 80),
                 mode = mode,
                 batchSize = batchSize.toIntOrNull() ?: 200,
                 intervalMs = intervalMs.toLongOrNull() ?: 100L,
