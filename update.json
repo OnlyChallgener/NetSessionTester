@@ -1,15 +1,15 @@
 {
-  "versionCode": 130,
+  "versionCode": 131,
   "versionName": "V1.1.15",
-  "title": "发现新版本 V1.1.15 build130",
+  "title": "自测版本 V1.1.15 build131",
   "content": [
-    "Ping 测试增加目标预检，错误网址不会直接进入测试",
-    "预检阶段不计入测试时长、平均速率和图表",
-    "普通 Ping 后台或锁屏时按准确优先策略中断并保存部分记录",
-    "修复后台缺失采样被画成直线的问题",
-    "连接数测试保留前台服务，并同步 Ping 目标地址"
+    "Ping 间隔自动匹配推荐超时",
+    "Ping 统计增加超时次数",
+    "Ping 高频采用固定节拍、并发上限和跳过保护",
+    "优化丢包断点绘制，减少碎线毛刺",
+    "网络信息与工具小图标语义化优化"
   ],
-  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.1.15-130/NetSessionTester-V1.1.15-build130-signed.apk",
-  "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/tag/v1.1.15-130",
+  "apkUrl": "",
+  "githubUrl": "",
   "force": false
 }

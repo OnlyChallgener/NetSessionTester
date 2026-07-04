@@ -77,6 +77,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -106,6 +107,7 @@ import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.PlayArrow
@@ -2331,6 +2333,20 @@ private suspend fun streamIcmpPingResolved(
     }
 }
 
+private fun recommendedPingTimeoutMsForInterval(intervalMs: Long): Int = when {
+    intervalMs <= 30L -> 300
+    intervalMs <= 50L -> 500
+    intervalMs <= 100L -> 800
+    intervalMs <= 200L -> 1000
+    intervalMs <= 500L -> 1500
+    else -> 3000
+}
+
+private fun pingMaxInflight(intervalMs: Long, timeoutMs: Int): Int {
+    val byWindow = ((timeoutMs + intervalMs - 1L) / intervalMs).toInt().coerceAtLeast(1)
+    return byWindow.coerceIn(3, 16)
+}
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -3041,22 +3057,21 @@ private fun NetSessionTesterApp() {
                         var scheduled = 0
                         var inFlight = 0
                         var nextTick = SystemClock.elapsedRealtime()
-                        val maxInFlight = when {
-                            interval <= 30L -> 8
-                            interval < 100L -> 6
-                            else -> 4
-                        }
-                        val tcpTimeout = when {
-                            interval <= 50L -> timeout.coerceAtMost(500)
-                            interval < 200L -> timeout.coerceAtMost(800)
-                            else -> timeout
-                        }
+                        val tcpTimeout = timeout.coerceIn(180, 5_000)
+                        val maxInFlight = pingMaxInflight(interval, tcpTimeout)
+                        var skippedByInflight = 0
                         val finiteJobs = mutableListOf<Job>()
                         while (currentCoroutineContext().isActive && (finiteCount == null || scheduled < finiteCount)) {
                             val waitMs = nextTick - SystemClock.elapsedRealtime()
                             if (waitMs > 0L) delay(waitMs)
                             nextTick += interval
-                            if (inFlight >= maxInFlight) continue
+                            if (inFlight >= maxInFlight) {
+                                skippedByInflight++
+                                if (skippedByInflight == 1 || skippedByInflight % 50 == 0) {
+                                    pendingLogs.add(PingLogEntry(target = target, protocol = tcpProtocol, latencyMs = null, status = "跳过", note = "并发已满：${maxInFlight}，主动跳过，不计入丢包", sessionId = sessionId))
+                                }
+                                continue
+                            }
                             scheduled++
                             inFlight++
                             val job = launch {
@@ -3882,7 +3897,11 @@ private fun NetSessionTesterApp() {
                         saveTargetHistory(context.applicationContext, "ping_target_history_v1", next)
                     },
                     pingIntervalMs = pingIntervalSetting,
-                    onPingIntervalMsChange = { pingIntervalSetting = it },
+                    onPingIntervalMsChange = { value ->
+                        val clean = value.onlyDigits()
+                        pingIntervalSetting = clean
+                        clean.toLongOrNull()?.let { pingTimeoutSetting = recommendedPingTimeoutMsForInterval(it).toString() }
+                    },
                     pingCount = pingCountSetting,
                     onPingCountChange = { pingCountSetting = it },
                     pingTimeoutMs = pingTimeoutSetting,
@@ -3901,7 +3920,7 @@ private fun NetSessionTesterApp() {
                         host = "www.baidu.com"; port = "80"; mode = TestMode.IPV4_THEN_IPV6
                         batchSize = "200"; intervalMs = "100"; timeoutMs = "1200"
                         successLimit = "65535"; failureLimit = "600"; keepConnections = true; maskPrivacy = false; historyLimit = "30"
-                        pingEnabled = true; pingTarget = "223.5.5.5"; pingIntervalSetting = "1000"; pingCountSetting = "无限"; pingTimeoutSetting = "1000"; pingProtocolSetting = PingProtocolMode.AUTO
+                        pingEnabled = true; pingTarget = "223.5.5.5"; pingIntervalSetting = "1000"; pingCountSetting = "无限"; pingTimeoutSetting = recommendedPingTimeoutMsForInterval(1000).toString(); pingProtocolSetting = PingProtocolMode.AUTO
                     }
                 )
 
@@ -4992,7 +5011,7 @@ private fun SettingsPage(
                             }
                         }
                         Text(
-                            if ((pingIntervalMs.toIntOrNull() ?: 1000) < 200) "间隔低于200ms：后台采样，图形聚合显示，避免闪烁。" else "间隔≥200ms：按普通间隔绘制，支持拖动查看历史。",
+                            "间隔改变会自动推荐超时：30→300ms，50→500ms，100→800ms，200→1000ms，500→1500ms，1000→3000ms；超时才算丢包。",
                             color = Muted,
                             fontSize = 12.sp,
                             lineHeight = 16.sp
@@ -5924,6 +5943,25 @@ private fun MarkBox(mark: String, bg: Color, fg: Color) {
         contentAlignment = Alignment.Center
     ) {
         Icon(iconFor(mark), contentDescription = null, tint = fg, modifier = Modifier.width(16.dp).height(16.dp))
+        val badge = when (mark) {
+            "ipv4" -> "4"
+            "ipv6" -> "6"
+            else -> null
+        }
+        if (badge != null) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .offset(x = 5.dp, y = (-5).dp)
+                    .width(13.dp)
+                    .height(13.dp)
+                    .background(Color.White, CircleShape)
+                    .border(1.dp, fg.copy(alpha = 0.45f), CircleShape),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(badge, color = fg, fontSize = 8.sp, fontWeight = FontWeight.ExtraBold, lineHeight = 8.sp)
+            }
+        }
     }
 }
 
@@ -7178,7 +7216,7 @@ private fun NetworkToolShortcutRow(
             NetworkToolShortcutCard(
                 title = "NSLookup",
                 subtitle = "DNS解析",
-                mark = "host",
+                mark = "nslookup",
                 color = Blue,
                 bg = BlueSoft,
                 modifier = Modifier.weight(1f),
@@ -7187,7 +7225,7 @@ private fun NetworkToolShortcutRow(
             NetworkToolShortcutCard(
                 title = "Tracket",
                 subtitle = "路由追踪",
-                mark = "target",
+                mark = "tracket",
                 color = Purple,
                 bg = Color(0xFFF3E8FF),
                 modifier = Modifier.weight(1f),
@@ -7198,7 +7236,7 @@ private fun NetworkToolShortcutRow(
             NetworkToolShortcutCard(
                 title = "MTU检测",
                 subtitle = "路径MTU",
-                mark = "tune",
+                mark = "mtu",
                 color = Orange,
                 bg = Color(0xFFFFF3E0),
                 modifier = Modifier.weight(1f),
@@ -7207,7 +7245,7 @@ private fun NetworkToolShortcutRow(
             NetworkToolShortcutCard(
                 title = "漫游测试",
                 subtitle = "WiFi漫游",
-                mark = "wifi",
+                mark = "roaming",
                 color = Green,
                 bg = GreenSoft,
                 modifier = Modifier.weight(1f),
@@ -9102,42 +9140,42 @@ private fun NetworkEnvironmentSettingsCard(
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 val ipv4Text = if (maskPrivacy) maskIpText(publicIpResult.ipv4) else publicIpResult.ipv4
                 val ipv6Text = if (maskPrivacy) maskIpText(publicIpResult.ipv6) else publicIpResult.ipv6
-                InfoMetricTile("◎", "IPv4", ipv4Text, BlueSoft, Blue, Modifier.weight(1f), onClick = onCopyPublicIpv4)
-                InfoMetricTile("✓", "IPv6", ipv6Text, GreenSoft, Green, Modifier.weight(1f), onClick = onCopyPublicIpv6)
+                InfoMetricTile("ipv4", "IPv4", ipv4Text, BlueSoft, Blue, Modifier.weight(1f), onClick = onCopyPublicIpv4)
+                InfoMetricTile("ipv6", "IPv6", ipv6Text, GreenSoft, Green, Modifier.weight(1f), onClick = onCopyPublicIpv6)
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                InfoMetricTile("N", "NAT", probeInfo.natType, Color(0xFFFFE4E6), ErrorRed, Modifier.weight(1f), onClick = onOpenNatDiagnostics)
-                InfoMetricTile("C", "运营商", probeInfo.carrier, Color(0xFFF3E8FF), Purple, Modifier.weight(1f))
+                InfoMetricTile("nat", "NAT", probeInfo.natType, Color(0xFFFFE4E6), ErrorRed, Modifier.weight(1f), onClick = onOpenNatDiagnostics)
+                InfoMetricTile("carrier", "运营商", probeInfo.carrier, Color(0xFFF3E8FF), Purple, Modifier.weight(1f))
             }
             NetworkToolShortcutRow(onOpenNsLookup = onOpenNsLookup, onOpenTracket = onOpenTracket, onOpenMtu = onOpenMtu, onOpenRoaming = onOpenRoaming)
             Text("NAT类型需手动诊断；网络信息只做轻量展示。", color = Muted, fontSize = 11.sp, modifier = Modifier.fillMaxWidth(), maxLines = 1, overflow = TextOverflow.Ellipsis)
             return@SoftCard
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-            InfoMetricTile("⌂", "本地IP", if (maskPrivacy) maskIpText(probeInfo.localIp) else probeInfo.localIp, Color(0xFFE0F7FA), Color(0xFF00A7C6), Modifier.weight(1f))
-            InfoMetricTile("◴", "延迟", probeInfo.latencyText, Color(0xFFFFF3E0), Orange, Modifier.weight(1f))
+            InfoMetricTile("local_ip", "本地IP", if (maskPrivacy) maskIpText(probeInfo.localIp) else probeInfo.localIp, Color(0xFFE0F7FA), Color(0xFF00A7C6), Modifier.weight(1f))
+            InfoMetricTile("latency", "延迟", probeInfo.latencyText, Color(0xFFFFF3E0), Orange, Modifier.weight(1f))
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-            InfoMetricTile("◎", "公网IPv4", if (maskPrivacy) maskIpText(publicIpResult.ipv4) else publicIpResult.ipv4, BlueSoft, Blue, Modifier.weight(1f), onClick = onCopyPublicIpv4)
+            InfoMetricTile("ipv4", "公网IPv4", if (maskPrivacy) maskIpText(publicIpResult.ipv4) else publicIpResult.ipv4, BlueSoft, Blue, Modifier.weight(1f), onClick = onCopyPublicIpv4)
             val ipv6Display = if (publicIpResult.ipv6.isUsableIpText()) publicIpResult.ipv6 else probeInfo.ipv6Status
-            InfoMetricTile("✓", "公网IPv6", if (maskPrivacy) maskIpText(ipv6Display) else ipv6Display, GreenSoft, Green, Modifier.weight(1f), onClick = onCopyPublicIpv6)
+            InfoMetricTile("ipv6", "公网IPv6", if (maskPrivacy) maskIpText(ipv6Display) else ipv6Display, GreenSoft, Green, Modifier.weight(1f), onClick = onCopyPublicIpv6)
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
             val mapped = if (publicIpResult.ipv4.isUsableIpText() && probeInfo.portText != "不可用" && probeInfo.portText != "待检测") "${publicIpResult.ipv4}:${probeInfo.portText}" else probeInfo.portText
-            InfoMetricTile("M", "公网映射", if (maskPrivacy) maskIpText(mapped) else mapped, Color(0xFFE0F2FE), Blue, Modifier.weight(1f))
-            InfoMetricTile("N", "NAT类型", probeInfo.natType, Color(0xFFFFE4E6), ErrorRed, Modifier.weight(1f), onClick = onOpenNatDiagnostics)
+            InfoMetricTile("mapping", "公网映射", if (maskPrivacy) maskIpText(mapped) else mapped, Color(0xFFE0F2FE), Blue, Modifier.weight(1f))
+            InfoMetricTile("nat", "NAT类型", probeInfo.natType, Color(0xFFFFE4E6), ErrorRed, Modifier.weight(1f), onClick = onOpenNatDiagnostics)
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-            InfoMetricTile("↕", "优先级", probeInfo.priority, Color(0xFFFFF3E0), Orange, Modifier.weight(1f))
-            InfoMetricTile("M", "出网端口", probeInfo.mappingBehavior, Color(0xFFE0F2FE), Blue, Modifier.weight(1f))
+            InfoMetricTile("priority", "优先级", probeInfo.priority, Color(0xFFFFF3E0), Orange, Modifier.weight(1f))
+            InfoMetricTile("egress", "出网端口", probeInfo.mappingBehavior, Color(0xFFE0F2FE), Blue, Modifier.weight(1f))
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-            InfoMetricTile("F", "回包限制", probeInfo.filterBehavior, Color(0xFFFCE7F3), Color(0xFFD946EF), Modifier.weight(1f))
-            InfoMetricTile("D", "DNS诊断", probeInfo.dnsStatus, Color(0xFFF3E8FF), Purple, Modifier.weight(1f))
+            InfoMetricTile("filter", "回包限制", probeInfo.filterBehavior, Color(0xFFFCE7F3), Color(0xFFD946EF), Modifier.weight(1f))
+            InfoMetricTile("dns", "DNS诊断", probeInfo.dnsStatus, Color(0xFFF3E8FF), Purple, Modifier.weight(1f))
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-            InfoMetricTile("C", "NAT置信度", probeInfo.confidence, Color(0xFFF8FAFC), Muted, Modifier.weight(1f))
-            InfoMetricTile("C", "运营商", probeInfo.carrier, Color(0xFFF3E8FF), Purple, Modifier.weight(1f))
+            InfoMetricTile("confidence", "NAT置信度", probeInfo.confidence, Color(0xFFF8FAFC), Muted, Modifier.weight(1f))
+            InfoMetricTile("carrier", "运营商", probeInfo.carrier, Color(0xFFF3E8FF), Purple, Modifier.weight(1f))
         }
         NetworkToolShortcutRow(onOpenNsLookup = onOpenNsLookup, onOpenTracket = onOpenTracket, onOpenMtu = onOpenMtu, onOpenRoaming = onOpenRoaming)
         Text(
@@ -9259,6 +9297,7 @@ private fun PingCompactChartCard(
             MiniMetric("最高", max?.let { "${it}ms" } ?: "—", Orange, Modifier.width(72.dp))
             MiniMetric("最低", min?.let { "${it}ms" } ?: "—", Green, Modifier.width(72.dp))
             MiniMetric("丢包", "$loss%", if (loss == 0) Muted else ErrorRed, Modifier.width(72.dp))
+            MiniMetric("超时", "${lossTotal}次", if (lossTotal == 0) Muted else ErrorRed, Modifier.width(72.dp))
             MiniMetric("抖动", jitterMs?.let { formatPingJitter(it) } ?: "—", Purple, Modifier.width(72.dp))
             MiniMetric("时长", formatPingDuration(durationMs), Navy, Modifier.width(72.dp))
         }
@@ -9462,35 +9501,47 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
                     }
                 }
 
-                val linePoints = visible.filter { it.latencyMs != null }
-                if (linePoints.isNotEmpty()) {
+                // 成功样本只连接连续成功段；丢包/null 不参与连线，避免断点处出现毛刺和零碎短线。
+                val segments = mutableListOf<List<PingPoint>>()
+                var segment = mutableListOf<PingPoint>()
+                var previousPoint: PingPoint? = null
+                fun flushSegment() {
+                    if (segment.size >= 3) segments += segment.toList()
+                    segment = mutableListOf()
+                }
+                visible.sortedBy { it.elapsedMs }.forEach { p ->
+                    val latency = p.latencyMs
+                    val gapTooLarge = previousPoint?.let { p.elapsedMs - it.elapsedMs > maxOf(900L, windowSpanMs / 28L) } ?: false
+                    val cleanSuccess = latency != null && p.lossCount == 0
+                    if (!cleanSuccess || gapTooLarge) {
+                        flushSegment()
+                    }
+                    if (cleanSuccess) segment.add(p)
+                    previousPoint = p
+                }
+                flushSegment()
+
+                segments.forEach { seg ->
                     val path = Path()
-                    var started = false
-                    var prev: PingPoint? = null
-                    linePoints.forEach { p ->
-                        val latency = p.latencyMs ?: return@forEach
+                    seg.forEachIndexed { index, p ->
+                        val latency = p.latencyMs ?: return@forEachIndexed
                         val o = Offset(xOf(p.elapsedMs), yOf(latency))
-                        val gapTooLarge = prev?.let { p.elapsedMs - it.elapsedMs > maxOf(1_500L, windowSpanMs / 24L) } ?: false
-                        if (!started || gapTooLarge || (prev?.lossCount ?: 0) > 0) {
-                            path.moveTo(o.x, o.y)
-                            started = true
-                        } else {
-                            path.lineTo(o.x, o.y)
-                        }
-                        prev = p
+                        if (index == 0) path.moveTo(o.x, o.y) else path.lineTo(o.x, o.y)
                     }
                     drawPath(path, color = Blue, style = Stroke(width = 2.6f, cap = StrokeCap.Round))
+                }
 
-                    linePoints.forEach { p ->
-                        val latency = p.latencyMs ?: return@forEach
+                visible.forEach { p ->
+                    val latency = p.latencyMs
+                    if (latency != null && p.lossCount == 0) {
                         val x = xOf(p.elapsedMs)
                         val y = yOf(latency)
-                        if (p.highLatency || latency >= maxY * 0.85f) drawCircle(Orange, radius = 3.8f, center = Offset(x, y))
-                        if (p.lossCount > 0 && !lossRanges.any { p.elapsedMs in it.first..it.second && it.third >= 3 }) {
-                            val lossY = bottom - 3f
-                            drawLine(ErrorRed, Offset(x, lossY - 10f), Offset(x, lossY), strokeWidth = 2.2f)
-                            drawCircle(ErrorRed, radius = 2.8f, center = Offset(x, lossY))
-                        }
+                        if (p.highLatency || latency >= maxOf(minY + 1, (maxY * 0.85f).roundToInt())) drawCircle(Orange, radius = 3.5f, center = Offset(x, y))
+                    }
+                    if (p.lossCount > 0 && !lossRanges.any { p.elapsedMs in it.first..it.second && it.third >= 3 }) {
+                        val x = xOf(p.elapsedMs)
+                        val lossY = bottom - 3f
+                        drawLine(ErrorRed, Offset(x, lossY - 8f), Offset(x, lossY), strokeWidth = 2.0f)
                     }
                 }
 
@@ -9957,19 +10008,25 @@ private fun StatusChip(text: String, bg: Color, fg: Color, compact: Boolean = fa
 
 @Composable
 private fun iconFor(mark: String) = when (mark) {
-    "◎", "target" -> Icons.Filled.Assessment
-    "∿", "ping" -> Icons.Filled.SignalCellularAlt
-    "≡", "mode", "tune", "dns" -> Icons.Filled.Tune
-    "wifi" -> Icons.Filled.SignalCellularAlt
-    "hourglass" -> Icons.Filled.History
+    "ipv4", "ipv6" -> Icons.Filled.Language
+    "local_ip" -> Icons.Filled.Home
+    "latency" -> Icons.Filled.History
+    "mapping", "target" -> Icons.Filled.Assessment
+    "nat", "filter", "privacy" -> Icons.Filled.Shield
+    "priority" -> Icons.Filled.WarningAmber
+    "egress" -> Icons.Filled.OpenInNew
+    "dns" -> Icons.Filled.Tune
+    "confidence" -> Icons.Filled.CheckCircle
+    "carrier", "wifi", "∿", "ping", "▮" -> Icons.Filled.SignalCellularAlt
+    "nslookup", "host" -> Icons.Filled.Search
+    "tracket" -> Icons.Filled.OpenInNew
+    "mtu", "≡", "mode", "tune", "port" -> Icons.Filled.Tune
+    "roaming" -> Icons.Filled.SignalCellularAlt
+    "◎" -> Icons.Filled.Assessment
+    "hourglass", "time" -> Icons.Filled.History
     "□", "log" -> Icons.Filled.Article
-    "▮" -> Icons.Filled.SignalCellularAlt
     "!" -> Icons.Filled.WarningAmber
-    "host" -> Icons.Filled.Search
-    "port" -> Icons.Filled.Tune
-    "privacy" -> Icons.Filled.Shield
     "count" -> Icons.Filled.Refresh
-    "time" -> Icons.Filled.History
     else -> Icons.Filled.Info
 }
 
