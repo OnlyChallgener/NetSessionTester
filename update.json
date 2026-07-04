@@ -1,14 +1,15 @@
 {
-  "versionCode": 129,
+  "versionCode": 130,
   "versionName": "V1.1.15",
-  "title": "自测版本 V1.1.15 build129",
+  "title": "发现新版本 V1.1.15 build130",
   "content": [
-    "Ping 信息栏改为：目标、抖动、瞬时速率、平均速率、窗口、引擎、状态",
-    "Ping X 轴前期动态窗口：15秒、30秒、60秒，超过1分钟显示最新1分钟",
-    "TCP Socket 高频探测改为准备阶段不计时、端口只预探测一次、固定节拍并发发包",
-    "瞬时速率和平均速率分开显示，避免启动预热拖低实时速度"
+    "Ping 测试增加目标预检，错误网址不会直接进入测试",
+    "预检阶段不计入测试时长、平均速率和图表",
+    "普通 Ping 后台或锁屏时按准确优先策略中断并保存部分记录",
+    "修复后台缺失采样被画成直线的问题",
+    "连接数测试保留前台服务，并同步 Ping 目标地址"
   ],
-  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.1.15-129/NetSessionTester-V1.1.15-build129-signed.apk",
-  "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/tag/v1.1.15-129",
+  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.1.15-130/NetSessionTester-V1.1.15-build130-signed.apk",
+  "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/tag/v1.1.15-130",
   "force": false
 }
