@@ -6014,7 +6014,7 @@ private fun NetGlyph(mark: String, color: Color, modifier: Modifier = Modifier) 
         }
         fun centerText(text: String, cx: Float = 0.5f, cy: Float = 0.55f, scale: Float = 0.34f) {
             val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = color.toArgb()
+                this.color = color.toArgb()
                 textAlign = Paint.Align.CENTER
                 textSize = size.minDimension * scale
                 typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
@@ -9596,7 +9596,7 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
                         extraTopOffset = 6f
                         extraBottomOffset = 4f
                         axisRight.isEnabled = false
-                        axisLeft.position = YAxis.YAxisLabelPosition.OUTSIDE_CHART
+                        axisLeft.setPosition(YAxis.YAxisLabelPosition.OUTSIDE_CHART)
                         axisLeft.textSize = 10f
                         axisLeft.textColor = AndroidColor.rgb(100, 116, 139)
                         axisLeft.gridColor = AndroidColor.argb(90, 226, 232, 240)

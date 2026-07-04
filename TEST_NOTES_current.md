@@ -1,8 +1,8 @@
-# Build133 自测重点
+# Build133 compilefix 自测重点
 
-1. 检查设置页、网络信息、历史页、测试页的小图标是否都清晰且语义不同。
-2. 重点检查不要再出现圆圈感叹号类占位图标。
-3. 检查 Ping 图是否能正常显示、拖动、双击回实时。
-4. 检查丢包多时是否不再整片红，断线是否更干净。
-5. 修改 Ping 间隔时，超时 ms 是否自动变为推荐值，并且仍可手动修改。
-6. GitHub Actions 编译时需能访问 JitPack 下载 MPAndroidChart。
+1. GitHub Actions 应不再出现 `val cannot be reassigned`。
+2. GitHub Actions 应不再出现 `Unresolved reference position`。
+3. 检查设置页、网络信息、历史页、测试页的小图标是否清晰且语义不同。
+4. 检查 Ping 图是否能正常显示、拖动、双击回实时。
+5. 检查丢包多时是否不再整片红，断线是否更干净。
+6. 修改 Ping 间隔时，超时 ms 是否自动变为推荐值，并且仍可手动修改。
