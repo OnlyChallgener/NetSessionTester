@@ -232,7 +232,8 @@ private enum class AppToolPage {
     NSLOOKUP,
     TRACKET,
     MTU,
-    ROAMING
+    ROAMING,
+    PING_HISTORY
 }
 
 private enum class ChartMode(val label: String) {
@@ -326,8 +327,8 @@ private class RttJitterWindow(private val maxSize: Int = 50) {
 
 private fun trimPingLogSessions(
     logs: List<PingLogEntry>,
-    maxSessions: Int = 5,
-    maxEntriesPerSession: Int = 1200
+    maxSessions: Int = 8,
+    maxEntriesPerSession: Int = 6000
 ): List<PingLogEntry> {
     if (logs.isEmpty()) return emptyList()
     return logs
@@ -536,6 +537,9 @@ private fun formatPingDuration(ms: Long): String {
         String.format(java.util.Locale.US, "%02d:%02d", minutes, seconds)
     }
 }
+
+private fun formatPingJitter(value: Double): String =
+    if (value < 10.0) String.format(java.util.Locale.US, "%.1fms", value) else "${value.roundToInt()}ms"
 
 private fun formatReleaseEta(seconds: Int): String = when {
     seconds <= 0 -> "<1s"
@@ -3219,8 +3223,8 @@ private fun NetSessionTesterApp() {
             error = null
         )
         appendLog(LogLine(level = LogLevel.INFO, text = "目标：${config.host}:${config.port} | 模式：${config.mode.label} | 目标CPS：${config.batchSize}/s | 调度间隔：${config.intervalMs}ms | 固定CPS核心"))
-        // Ping 已独立运行：如果用户开启 Ping 且当前未运行，则启动；会话测试不再重置 Ping 数据。
-        if (pingEnabled && pingJob?.isActive != true) startPingMonitor(reset = false)
+        // 连接数测试优先级高于 Ping：开始连接数测试时自动停止旧 Ping，并重新开始一轮同步 Ping 监测。
+        if (pingEnabled) startPingMonitor(reset = true)
         startNetworkWatch(startedAt, testNetworkSignature)
 
         runningJob = scope.launch {
@@ -3538,6 +3542,7 @@ private fun NetSessionTesterApp() {
                 AppToolPage.TRACKET -> TracketToolPage(onBack = { appToolPage = AppToolPage.NONE })
                 AppToolPage.MTU -> MtuToolPage(onBack = { appToolPage = AppToolPage.NONE })
                 AppToolPage.ROAMING -> RoamingToolPage(onBack = { appToolPage = AppToolPage.NONE })
+                AppToolPage.PING_HISTORY -> PingHistoryToolPage(logs = pingLogs, onBack = { appToolPage = AppToolPage.NONE })
                 AppToolPage.NONE -> when (selectedTab) {
                 MainTab.SETTINGS -> SettingsPage(
                     listState = settingsListState,
@@ -3641,7 +3646,7 @@ private fun NetSessionTesterApp() {
                     onStartPing = { startPingMonitor(reset = true) },
                     onStopPing = { stopPingMonitor() },
                     onClearPing = { clearPingData() },
-                    onShowPingLog = { showPingLogDialog = true },
+                    onShowPingLog = { appToolPage = AppToolPage.PING_HISTORY },
                     isAdding = state.isAdding,
                     runPhase = state.runPhase,
                     releaseUi = state.releaseUi,
@@ -4008,6 +4013,89 @@ private fun formatPingLogGroupTitle(group: PingLogGroup): String {
     return listOf(time, formatPingDuration(pingLogGroupDurationMs(group)), group.target, group.protocol, note).filter { it.isNotBlank() }.joinToString(" · ")
 }
 
+
+private fun pingEntriesForSession(group: PingLogGroup): List<PingLogEntry> =
+    group.entries.filter { it.status != "开始" && it.status != "停止" && it.status != "高频不可用" }
+
+private fun pingLogGroupJitterMs(group: PingLogGroup): Double? {
+    val latencies = pingEntriesForSession(group).mapNotNull { it.latencyMs?.toDouble() }
+    if (latencies.size < 2) return null
+    var sum = 0.0
+    var count = 0
+    var last: Double? = null
+    latencies.takeLast(50).forEach { value ->
+        last?.let { prev ->
+            sum += kotlin.math.abs(value - prev)
+            count++
+        }
+        last = value
+    }
+    return if (count > 0) sum / count else null
+}
+
+private fun pingIntervalFromHeader(note: String): Long {
+    val match = Regex("""间隔(\d+)ms""").find(note)
+    return match?.groupValues?.getOrNull(1)?.toLongOrNull()?.coerceIn(30L, 60_000L) ?: 1_000L
+}
+
+private fun pingPointsFromLogGroup(group: PingLogGroup): List<PingPoint> {
+    val items = pingEntriesForSession(group).sortedBy { it.timeEpochMs }
+    if (items.isEmpty()) return emptyList()
+    val interval = pingIntervalFromHeader(group.headerNote)
+    val bucketSize = if (interval < 200L) 250L else 1_000L
+    val start = group.startedAt
+    return items
+        .groupBy { (((it.timeEpochMs - start).coerceAtLeast(0L)) / bucketSize) * bucketSize }
+        .map { (bucketMs, entries) ->
+            val valid = entries.mapNotNull { it.latencyMs }
+            val avg = valid.takeIf { it.isNotEmpty() }?.average()?.roundToInt()
+            PingPoint(
+                elapsedSec = (bucketMs / 1_000L).toInt().coerceAtLeast(0),
+                latencyMs = avg,
+                lossCount = entries.count { it.latencyMs == null || it.status == "超时" },
+                highLatency = valid.any { it >= 100 },
+                sampleCount = entries.size.coerceAtLeast(1),
+                timeEpochMs = start + bucketMs,
+                elapsedMs = bucketMs,
+                minLatencyMs = valid.minOrNull(),
+                maxLatencyMs = valid.maxOrNull()
+            )
+        }
+        .sortedBy { it.elapsedMs }
+}
+
+@Composable
+private fun PingHistoryToolPage(logs: List<PingLogEntry>, onBack: () -> Unit) {
+    val groups = remember(logs) { buildPingLogGroups(logs).take(8) }
+    var expandedSession by remember(groups.firstOrNull()?.sessionId) { mutableStateOf<Long?>(null) }
+    LazyColumn(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Bg)
+            .padding(horizontal = 14.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        item { ToolPageHeader("Ping历史", "保存最近 8 条聚合图形和测试总结，点击卡片展开查看", onBack) }
+        if (groups.isEmpty()) {
+            item {
+                SoftCard {
+                    Text("暂无 Ping 历史记录。", color = Muted, fontSize = 13.sp)
+                }
+            }
+        } else {
+            items(groups, key = { it.sessionId }) { group ->
+                val expanded = expandedSession == group.sessionId
+                PingLogSessionCard(
+                    group = group,
+                    expanded = expanded,
+                    onToggle = { expandedSession = if (expanded) null else group.sessionId }
+                )
+            }
+        }
+        item { Spacer(Modifier.height(70.dp)) }
+    }
+}
+
 @Composable
 private fun PingLogDialog(logs: List<PingLogEntry>, onDismiss: () -> Unit) {
     val groups = buildPingLogGroups(logs).take(5)
@@ -4121,11 +4209,18 @@ private fun PingLogSessionCard(
                 Text(if (expanded) "⌃" else "⌄", color = Blue, fontSize = 18.sp, fontWeight = FontWeight.Bold)
             }
             AnimatedVisibility(visible = expanded) {
-                Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                    items.asReversed().take(180).forEach { entry -> PingLogRow(entry) }
-                    if (items.size > 180) {
-                        Text("仅显示最近 180 条，完整数据已保存", color = Muted, fontSize = 10.sp)
+                val chartPoints = remember(group.entries) { pingPointsFromLogGroup(group) }
+                val jitter = remember(group.entries) { pingLogGroupJitterMs(group) }
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        StatusChip("时长 ${formatPingDuration(pingLogGroupDurationMs(group))}", BlueSoft, Blue, compact = true)
+                        StatusChip("平均 ${avg?.let { "${it}ms" } ?: "—"}", Color(0xFFF8FAFC), Navy, compact = true)
+                        StatusChip("抖动 ${jitter?.let { formatPingJitter(it) } ?: "—"}", Color(0xFFFAF7FF), Purple, compact = true)
+                        StatusChip("丢包 $loss%", if (loss == 0) Color(0xFFF8FAFC) else RedSoft, if (loss == 0) Muted else ErrorRed, compact = true)
                     }
+                    PingLineChart(chartPoints, group.target, running = false, jitterMs = jitter)
+                    Text("已保存聚合图形与测试总结；如需查看明细，下方仅展示最近 80 条。", color = Muted, fontSize = 10.sp)
+                    items.asReversed().take(80).forEach { entry -> PingLogRow(entry) }
                 }
             }
         }
@@ -4715,11 +4810,11 @@ private fun TestPage(
             ReorderableCardItem(id = cardId, order = visibleOrder, onOrderChange = ::updateTestOrder) {
                 when (cardId) {
                     "control" -> SoftCard {
-                        SectionTitle("∿", "测试控制", Blue)
+                        SectionTitle("∿", "连接数测试", Blue)
                         Text(
                             when {
                                 releaseBusy -> "正在释放连接，完成后会自动恢复开始按钮"
-                                isAdding -> "正在运行 · 定速发射 · UI/曲线每秒采样"
+                                isAdding -> "正在运行 · 定速发射 · 同步 Ping 监测"
                                 else -> "状态：$status"
                             },
                             color = if (isAdding) Green else if (releaseBusy) Orange else Muted,
@@ -5824,6 +5919,8 @@ private fun sessionYAxisMax(peak: Int): Int = when {
 }
 
 private fun pingYAxisMax(peak: Int): Int = when {
+    peak <= 10 -> 10
+    peak <= 20 -> 20
     peak <= 50 -> 50
     peak <= 100 -> 100
     peak <= 200 -> 200
@@ -8870,10 +8967,10 @@ private fun PingCompactChartCard(
             MiniMetric("最高", max?.let { "${it}ms" } ?: "—", Orange, Modifier.width(72.dp))
             MiniMetric("最低", min?.let { "${it}ms" } ?: "—", Green, Modifier.width(72.dp))
             MiniMetric("丢包", "$loss%", if (loss == 0) Muted else ErrorRed, Modifier.width(72.dp))
-            MiniMetric("抖动", jitterMs?.let { if (it < 10) String.format(java.util.Locale.US, "%.1fms", it) else "${it.roundToInt()}ms" } ?: "—", Purple, Modifier.width(72.dp))
+            MiniMetric("抖动", jitterMs?.let { formatPingJitter(it) } ?: "—", Purple, Modifier.width(72.dp))
             MiniMetric("时长", formatPingDuration(durationMs), Navy, Modifier.width(72.dp))
         }
-        PingLineChart(pingPoints, activeTargetLabel, running = running)
+        PingLineChart(pingPoints, activeTargetLabel, running = running, jitterMs = jitterMs)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
             Button(
                 onClick = if (running) onStop else onStart,
@@ -8888,7 +8985,7 @@ private fun PingCompactChartCard(
             OutlinedButton(onClick = onLog, modifier = Modifier.weight(0.8f).height(38.dp), shape = ShapeM) {
                 Icon(Icons.Filled.Article, contentDescription = null, modifier = Modifier.width(16.dp).height(16.dp))
                 Spacer(Modifier.width(4.dp))
-                Text("日志 $logCount", fontSize = 12.sp)
+                Text("历史 $logCount", fontSize = 12.sp)
             }
             OutlinedButton(onClick = onClear, modifier = Modifier.weight(0.65f).height(38.dp), shape = ShapeM) {
                 Icon(Icons.Filled.DeleteOutline, contentDescription = null, modifier = Modifier.width(16.dp).height(16.dp))
@@ -8910,21 +9007,21 @@ private fun MiniMetric(label: String, value: String, color: Color, modifier: Mod
 }
 
 @Composable
-private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "", running: Boolean = false) {
+private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "", running: Boolean = false, jitterMs: Double? = null) {
     val allPoints = points.sortedBy { it.elapsedMs }
     val latestMs = allPoints.lastOrNull()?.elapsedMs ?: 0L
     val earliestMs = allPoints.firstOrNull()?.elapsedMs ?: 0L
-    val highFrequency = allPoints.any { it.sampleCount > 1 } || allPoints.zipWithNext().any { (a, b) -> (b.elapsedMs - a.elapsedMs) in 1 until 200 }
-    val windowSpanMs = when {
-        highFrequency -> 60_000L
-        latestMs <= 60_000L -> 60_000L
-        latestMs <= 5 * 60_000L -> 120_000L
-        else -> 5 * 60_000L
-    }
+    val windowSpanMs = 60_000L
     var autoFollow by remember { mutableStateOf(true) }
     var viewEndMs by remember { mutableStateOf(latestMs.coerceAtLeast(windowSpanMs)) }
     var chartWidthPx by remember { mutableStateOf(1f) }
     var selectedPoint by remember { mutableStateOf<PingPoint?>(null) }
+    val firstPointKey = allPoints.firstOrNull()?.timeEpochMs ?: 0L
+
+    LaunchedEffect(firstPointKey, allPoints.isEmpty()) {
+        selectedPoint = null
+        autoFollow = true
+    }
 
     LaunchedEffect(latestMs, windowSpanMs, autoFollow) {
         if (autoFollow) viewEndMs = latestMs.coerceAtLeast(windowSpanMs)
@@ -8950,7 +9047,7 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.weight(1f).horizontalScroll(rememberScrollState())) {
                 Text(
-                    listOf(activeTargetLabel.takeIf { it.isNotBlank() }, rateText.takeIf { it.isNotBlank() }, "窗口${formatPingDuration(windowSpanMs)}", rangeText).filterNotNull().joinToString(" · "),
+                    listOf(activeTargetLabel.takeIf { it.isNotBlank() }, jitterMs?.let { "抖动${formatPingJitter(it)}" }, rateText.takeIf { it.isNotBlank() }, "窗口${formatPingDuration(windowSpanMs)}", rangeText).filterNotNull().joinToString(" · "),
                     color = Muted,
                     fontSize = 10.sp,
                     maxLines = 1
@@ -9034,7 +9131,7 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
                 pingAxisTicks(viewStartMs, viewEndMs, plotW).forEach { tickMs ->
                     val x = xOf(tickMs)
                     drawLine(Border.copy(alpha = 0.25f), Offset(x, top), Offset(x, bottom), strokeWidth = 1f)
-                    val label = if (autoFollow) formatPingRelativeLabel(tickMs - viewEndMs) else formatPingAxisTime(tickMs)
+                    val label = formatPingAxisTime(tickMs)
                     val tw = axisPaint.measureText(label)
                     val tx = (x - tw / 2f).coerceIn(left + 2f, right - tw - 2f)
                     drawContext.canvas.nativeCanvas.drawText(label, tx, (bottom + 24f).coerceAtMost(size.height - 10f), axisPaint)
