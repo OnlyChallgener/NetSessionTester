@@ -1,7 +1,7 @@
 {
-  "versionCode": 134,
+  "versionCode": 135,
   "versionName": "V1.1.15",
-  "title": "自测版本 V1.1.15 build134",
+  "title": "自测版本 V1.1.15 build135",
   "content": [
     "Ping 间隔自动匹配推荐超时",
     "Ping 统计增加超时次数",

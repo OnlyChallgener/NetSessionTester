@@ -159,6 +159,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.zIndex
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.unit.sp
@@ -4194,7 +4195,7 @@ private fun HistoryConclusionCard(summary: SessionSummary) {
 private fun HistoryProtocolCard(title: String, stats: ProtocolStats, maskPrivacy: Boolean) {
     SoftCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            SectionTitle("▮", title, Blue)
+            SectionTitle(if (title.contains("IPv4")) "session_ipv4" else if (title.contains("IPv6")) "session_ipv6" else "chart", title, Blue)
             Spacer(Modifier.weight(1f))
             Text(stats.phase, color = if (isAbnormalPhase(stats.phase)) ErrorRed else Blue, fontWeight = FontWeight.Bold, fontSize = 12.sp, maxLines = 1)
         }
@@ -5122,7 +5123,7 @@ private fun TestPage(
             ReorderableCardItem(id = cardId, order = visibleOrder, onOrderChange = ::updateTestOrder) {
                 when (cardId) {
                     "control" -> SoftCard {
-                        SectionTitle("∿", "连接数测试", Blue)
+                        SectionTitle("connection_tree", "连接数测试", Blue)
                         Text(
                             when {
                                 releaseBusy -> "正在释放连接，完成后会自动恢复开始按钮"
@@ -5945,8 +5946,8 @@ private fun MarkBox(mark: String, bg: Color, fg: Color) {
     ) {
         AppIconGlyph(mark = mark, color = fg, modifier = Modifier.width(18.dp).height(18.dp))
         val badge = when (mark) {
-            "ipv4" -> "4"
-            "ipv6" -> "6"
+            "ipv4", "session_ipv4" -> "4"
+            "ipv6", "session_ipv6" -> "6"
             else -> null
         }
         if (badge != null) {
@@ -5977,7 +5978,7 @@ private fun AppIconGlyph(mark: String, color: Color, modifier: Modifier = Modifi
 
 
 private fun usesCustomNetGlyph(mark: String): Boolean = mark in setOf(
-    "network_info", "ipv4", "ipv6", "local_ip", "mapping", "nat", "filter", "priority",
+    "network_info", "ipv4", "ipv6", "session_ipv4", "session_ipv6", "local_ip", "mapping", "nat", "nat1", "nat2", "nat3", "nat4", "filter", "priority", "connection_tree",
     "egress", "dns", "nslookup", "tracket", "mtu", "roaming", "ping", "∿",
     "target", "mode", "tune", "≡", "port", "host", "address", "□", "log",
     "latency", "time", "hourglass", "count", "privacy", "carrier", "wifi", "confidence",
@@ -6056,24 +6057,54 @@ private fun NetGlyph(mark: String, color: Color, modifier: Modifier = Modifier) 
                 arrow(0.22f, 0.64f, 0.77f, 0.64f)
                 dot(0.50f, 0.50f, 0.035f, 0.72f)
             }
-            "nat" -> { shield(); line(0.30f, 0.47f, 0.70f, 0.47f, 0.8f, thin); line(0.30f, 0.57f, 0.70f, 0.57f, 0.8f, thin) }
-            "filter" -> {
-                // 回包限制：盾牌 + 回弹线。
-                shield(0.42f, 0.50f, 0.86f)
-                val bounce = Path().apply {
-                    moveTo(0.86f*w, 0.40f*h)
-                    cubicTo(0.72f*w, 0.32f*h, 0.63f*w, 0.42f*h, 0.70f*w, 0.52f*h)
-                    cubicTo(0.78f*w, 0.65f*h, 0.62f*w, 0.72f*h, 0.54f*w, 0.62f*h)
+            "nat", "nat1", "nat2", "nat3", "nat4" -> {
+                shield()
+                val d = mark.removePrefix("nat").takeIf { it in listOf("1","2","3","4") }
+                if (d != null) {
+                    drawContext.canvas.nativeCanvas.drawText(
+                        d,
+                        0.50f * w - Paint().apply { textSize = h * 0.38f; typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD) }.measureText(d) / 2f,
+                        0.59f * h,
+                        Paint(Paint.ANTI_ALIAS_FLAG).apply { this.color = color.toArgb(); textSize = h * 0.38f; typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD); textAlign = Paint.Align.LEFT }
+                    )
+                } else {
+                    line(0.30f, 0.47f, 0.70f, 0.47f, 0.8f, thin)
+                    line(0.30f, 0.57f, 0.70f, 0.57f, 0.8f, thin)
                 }
-                drawPath(bounce, color.copy(alpha=0.9f), style=stroke)
+            }
+            "filter" -> {
+                // 回包限制：网状防火墙，避免再用感叹号/通用盾牌。
+                drawRoundRect(
+                    color,
+                    topLeft = Offset(0.20f * w, 0.22f * h),
+                    size = androidx.compose.ui.geometry.Size(0.60f * w, 0.56f * h),
+                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(0.06f * w, 0.06f * h),
+                    style = stroke
+                )
+                line(0.20f, 0.41f, 0.80f, 0.41f, 0.72f, thin)
+                line(0.20f, 0.59f, 0.80f, 0.59f, 0.72f, thin)
+                line(0.40f, 0.22f, 0.40f, 0.78f, 0.72f, thin)
+                line(0.60f, 0.22f, 0.60f, 0.78f, 0.72f, thin)
+                arrow(0.90f, 0.50f, 0.75f, 0.50f, 0.95f)
+                line(0.73f, 0.38f, 0.84f, 0.50f, 0.85f, thin)
+                line(0.73f, 0.62f, 0.84f, 0.50f, 0.85f, thin)
             }
             "priority" -> {
-                // 奖杯：表达“优先级/最佳路径”，比闪电更稳定、不误解为电量。
-                drawRoundRect(color, Offset(0.34f*w,0.30f*h), androidx.compose.ui.geometry.Size(0.32f*w,0.28f*h), androidx.compose.ui.geometry.CornerRadius(0.05f*w,0.05f*h), style=stroke)
-                drawArc(color, 90f, 95f, false, topLeft=Offset(0.16f*w,0.31f*h), size=androidx.compose.ui.geometry.Size(0.28f*w,0.26f*h), style=stroke)
-                drawArc(color, -5f, 95f, false, topLeft=Offset(0.56f*w,0.31f*h), size=androidx.compose.ui.geometry.Size(0.28f*w,0.26f*h), style=stroke)
-                line(0.50f,0.58f,0.50f,0.74f)
-                line(0.34f,0.78f,0.66f,0.78f)
+                // 优先级：更清晰的奖杯。
+                val cup = Path().apply {
+                    moveTo(0.32f*w, 0.26f*h)
+                    lineTo(0.68f*w, 0.26f*h)
+                    lineTo(0.62f*w, 0.58f*h)
+                    cubicTo(0.58f*w, 0.66f*h, 0.42f*w, 0.66f*h, 0.38f*w, 0.58f*h)
+                    close()
+                }
+                drawPath(cup, color, style = stroke)
+                drawArc(color, 88f, 120f, false, topLeft=Offset(0.13f*w,0.31f*h), size=androidx.compose.ui.geometry.Size(0.31f*w,0.26f*h), style=stroke)
+                drawArc(color, -28f, 120f, false, topLeft=Offset(0.56f*w,0.31f*h), size=androidx.compose.ui.geometry.Size(0.31f*w,0.26f*h), style=stroke)
+                line(0.50f,0.64f,0.50f,0.76f,1f,stroke)
+                line(0.35f,0.80f,0.65f,0.80f,1f,stroke)
+                line(0.40f,0.88f,0.60f,0.88f,0.9f,thin)
+                dot(0.50f,0.40f,0.035f,0.9f)
             }
             "egress" -> { drawRoundRect(color, Offset(0.18f*w,0.22f*h), androidx.compose.ui.geometry.Size(0.34f*w,0.50f*h), androidx.compose.ui.geometry.CornerRadius(0.04f*w,0.04f*h), style=stroke); dot(0.58f,0.38f,0.035f); dot(0.68f,0.48f,0.035f); arrow(0.54f,0.56f,0.84f,0.56f) }
             "dns" -> {
@@ -6101,14 +6132,27 @@ private fun NetGlyph(mark: String, color: Color, modifier: Modifier = Modifier) 
                 }
             }
             "roaming", "wifi" -> {
-                // 设计感 WiFi：三段弧 + 方向切换感小箭头。
-                drawArc(color, 205f, 130f, false, topLeft=Offset(0.14f*w,0.16f*h), size=androidx.compose.ui.geometry.Size(0.72f*w,0.68f*h), style=stroke)
-                drawArc(color, 210f, 120f, false, topLeft=Offset(0.27f*w,0.32f*h), size=androidx.compose.ui.geometry.Size(0.46f*w,0.44f*h), style=thin)
-                drawArc(color, 218f, 104f, false, topLeft=Offset(0.39f*w,0.48f*h), size=androidx.compose.ui.geometry.Size(0.22f*w,0.20f*h), style=thin)
-                dot(0.50f,0.76f,0.038f)
-                arrow(0.66f,0.32f,0.86f,0.32f,0.82f)
+                // 漫游测试：只保留清晰 WiFi 图标，不叠加额外箭头。
+                drawArc(color, 205f, 130f, false, topLeft=Offset(0.14f*w,0.17f*h), size=androidx.compose.ui.geometry.Size(0.72f*w,0.70f*h), style=stroke)
+                drawArc(color, 210f, 120f, false, topLeft=Offset(0.27f*w,0.34f*h), size=androidx.compose.ui.geometry.Size(0.46f*w,0.46f*h), style=thin)
+                drawArc(color, 218f, 104f, false, topLeft=Offset(0.39f*w,0.51f*h), size=androidx.compose.ui.geometry.Size(0.22f*w,0.22f*h), style=thin)
+                dot(0.50f,0.80f,0.045f)
             }
             "ping", "∿" -> { val p=Path().apply{ moveTo(0.12f*w,0.65f*h); lineTo(0.28f*w,0.65f*h); lineTo(0.38f*w,0.35f*h); lineTo(0.52f*w,0.76f*h); lineTo(0.64f*w,0.46f*h); lineTo(0.86f*w,0.46f*h) }; drawPath(p,color,style=stroke); dot(0.86f,0.46f,0.04f) }
+            "connection_tree" -> {
+                // 连接数测试：倒置/横向树状分叉，代表并发连接。
+                line(0.18f, 0.50f, 0.42f, 0.50f, 1f, stroke)
+                line(0.42f, 0.50f, 0.74f, 0.24f, 1f, stroke)
+                line(0.42f, 0.50f, 0.78f, 0.50f, 1f, stroke)
+                line(0.42f, 0.50f, 0.74f, 0.76f, 1f, stroke)
+                dot(0.18f, 0.50f, 0.045f)
+                dot(0.74f, 0.24f, 0.045f)
+                dot(0.78f, 0.50f, 0.045f)
+                dot(0.74f, 0.76f, 0.045f)
+            }
+            "session_ipv4", "session_ipv6" -> {
+                globe(0.50f, 0.50f, 0.32f)
+            }
             "target" -> { drawRoundRect(color, Offset(0.18f*w,0.22f*h), androidx.compose.ui.geometry.Size(0.35f*w,0.46f*h), androidx.compose.ui.geometry.CornerRadius(0.04f*w,0.04f*h), style=stroke); arrow(0.53f,0.38f,0.82f,0.25f); arrow(0.53f,0.55f,0.82f,0.70f) }
             "port" -> { drawRoundRect(color, Offset(0.20f*w,0.24f*h), androidx.compose.ui.geometry.Size(0.42f*w,0.45f*h), androidx.compose.ui.geometry.CornerRadius(0.04f*w,0.04f*h), style=stroke); line(0.09f,0.47f,0.88f,0.47f); dot(0.68f,0.47f,0.028f) }
             "mode", "tune", "≡" -> { line(0.18f,0.30f,0.82f,0.30f); dot(0.36f,0.30f,0.05f); line(0.18f,0.52f,0.82f,0.52f); dot(0.62f,0.52f,0.05f); line(0.18f,0.74f,0.82f,0.74f); dot(0.48f,0.74f,0.05f) }
@@ -6340,7 +6384,7 @@ private fun SessionStatsCard(
 ) {
     SoftCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            SectionTitle("▮", title, Blue)
+            SectionTitle(if (title.contains("IPv4")) "session_ipv4" else if (title.contains("IPv6")) "session_ipv6" else "chart", title, Blue)
             Spacer(Modifier.weight(1f))
             Text(stats.phase, color = Blue, fontWeight = FontWeight.Bold, maxLines = 1, fontSize = 12.sp)
         }
@@ -9359,6 +9403,13 @@ private fun NetworkEnvironmentSettingsCard(
     }
 }
 
+
+private fun natIconMark(value: String): String {
+    val match = Regex("NAT\\s*([1-4])|NAT([1-4])", RegexOption.IGNORE_CASE).find(value)
+    val digit = match?.groupValues?.drop(1)?.firstOrNull { it.isNotBlank() }
+    return if (digit != null) "nat$digit" else "nat"
+}
+
 @Composable
 private fun InfoMetricTile(
     icon: String,
@@ -9375,7 +9426,8 @@ private fun InfoMetricTile(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.padding(9.dp)
         ) {
-            MarkBox(icon, iconBg, iconColor)
+            val displayIcon = if (icon == "nat") natIconMark(value) else icon
+            MarkBox(displayIcon, iconBg, iconColor)
             Spacer(Modifier.width(8.dp))
             Column(Modifier.weight(1f)) {
                 Text(label, color = Muted, fontSize = 11.sp, maxLines = 1)
@@ -9441,9 +9493,9 @@ private fun PingCompactChartCard(
     val loss = if (sampleTotal > 0) ((lossTotal * 100f) / sampleTotal).roundToInt() else 0
     SoftCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            SectionTitle("∿", "Ping 测试", Blue)
+            SectionTitle("ping", "Ping 测试", Blue)
             Spacer(Modifier.width(8.dp))
-            StatusChip(if (running) "运行中" else intervalLabel, if (running) GreenSoft else BlueSoft, if (running) Green else Blue, compact = true)
+            StatusChip(if (running) "运行中 · ${sampleTotal}次" else intervalLabel, if (running) GreenSoft else BlueSoft, if (running) Green else Blue, compact = true)
             Spacer(Modifier.weight(1f))
             val stateText = when {
                 running && loss == 0 -> "● 正常 · 实时"
@@ -10060,7 +10112,7 @@ private fun HistoryCard(
                 DetailItem(Icons.Filled.Download, "CPS", "${mainStats?.cps ?: 0}/s", Orange, Modifier.weight(1f))
             }
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                DetailItem(Icons.Filled.Info, "地址", if (maskPrivacy) maskAddress(address) else address.ifBlank { "无" }, Blue, Modifier.weight(1f))
+                MarkDetailItem("address", "地址", if (maskPrivacy) maskAddress(address) else address.ifBlank { "无" }, Blue, Modifier.weight(1f))
             }
             val reasons = mainStats?.errorSummary.orEmpty()
             if (reasons.isNotEmpty()) {
@@ -10091,7 +10143,7 @@ private fun HistoryCard(
                     .padding(horizontal = 10.dp, vertical = 9.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Icon(Icons.Filled.Info, contentDescription = null, tint = Blue, modifier = Modifier.width(14.dp).height(14.dp))
+                AppIconGlyph("note", Blue, Modifier.width(14.dp).height(14.dp))
                 Spacer(Modifier.width(6.dp))
                 Text(
                     if (item.remark.isBlank()) "备注：点击添加备注" else "备注：${item.remark}",
@@ -10104,6 +10156,23 @@ private fun HistoryCard(
                 Text("编辑", color = Blue, fontSize = 11.sp, fontWeight = FontWeight.Bold)
             }
         }
+    }
+}
+
+
+@Composable
+private fun MarkDetailItem(mark: String, label: String, value: String, color: Color, modifier: Modifier = Modifier) {
+    Row(
+        modifier = modifier
+            .background(Color(0xFFF8FAFC), RoundedCornerShape(10.dp))
+            .padding(horizontal = 8.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        AppIconGlyph(mark, color, Modifier.width(14.dp).height(14.dp))
+        Spacer(Modifier.width(6.dp))
+        Text(label, color = Muted, fontSize = 11.sp, maxLines = 1)
+        Spacer(Modifier.width(6.dp))
+        Text(value, color = TextDark, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.SemiBold)
     }
 }
 
