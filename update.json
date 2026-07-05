@@ -1,15 +1,17 @@
 {
-  "versionCode": 135,
+  "versionCode": 136,
   "versionName": "V1.1.15",
-  "title": "发现新版本 V1.1.15 build135",
+  "title": "自测版本 V1.1.15 build136",
+  "status": "draft",
+  "minReadyFileSize": 3000000,
   "content": [
-    "Ping 图形继续使用 Compose Canvas 自绘方案，优化断点、虚线连接和丢包柱显示",
-    "Ping 运行中状态旁增加当前采样次数",
-    "重做回包限制、优先级、NAT类型、漫游测试、连接数测试等图标",
-    "IPv4/IPv6 会话图标改成地球网格加数字角标",
-    "历史地址和备注图标优化"
+    "Ping 图表 X 轴按实际时长动态铺满，避免右侧大面积留白",
+    "Ping 图表 Y 轴按可视 RTT 自适应，减少上下留白并增加三位数安全边距",
+    "修复历史图表滑动时空数据和越界可能导致闪退的问题",
+    "Ping 响应日志增加运行秒列，便于查看高频记录顺序",
+    "更新机制增加 status=ready 与 APK 可用性检查，避免 Release 未上传时提前弹更新"
   ],
-  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.1.15-135/NetSessionTester-V1.1.15-build135-signed.apk",
-  "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/tag/v1.1.15-135",
+  "apkUrl": "",
+  "githubUrl": "",
   "force": false
 }

@@ -298,7 +298,8 @@ private data class PingLogEntry(
     val latencyMs: Int?,
     val status: String,
     val note: String = "",
-    val sessionId: Long = 0L
+    val sessionId: Long = 0L,
+    val elapsedMs: Long = 0L
 ) {
     val timeText: String
         get() = DateTimeFormatter.ofPattern("HH:mm:ss")
@@ -366,6 +367,7 @@ private fun savePingLogs(context: Context, logs: List<PingLogEntry>) {
                 put("status", item.status)
                 put("note", item.note)
                 put("sessionId", item.sessionId)
+                put("elapsedMs", item.elapsedMs)
             })
         }
         context.getSharedPreferences("ping_log_store", Context.MODE_PRIVATE)
@@ -390,7 +392,8 @@ private fun loadPingLogs(context: Context): List<PingLogEntry> {
                     latencyMs = if (obj.isNull("latencyMs")) null else obj.optInt("latencyMs"),
                     status = obj.optString("status", "成功"),
                     note = obj.optString("note", ""),
-                    sessionId = obj.optLong("sessionId", 0L)
+                    sessionId = obj.optLong("sessionId", 0L),
+                    elapsedMs = obj.optLong("elapsedMs", 0L)
                 ))
             }
         }
@@ -408,6 +411,7 @@ private fun estimatePingLogStorageBytes(logs: List<PingLogEntry>): Int {
             put("status", item.status)
             put("note", item.note)
             put("sessionId", item.sessionId)
+            put("elapsedMs", item.elapsedMs)
         })
     }
     return arr.toString().toByteArray(Charsets.UTF_8).size
@@ -430,23 +434,43 @@ private fun pingMainAxisMax(values: List<Int>): Int {
 }
 
 private fun computePingYAxisRange(values: List<Int>): PingAxisRange {
-    if (values.isEmpty()) return PingAxisRange(0, 50)
-    val sorted = values.filter { it >= 0 }.sorted()
-    if (sorted.isEmpty()) return PingAxisRange(0, 50)
-    val low = sorted.first()
-    val idx95 = ((sorted.size - 1) * 0.95f).roundToInt().coerceIn(0, sorted.lastIndex)
-    val mainHigh = sorted[idx95].coerceAtLeast(low + 1)
-
-    // 低延迟稳定场景，比如 ping 路由器 4-12ms，使用局部放大轴，避免曲线长期挤在上半部分。
-    if (mainHigh <= 25 && low >= 1) {
-        val span = (mainHigh - low).coerceAtLeast(4)
-        val pad = (span * 0.25f).roundToInt().coerceIn(2, 4)
-        val bottom = (low - pad).coerceAtLeast(0)
-        val top = (mainHigh + pad).coerceAtLeast(bottom + 6)
-        return PingAxisRange(bottom, top)
+    val clean = values.filter { it in 0..20_000 }.sorted()
+    if (clean.isEmpty()) return PingAxisRange(0, 50)
+    val low = clean.first()
+    val high = clean.last().coerceAtLeast(low + 1)
+    val rawSpan = (high - low).coerceAtLeast(1)
+    val pad = maxOf((rawSpan * 0.25f).roundToInt(), when {
+        high <= 20 -> 2
+        high <= 100 -> 5
+        high <= 300 -> 10
+        else -> 20
+    })
+    var bottom = (low - pad).coerceAtLeast(0)
+    var top = high + pad
+    val minSpan = when {
+        high <= 20 -> 8
+        high <= 100 -> 25
+        high <= 300 -> 60
+        else -> 120
     }
+    if (top - bottom < minSpan) {
+        val extra = minSpan - (top - bottom)
+        bottom = (bottom - extra / 2).coerceAtLeast(0)
+        top = bottom + minSpan
+    }
+    return PingAxisRange(bottom, nicePingAxisTop(top))
+}
 
-    return PingAxisRange(0, pingYAxisMax(mainHigh))
+private fun nicePingAxisTop(value: Int): Int {
+    if (value <= 10) return 10
+    val step = when {
+        value <= 50 -> 5
+        value <= 100 -> 10
+        value <= 300 -> 25
+        value <= 1000 -> 50
+        else -> 100
+    }
+    return ((value + step - 1) / step) * step
 }
 
 private fun pingAxisLabels(range: PingAxisRange): List<Int> {
@@ -508,7 +532,10 @@ private data class UpdateInfo(
     val content: List<String>,
     val apkUrl: String,
     val githubUrl: String,
-    val force: Boolean = false
+    val force: Boolean = false,
+    val status: String = "ready",
+    val minReadyFileSize: Long = 3_000_000L,
+    val sha256: String = ""
 )
 
 private data class UpdateDownloadUi(
@@ -616,10 +643,53 @@ private suspend fun fetchUpdateInfo(updateJsonUrl: String = UPDATE_JSON_URL): Up
             content = content.ifEmpty { listOf("优化稳定性和界面体验。") },
             apkUrl = obj.optString("apkUrl", ""),
             githubUrl = obj.optString("githubUrl", PROJECT_GITHUB_URL),
-            force = obj.optBoolean("force", false)
+            force = obj.optBoolean("force", false),
+            status = obj.optString("status", "ready"),
+            minReadyFileSize = obj.optLong("minReadyFileSize", 3_000_000L).coerceAtLeast(0L),
+            sha256 = obj.optString("sha256", "")
         )
     } finally {
         conn.disconnect()
+    }
+}
+
+private fun isUpdateReadyStatus(status: String): Boolean = status.equals("ready", ignoreCase = true) || status.equals("hotfix", ignoreCase = true)
+
+private suspend fun verifyUpdateApkAvailable(info: UpdateInfo): Long = withContext(Dispatchers.IO) {
+    if (info.apkUrl.isBlank()) error("更新包链接为空")
+    fun open(method: String): HttpURLConnection = (URL(info.apkUrl).openConnection() as HttpURLConnection).apply {
+        connectTimeout = 6000
+        readTimeout = 8000
+        requestMethod = method
+        instanceFollowRedirects = true
+        setRequestProperty("User-Agent", "NetSessionTester/${info.versionName}")
+        setRequestProperty("Cache-Control", "no-cache")
+        if (method == "GET") setRequestProperty("Range", "bytes=0-0")
+    }
+    var conn: HttpURLConnection? = null
+    try {
+        conn = open("HEAD")
+        var code = conn.responseCode
+        var length = conn.contentLengthLong
+        conn.disconnect()
+        if (code == HttpURLConnection.HTTP_BAD_METHOD || code == HttpURLConnection.HTTP_FORBIDDEN || length <= 0L) {
+            conn = open("GET")
+            code = conn.responseCode
+            length = conn.getHeaderField("Content-Range")?.substringAfterLast('/')?.toLongOrNull()
+                ?: conn.getHeaderFieldLong("Content-Length", length)
+        }
+        if (code !in 200..299 && code != HttpURLConnection.HTTP_PARTIAL) {
+            when (code) {
+                404 -> error("安装包暂未发布完成：HTTP 404，可能 Release 还没上传 APK")
+                403 -> error("安装包暂不可访问：HTTP 403，建议打开 GitHub 查看")
+                else -> error("安装包暂不可用：HTTP $code")
+            }
+        }
+        val minSize = info.minReadyFileSize.coerceAtLeast(1L)
+        if (length in 1 until minSize) error("安装包大小异常：${formatBytes(length)}，可能 Release 附件未上传完成")
+        length.coerceAtLeast(0L)
+    } finally {
+        conn?.disconnect()
     }
 }
 
@@ -654,6 +724,9 @@ private suspend fun downloadUpdateApk(
             error(hint)
         }
         val total = conn.contentLengthLong.takeIf { it > 0L } ?: 0L
+        if (total > 0L && total < info.minReadyFileSize.coerceAtLeast(1L)) {
+            error("安装包大小异常：${formatBytes(total)}，可能 Release 附件未上传完成")
+        }
         val start = System.currentTimeMillis()
         var lastAt = start
         var lastBytes = 0L
@@ -2714,14 +2787,27 @@ private fun NetSessionTesterApp() {
                     val hasNew = info.versionCode > currentAppVersionCode(context)
                     val ignored = hasNew && isIgnoredUpdate(info)
                     latestUpdate = info.takeIf { hasNew }
-                    updateAvailable = hasNew && !ignored
-                    if (hasNew && (manual || !ignored)) {
-                        showVersionDialog = false
-                        showUpdateDialog = true
-                    } else if (hasNew && ignored) {
+                    updateAvailable = false
+                    if (!hasNew) {
+                        if (manual) snackbarHostState.showSnackbar("已是最新版本")
+                    } else if (ignored && !manual) {
                         showUpdateDialog = false
-                    } else if (manual) {
-                        snackbarHostState.showSnackbar("已是最新版本")
+                    } else if (!isUpdateReadyStatus(info.status)) {
+                        showUpdateDialog = false
+                        if (manual) snackbarHostState.showSnackbar("发现新版本，但当前状态为 ${info.status}，暂不推送")
+                    } else {
+                        val ready = runCatching { verifyUpdateApkAvailable(info) }
+                        if (ready.isSuccess) {
+                            updateAvailable = !ignored
+                            if (manual || !ignored) {
+                                showVersionDialog = false
+                                showUpdateDialog = true
+                            }
+                        } else {
+                            showUpdateDialog = false
+                            val msg = ready.exceptionOrNull()?.message ?: "安装包暂不可用"
+                            if (manual) snackbarHostState.showSnackbar(msg)
+                        }
                     }
                 }
                 .onFailure { e ->
@@ -2809,7 +2895,7 @@ private fun NetSessionTesterApp() {
                     val hasNew = info.versionCode > currentAppVersionCode(context)
                     val ignored = hasNew && isIgnoredUpdate(info)
                     latestUpdate = info.takeIf { hasNew }
-                    updateAvailable = hasNew && !ignored
+                    updateAvailable = hasNew && !ignored && isUpdateReadyStatus(info.status) && runCatching { verifyUpdateApkAvailable(info) }.isSuccess
                 }
             }
         }
@@ -3035,7 +3121,8 @@ private fun NetSessionTesterApp() {
                     latencyMs = latency,
                     status = status,
                     note = if (latency == null) (failure ?: "timeout") else "",
-                    sessionId = sessionId
+                    sessionId = sessionId,
+                    elapsedMs = elapsedMs
                 ))
             }
 
@@ -3140,7 +3227,7 @@ private fun NetSessionTesterApp() {
                     pingSessionEndedAt = System.currentTimeMillis()
                     pingDurationTick = pingSessionEndedAt
                     pingIntervalLabel = if (sent > 0) "已停止 · ${sent}次" else "停止"
-                    appendPingLog(PingLogEntry(target = target, protocol = resolved.displayProtocol, latencyMs = null, status = "停止", note = "共${sent}次 · 时长${formatPingDuration((pingSessionEndedAt - startedAt).coerceAtLeast(0L))}", sessionId = sessionId))
+                    appendPingLog(PingLogEntry(target = target, protocol = resolved.displayProtocol, latencyMs = null, status = "停止", note = "共${sent}次 · 时长${formatPingDuration((pingSessionEndedAt - startedAt).coerceAtLeast(0L))}", sessionId = sessionId, elapsedMs = (pingSessionEndedAt - startedAt).coerceAtLeast(0L)))
                 }
             }
         }
@@ -4565,6 +4652,7 @@ private fun PingLogRow(entry: PingLogEntry) {
     ) {
         Box(Modifier.width(7.dp).height(7.dp).background(dotColor, RoundedCornerShape(50)))
         Text(entry.timeText, color = Muted, fontSize = 11.sp, modifier = Modifier.width(62.dp))
+        Text(String.format(java.util.Locale.US, "%.2fs", entry.elapsedMs.coerceAtLeast(0L) / 1000.0), color = Muted, fontSize = 11.sp, modifier = Modifier.width(54.dp))
         Text(latencyText, color = if (entry.status == "高延迟") Orange else if (entry.status == "超时") ErrorRed else TextDark, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(54.dp))
         Text(statusText, color = dotColor, fontSize = 12.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
     }
@@ -4577,11 +4665,12 @@ private fun pingLogDetailLines(logs: List<PingLogEntry>): List<String> {
     val avg = logs.mapNotNull { it.latencyMs }.takeIf { it.isNotEmpty() }?.average()?.roundToInt()
     return buildList {
         add("总记录：${logs.size}  成功：$success  超时：$timeout  平均：${avg?.let { "${it}ms" } ?: "—"}")
-        add("时间        协议   延迟     状态     目标/备注")
+        add("时间        运行秒   协议   延迟     状态     目标/备注")
         logs.takeLast(300).asReversed().forEach { item ->
             val latency = item.latencyMs?.let { "${it}ms" } ?: "—"
             val note = item.note.ifBlank { item.target }
-            add("${item.timeText}  ${item.protocol.padEnd(4)}  ${latency.padEnd(7)}  ${item.status.padEnd(4)}  $note")
+            val elapsed = String.format(java.util.Locale.US, "%.2fs", item.elapsedMs.coerceAtLeast(0L) / 1000.0)
+            add("${item.timeText}  ${elapsed.padEnd(7)}  ${item.protocol.padEnd(4)}  ${latency.padEnd(7)}  ${item.status.padEnd(4)}  $note")
         }
     }
 }
@@ -9559,9 +9648,10 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
     val allPoints = points.sortedBy { it.elapsedMs }
     val latestMs = allPoints.lastOrNull()?.elapsedMs ?: 0L
     val earliestMs = allPoints.firstOrNull()?.elapsedMs ?: 0L
+    val fullSpanMs = (latestMs - earliestMs).coerceAtLeast(1_000L)
     val windowSpanMs = when {
-        latestMs <= 15_000L -> 15_000L
-        latestMs <= 30_000L -> 30_000L
+        running && latestMs < 60_000L -> latestMs.coerceAtLeast(1_000L)
+        !running -> fullSpanMs
         else -> 60_000L
     }
     var autoFollow by remember { mutableStateOf(true) }
@@ -9577,12 +9667,16 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
 
     LaunchedEffect(latestMs, windowSpanMs, autoFollow) {
         if (autoFollow) viewEndMs = latestMs.coerceAtLeast(windowSpanMs)
-        else viewEndMs = viewEndMs.coerceIn((earliestMs + windowSpanMs).coerceAtLeast(windowSpanMs), latestMs.coerceAtLeast(windowSpanMs))
+        else {
+            val minEnd = (earliestMs + windowSpanMs).coerceAtLeast(windowSpanMs)
+            val maxEnd = latestMs.coerceAtLeast(minEnd)
+            viewEndMs = viewEndMs.coerceIn(minEnd, maxEnd)
+        }
     }
 
     val effectiveViewEndMs = if (autoFollow) latestMs.coerceAtLeast(windowSpanMs) else {
         val minEnd = (earliestMs + windowSpanMs).coerceAtLeast(windowSpanMs)
-        val maxEnd = latestMs.coerceAtLeast(windowSpanMs)
+        val maxEnd = latestMs.coerceAtLeast(minEnd)
         viewEndMs.coerceIn(minEnd, maxEnd)
     }
     val viewStartMs = (effectiveViewEndMs - windowSpanMs).coerceAtLeast(0L)
@@ -9653,8 +9747,8 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
                         detectTapGestures(
                             onDoubleTap = { autoFollow = true },
                             onTap = { offset ->
-                                val left = 70f
-                                val right = size.width - 30f
+                                val left = 82f
+                                val right = size.width - 34f
                                 val plotW = (right - left).coerceAtLeast(1f)
                                 val x = offset.x.coerceIn(left, right)
                                 val targetMs = viewStartMs + (((x - left) / plotW) * windowSpanMs).toLong()
@@ -9664,21 +9758,21 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
                     }
                     .pointerInput(latestMs, earliestMs, windowSpanMs, chartWidthPx) {
                         detectHorizontalDragGestures { _, dragAmount ->
-                            val left = 70f
-                            val rightPad = 30f
+                            val left = 82f
+                            val rightPad = 34f
                             val plotW = (chartWidthPx - left - rightPad).coerceAtLeast(1f)
                             val deltaMs = (dragAmount / plotW * windowSpanMs).toLong()
                             autoFollow = false
                             val minEnd = (earliestMs + windowSpanMs).coerceAtLeast(windowSpanMs)
-                            val maxEnd = latestMs.coerceAtLeast(windowSpanMs)
+                            val maxEnd = latestMs.coerceAtLeast(minEnd)
                             viewEndMs = (viewEndMs - deltaMs).coerceIn(minEnd, maxEnd)
                         }
                     }
             ) {
-                val left = 70f
-                val top = 32f
-                val right = size.width - 30f
-                val bottom = size.height - 38f
+                val left = 82f
+                val top = 42f
+                val right = size.width - 34f
+                val bottom = size.height - 42f
                 val plotW = (right - left).coerceAtLeast(1f)
                 val plotH = (bottom - top).coerceAtLeast(1f)
 
@@ -9813,8 +9907,19 @@ private fun formatPingRelativeLabel(deltaMs: Long): String {
 }
 
 private fun formatPingAxisTime(ms: Long): String {
-    val totalSec = (ms / 1_000L).coerceAtLeast(0L)
-    return if (totalSec < 60L) "${totalSec}s" else "${totalSec / 60}m${(totalSec % 60).toString().padStart(2, '0')}"
+    val safe = ms.coerceAtLeast(0L)
+    return when {
+        safe < 10_000L && safe % 1_000L != 0L -> String.format(java.util.Locale.US, "%.1fs", safe / 1000.0)
+        safe < 60_000L -> {
+            if (safe % 1_000L == 0L) "${safe / 1_000L}s" else String.format(java.util.Locale.US, "%.1fs", safe / 1000.0)
+        }
+        else -> {
+            val totalSec = safe / 1_000L
+            val remainMs = safe % 1_000L
+            if (remainMs == 0L) "${totalSec / 60}m${(totalSec % 60).toString().padStart(2, '0')}"
+            else String.format(java.util.Locale.US, "%dm%04.1fs", totalSec / 60, (totalSec % 60) + remainMs / 1000.0)
+        }
+    }
 }
 
 private fun buildPingLossRanges(points: List<PingPoint>, startMs: Long, endMs: Long): List<Triple<Long, Long, Int>> {
