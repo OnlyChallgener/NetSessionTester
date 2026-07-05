@@ -1,17 +1,17 @@
 {
-  "versionCode": 139,
+  "versionCode": 140,
   "versionName": "V1.1.15",
-  "title": "自测版本 V1.1.15 build139",
-  "status": "draft",
+  "build": 140,
+  "status": "ready",
   "minReadyFileSize": 3000000,
+  "title": "发现新版本 V1.1.15 build140",
   "content": [
-    "Ping停止后自动全局概览，并支持双指缩放查看细节",
-    "Ping运行中保持实时窗口，不自动全局缩放",
-    "优化图表竖线逻辑，只有橙色高延迟点才显示细蓝竖线",
-    "目标选择弹窗改为折叠分组，并增加关闭和取消按钮",
-    "继续优化网络信息、DNS、运营商、漫游和连接数测试图标"
+    "修复 Ping 图表高延迟点断线问题",
+    "高延迟点现在会正常参与蓝色实线连接",
+    "网络信息折叠状态只显示 IPv4 / IPv6 / NAT / 运营商",
+    "展开网络信息后仍显示完整诊断项和工具入口"
   ],
-  "apkUrl": "",
-  "githubUrl": "",
+  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.1.15-140/NetSessionTester-V1.1.15-build140-signed.apk",
+  "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/tag/v1.1.15-140",
   "force": false
 }
