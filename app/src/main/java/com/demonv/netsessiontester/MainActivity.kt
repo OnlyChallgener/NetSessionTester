@@ -48,6 +48,7 @@ import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -6220,20 +6221,21 @@ private fun NetGlyph(mark: String, color: Color, modifier: Modifier = Modifier) 
         }
         when (mark) {
             "network_info" -> {
-                // 网络信息：正常 WiFi 图标，减少误解。
-                drawArc(color, 205f, 130f, false, topLeft=Offset(0.12f*w,0.14f*h), size=androidx.compose.ui.geometry.Size(0.76f*w,0.76f*h), style=stroke)
-                drawArc(color, 210f, 120f, false, topLeft=Offset(0.27f*w,0.32f*h), size=androidx.compose.ui.geometry.Size(0.46f*w,0.48f*h), style=thin)
-                drawArc(color, 218f, 104f, false, topLeft=Offset(0.40f*w,0.50f*h), size=androidx.compose.ui.geometry.Size(0.20f*w,0.22f*h), style=thin)
-                dot(0.50f,0.80f,0.045f)
+                // 网络信息：地球网格，表示整体网络环境。
+                globe(0.50f, 0.50f, 0.32f)
             }
             "ipv4", "ipv6", "host", "address" -> globe()
             "local_ip" -> {
-                // 本地IP：电脑套手机，表达本机/局域网终端。
-                drawRoundRect(color, topLeft = Offset(0.16f*w, 0.20f*h), size = androidx.compose.ui.geometry.Size(0.54f*w, 0.38f*h), cornerRadius = androidx.compose.ui.geometry.CornerRadius(0.05f*w,0.05f*h), style=stroke)
-                line(0.34f,0.62f,0.52f,0.62f,0.85f,thin)
-                line(0.27f,0.76f,0.61f,0.76f,0.85f,thin)
-                drawRoundRect(color, topLeft = Offset(0.54f*w,0.34f*h), size = androidx.compose.ui.geometry.Size(0.25f*w,0.44f*h), cornerRadius = androidx.compose.ui.geometry.CornerRadius(0.045f*w,0.045f*h), style=stroke)
-                dot(0.665f,0.71f,0.018f,0.8f)
+                // 本地IP：清晰小手机。
+                drawRoundRect(
+                    color,
+                    topLeft = Offset(0.34f*w, 0.16f*h),
+                    size = androidx.compose.ui.geometry.Size(0.32f*w, 0.68f*h),
+                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(0.07f*w,0.07f*h),
+                    style = stroke
+                )
+                line(0.43f,0.24f,0.57f,0.24f,0.75f,thin)
+                dot(0.50f,0.76f,0.020f,0.8f)
             }
             "mapping" -> {
                 // 公网映射：上面向左箭头，下面向右箭头，避免和 IPv4/IPv6 地球图标混淆。
@@ -6302,10 +6304,18 @@ private fun NetGlyph(mark: String, color: Color, modifier: Modifier = Modifier) 
                 dot(0.38f,0.28f,0.035f); dot(0.62f,0.28f,0.035f)
             }
             "dns" -> {
-                // DNS诊断：小地球 + 放大镜。
-                globe(0.42f, 0.42f, 0.24f)
-                drawCircle(color, radius=0.18f*size.minDimension, center=Offset(0.60f*w,0.60f*h), style=stroke)
-                line(0.72f,0.72f,0.86f,0.86f,1f,stroke)
+                // DNS诊断：诊断波形，避免小尺寸下地球+放大镜糊成一团。
+                val wave = Path().apply {
+                    moveTo(0.14f*w, 0.55f*h)
+                    lineTo(0.30f*w, 0.55f*h)
+                    lineTo(0.39f*w, 0.34f*h)
+                    lineTo(0.52f*w, 0.72f*h)
+                    lineTo(0.62f*w, 0.48f*h)
+                    lineTo(0.72f*w, 0.55f*h)
+                    lineTo(0.86f*w, 0.55f*h)
+                }
+                drawPath(wave, color, style = stroke)
+                drawCircle(color.copy(alpha = 0.65f), radius = 0.05f*size.minDimension, center = Offset(0.39f*w,0.34f*h))
             }
             "nslookup" -> {
                 // NSLookup：纯放大镜，避免和 DNS 诊断重复。
@@ -6324,11 +6334,11 @@ private fun NetGlyph(mark: String, color: Color, modifier: Modifier = Modifier) 
                 }
             }
             "roaming", "wifi" -> {
-                // 漫游测试：只保留清晰 WiFi 图标，不叠加额外箭头。
-                drawArc(color, 205f, 130f, false, topLeft=Offset(0.14f*w,0.17f*h), size=androidx.compose.ui.geometry.Size(0.72f*w,0.70f*h), style=stroke)
-                drawArc(color, 210f, 120f, false, topLeft=Offset(0.27f*w,0.34f*h), size=androidx.compose.ui.geometry.Size(0.46f*w,0.46f*h), style=thin)
-                drawArc(color, 218f, 104f, false, topLeft=Offset(0.39f*w,0.51f*h), size=androidx.compose.ui.geometry.Size(0.22f*w,0.22f*h), style=thin)
-                dot(0.50f,0.80f,0.045f)
+                // 漫游/WiFi：弧线和圆点更紧凑，避免上下分离。
+                drawArc(color, 205f, 130f, false, topLeft=Offset(0.16f*w,0.22f*h), size=androidx.compose.ui.geometry.Size(0.68f*w,0.62f*h), style=stroke)
+                drawArc(color, 210f, 120f, false, topLeft=Offset(0.30f*w,0.39f*h), size=androidx.compose.ui.geometry.Size(0.40f*w,0.37f*h), style=thin)
+                drawArc(color, 218f, 104f, false, topLeft=Offset(0.41f*w,0.54f*h), size=androidx.compose.ui.geometry.Size(0.18f*w,0.16f*h), style=thin)
+                dot(0.50f,0.75f,0.043f)
             }
             "ping", "∿" -> {
                 // 独立Ping/Ping测试：仪表盘/速度表风格。
@@ -6338,25 +6348,20 @@ private fun NetGlyph(mark: String, color: Color, modifier: Modifier = Modifier) 
                 line(0.28f,0.72f,0.72f,0.72f,0.75f,thin)
             }
             "connection_tree" -> {
-                // 连接数测试：紧凑双闪电 + 电弧，表达并发冲击，不再像树杈。
-                val p1 = Path().apply {
-                    moveTo(0.18f*w, 0.42f*h)
-                    lineTo(0.38f*w, 0.42f*h)
-                    lineTo(0.31f*w, 0.56f*h)
-                    lineTo(0.54f*w, 0.56f*h)
+                // 连接数测试：短横向闪电 + 电弧 + 小端点，紧凑且不糊。
+                val bolt = Path().apply {
+                    moveTo(0.24f*w, 0.52f*h)
+                    lineTo(0.44f*w, 0.52f*h)
+                    lineTo(0.36f*w, 0.66f*h)
+                    lineTo(0.61f*w, 0.66f*h)
+                    lineTo(0.51f*w, 0.80f*h)
+                    lineTo(0.78f*w, 0.80f*h)
                 }
-                val p2 = Path().apply {
-                    moveTo(0.32f*w, 0.66f*h)
-                    lineTo(0.52f*w, 0.66f*h)
-                    lineTo(0.45f*w, 0.80f*h)
-                    lineTo(0.70f*w, 0.80f*h)
-                }
-                drawPath(p1, color, style = stroke)
-                drawPath(p2, color, style = stroke)
-                drawArc(color.copy(alpha = 0.72f), 210f, 120f, false, topLeft=Offset(0.54f*w,0.30f*h), size=androidx.compose.ui.geometry.Size(0.30f*w,0.38f*h), style=thin)
-                drawArc(color.copy(alpha = 0.48f), 210f, 120f, false, topLeft=Offset(0.64f*w,0.38f*h), size=androidx.compose.ui.geometry.Size(0.22f*w,0.28f*h), style=thin)
-                dot(0.18f, 0.42f, 0.032f)
-                dot(0.70f, 0.80f, 0.032f)
+                drawPath(bolt, color, style = stroke)
+                drawArc(color.copy(alpha = 0.72f), 210f, 120f, false, topLeft=Offset(0.38f*w,0.20f*h), size=androidx.compose.ui.geometry.Size(0.44f*w,0.48f*h), style=thin)
+                drawArc(color.copy(alpha = 0.46f), 210f, 120f, false, topLeft=Offset(0.50f*w,0.30f*h), size=androidx.compose.ui.geometry.Size(0.28f*w,0.32f*h), style=thin)
+                dot(0.22f, 0.52f, 0.030f)
+                dot(0.78f, 0.80f, 0.030f)
             }
             "session_ipv4", "session_ipv6" -> {
                 globe(0.50f, 0.50f, 0.32f)
@@ -6373,11 +6378,11 @@ private fun NetGlyph(mark: String, color: Color, modifier: Modifier = Modifier) 
             "latency", "time", "hourglass" -> { drawCircle(color, radius=0.28f*size.minDimension, center=Offset(0.48f*w,0.50f*h), style=stroke); line(0.48f,0.50f,0.48f,0.32f); line(0.48f,0.50f,0.64f,0.58f) }
             "count" -> { arrow(0.72f,0.30f,0.32f,0.30f); arrow(0.28f,0.70f,0.68f,0.70f); dot(0.50f,0.50f,0.05f) }
             "privacy" -> {
-                // 隐私关闭：小钥匙。
-                drawCircle(color, radius=0.12f*size.minDimension, center=Offset(0.32f*w,0.44f*h), style=stroke)
-                line(0.43f,0.52f,0.80f,0.74f,1f,stroke)
-                line(0.62f,0.63f,0.62f,0.75f,1f,thin)
-                line(0.72f,0.69f,0.72f,0.80f,1f,thin)
+                // 隐私关闭：横向小钥匙。
+                drawCircle(color, radius=0.12f*size.minDimension, center=Offset(0.28f*w,0.50f*h), style=stroke)
+                line(0.40f,0.50f,0.82f,0.50f,1f,stroke)
+                line(0.62f,0.50f,0.62f,0.64f,1f,thin)
+                line(0.73f,0.50f,0.73f,0.62f,1f,thin)
             }
             "privacy_on" -> {
                 // 隐私开启：遮蔽的小眼睛。
@@ -6392,13 +6397,11 @@ private fun NetGlyph(mark: String, color: Color, modifier: Modifier = Modifier) 
             }
             "confidence" -> { drawCircle(color, radius=0.31f*size.minDimension, center=Offset(0.50f*w,0.50f*h), style=stroke); line(0.32f,0.51f,0.45f,0.64f); line(0.45f,0.64f,0.72f,0.36f) }
             "carrier" -> {
-                // 运营商：基站/天线图标。
-                line(0.50f,0.78f,0.50f,0.42f,1f,stroke)
-                dot(0.50f,0.38f,0.035f)
-                drawArc(color, 210f, 120f, false, topLeft=Offset(0.28f*w,0.20f*h), size=androidx.compose.ui.geometry.Size(0.44f*w,0.40f*h), style=thin)
-                drawArc(color, -30f, 120f, false, topLeft=Offset(0.28f*w,0.20f*h), size=androidx.compose.ui.geometry.Size(0.44f*w,0.40f*h), style=thin)
-                line(0.36f,0.78f,0.64f,0.78f,0.85f,thin)
-                line(0.42f,0.62f,0.58f,0.62f,0.7f,thin)
+                // 运营商：蜂窝信号图标。
+                line(0.22f,0.72f,0.22f,0.58f,1f,stroke)
+                line(0.40f,0.72f,0.40f,0.46f,1f,stroke)
+                line(0.58f,0.72f,0.58f,0.34f,1f,stroke)
+                line(0.76f,0.72f,0.76f,0.22f,1f,stroke)
             }
             "download" -> { arrow(0.50f,0.18f,0.50f,0.62f); line(0.28f,0.78f,0.72f,0.78f) }
             "chart" -> { line(0.18f,0.74f,0.18f,0.58f); line(0.39f,0.74f,0.39f,0.42f); line(0.60f,0.74f,0.60f,0.28f); line(0.81f,0.74f,0.81f,0.50f) }
@@ -6472,29 +6475,56 @@ private fun HistoryTextField(
         )
     }
     if (open) {
+        var presetsExpanded by remember { mutableStateOf(true) }
+        var historyExpanded by remember { mutableStateOf(false) }
         AlertDialog(
             onDismissRequest = { open = false },
             confirmButton = {
-                if (onAdd != null) TextButton(onClick = { addValue = ""; addNote = ""; addError = null; addOpen = true }) { Text("添加", fontWeight = FontWeight.Bold) }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (onAdd != null) TextButton(onClick = { addValue = ""; addNote = ""; addError = null; addOpen = true }) { Text("添加", fontWeight = FontWeight.Bold) }
+                    TextButton(onClick = { open = false }) { Text("取消") }
+                }
             },
-            title = { Text("选择目标", fontWeight = FontWeight.Bold, color = TextDark) },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("选择目标", fontWeight = FontWeight.Bold, color = TextDark, modifier = Modifier.weight(1f))
+                    IconButton(onClick = { open = false }, modifier = Modifier.width(32.dp).height(32.dp)) {
+                        Icon(Icons.Filled.Close, contentDescription = null, tint = Muted, modifier = Modifier.width(18.dp).height(18.dp))
+                    }
+                }
+            },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
                     if (presets.isNotEmpty()) {
-                        Text("预设", color = Muted, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                        presets.forEach { preset ->
-                            Row(
-                                modifier = Modifier.fillMaxWidth().background(Color(0xFFF8FAFC), ShapeM).clickable { onPick(preset.value); open = false }.padding(horizontal = 12.dp, vertical = 9.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(preset.value, color = TextDark, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-                                if (preset.note.isNotBlank()) Text(preset.note, color = Muted, fontSize = 11.sp, maxLines = 1)
+                        Row(
+                            modifier = Modifier.fillMaxWidth().clickable { presetsExpanded = !presetsExpanded },
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("常用预设", color = Muted, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                            Text(if (presetsExpanded) "⌃" else "⌄", color = Muted, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                        }
+                        if (presetsExpanded) {
+                            presets.forEach { preset ->
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().background(Color(0xFFF8FAFC), ShapeM).clickable { onPick(preset.value); open = false }.padding(horizontal = 12.dp, vertical = 9.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(preset.value, color = TextDark, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                                    if (preset.note.isNotBlank()) Text(preset.note, color = Muted, fontSize = 11.sp, maxLines = 1)
+                                }
                             }
                         }
                     }
                     if (history.isNotEmpty()) {
-                        Text("自定义/最近", color = Muted, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                        history.take(10).forEach { item ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth().clickable { historyExpanded = !historyExpanded },
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("自定义/最近", color = Muted, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                            Text(if (historyExpanded) "⌃" else "⌄", color = Muted, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                        }
+                        val shownHistory = if (historyExpanded) history.take(10) else history.take(3)
+                        shownHistory.forEach { item ->
                             Row(
                                 modifier = Modifier.fillMaxWidth().background(Color(0xFFF8FAFC), ShapeM).clickable { onPick(item); open = false }.padding(horizontal = 12.dp, vertical = 9.dp),
                                 verticalAlignment = Alignment.CenterVertically
@@ -9839,11 +9869,13 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
     val latestMs = allPoints.lastOrNull()?.elapsedMs ?: 0L
     val earliestMs = allPoints.firstOrNull()?.elapsedMs ?: 0L
     val fullSpanMs = (latestMs - earliestMs).coerceAtLeast(1_000L)
-    val windowSpanMs = when {
+    val liveWindowSpanMs = when {
         running && latestMs < 60_000L -> latestMs.coerceAtLeast(1_000L)
-        !running -> fullSpanMs
-        else -> 60_000L
+        running -> 60_000L
+        else -> fullSpanMs
     }
+    var stoppedZoomSpanMs by remember { mutableStateOf<Long?>(null) }
+    val windowSpanMs = if (running) liveWindowSpanMs else (stoppedZoomSpanMs ?: fullSpanMs).coerceIn(1_000L, fullSpanMs)
     var autoFollow by remember { mutableStateOf(true) }
     var viewEndMs by remember { mutableStateOf(windowSpanMs) }
     var chartWidthPx by remember { mutableStateOf(1f) }
@@ -9853,10 +9885,20 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
     LaunchedEffect(firstPointKey, allPoints.isEmpty()) {
         selectedPoint = null
         autoFollow = true
+        stoppedZoomSpanMs = null
     }
 
-    LaunchedEffect(latestMs, windowSpanMs, autoFollow) {
-        if (autoFollow) viewEndMs = latestMs.coerceAtLeast(windowSpanMs)
+    LaunchedEffect(running, latestMs, fullSpanMs) {
+        if (!running && allPoints.isNotEmpty()) {
+            // 测试停止后自动缩放到全局概览。
+            stoppedZoomSpanMs = fullSpanMs
+            autoFollow = false
+            viewEndMs = latestMs.coerceAtLeast(fullSpanMs)
+        }
+    }
+
+    LaunchedEffect(latestMs, windowSpanMs, autoFollow, running) {
+        if (running && autoFollow) viewEndMs = latestMs.coerceAtLeast(windowSpanMs)
         else {
             val minEnd = (earliestMs + windowSpanMs).coerceAtLeast(windowSpanMs)
             val maxEnd = latestMs.coerceAtLeast(minEnd)
@@ -9864,7 +9906,7 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
         }
     }
 
-    val effectiveViewEndMs = if (autoFollow) latestMs.coerceAtLeast(windowSpanMs) else {
+    val effectiveViewEndMs = if (running && autoFollow) latestMs.coerceAtLeast(windowSpanMs) else {
         val minEnd = (earliestMs + windowSpanMs).coerceAtLeast(windowSpanMs)
         val maxEnd = latestMs.coerceAtLeast(minEnd)
         viewEndMs.coerceIn(minEnd, maxEnd)
@@ -9919,7 +9961,18 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
             }
             if (!autoFollow) {
                 Spacer(Modifier.width(6.dp))
-                SoftChoicePill(text = "回实时", selected = false, onClick = { autoFollow = true }, compact = true)
+                SoftChoicePill(
+                    text = if (running) "回实时" else "回全局",
+                    selected = false,
+                    onClick = {
+                        if (running) autoFollow = true
+                        else {
+                            stoppedZoomSpanMs = fullSpanMs
+                            viewEndMs = latestMs.coerceAtLeast(fullSpanMs)
+                        }
+                    },
+                    compact = true
+                )
             }
         }
         Box(
@@ -9935,7 +9988,13 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
                     .onSizeChanged { chartWidthPx = it.width.toFloat().coerceAtLeast(1f) }
                     .pointerInput(visible, viewStartMs, effectiveViewEndMs, windowSpanMs, latestMs) {
                         detectTapGestures(
-                            onDoubleTap = { autoFollow = true },
+                            onDoubleTap = {
+                                if (running) autoFollow = true
+                                else {
+                                    stoppedZoomSpanMs = fullSpanMs
+                                    viewEndMs = latestMs.coerceAtLeast(fullSpanMs)
+                                }
+                            },
                             onTap = { offset ->
                                 val left = 82f
                                 val right = size.width - 34f
@@ -9946,7 +10005,7 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
                             }
                         )
                     }
-                    .pointerInput(latestMs, earliestMs, windowSpanMs, chartWidthPx) {
+                    .pointerInput(latestMs, earliestMs, windowSpanMs, chartWidthPx, running) {
                         detectHorizontalDragGestures { _, dragAmount ->
                             val left = 82f
                             val rightPad = 34f
@@ -9956,6 +10015,24 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
                             val minEnd = (earliestMs + windowSpanMs).coerceAtLeast(windowSpanMs)
                             val maxEnd = latestMs.coerceAtLeast(minEnd)
                             viewEndMs = (viewEndMs - deltaMs).coerceIn(minEnd, maxEnd)
+                        }
+                    }
+                    .pointerInput(running, fullSpanMs, windowSpanMs, latestMs, chartWidthPx) {
+                        if (!running) {
+                            detectTransformGestures { centroid, pan, zoom, _ ->
+                                val left = 82f
+                                val rightPad = 34f
+                                val plotW = (chartWidthPx - left - rightPad).coerceAtLeast(1f)
+                                val focalRatio = ((centroid.x - left) / plotW).coerceIn(0f, 1f)
+                                val focalMs = viewStartMs + (windowSpanMs * focalRatio).toLong()
+                                val newSpan = (windowSpanMs / zoom.coerceIn(0.25f, 4.0f)).toLong().coerceIn(1_000L, fullSpanMs)
+                                stoppedZoomSpanMs = newSpan
+                                val newEnd = (focalMs + ((newSpan) * (1f - focalRatio)).toLong() - (pan.x / plotW * newSpan).toLong())
+                                val minEnd = (earliestMs + newSpan).coerceAtLeast(newSpan)
+                                val maxEnd = latestMs.coerceAtLeast(minEnd)
+                                viewEndMs = newEnd.coerceIn(minEnd, maxEnd)
+                                autoFollow = false
+                            }
                         }
                     }
             ) {
@@ -10041,11 +10118,13 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
                         val y = yOf(latency)
                         val minSample = p.minLatencyMs
                         val maxSample = p.maxLatencyMs
-                        if (minSample != null && maxSample != null && maxSample > minSample) {
+                        val peak = maxSample ?: latency
+                        val highPoint = p.highLatency || peak >= (minY + ((maxY - minY) * 0.85f)).roundToInt()
+                        if (highPoint && minSample != null && maxSample != null && maxSample > minSample) {
+                            // 只有独立橙色高延迟点才画细蓝竖线，普通点不画竖线。
                             drawLine(Blue.copy(alpha = 0.22f), Offset(x, yOf(minSample)), Offset(x, yOf(maxSample)), strokeWidth = 1.1f, cap = StrokeCap.Round)
                         }
-                        val peak = maxSample ?: latency
-                        if (p.highLatency || peak >= maxOf(minY + 1, (maxY * 0.85f).roundToInt())) drawCircle(Orange, radius = 3.5f, center = Offset(x, yOf(peak)))
+                        if (highPoint) drawCircle(Orange, radius = 3.5f, center = Offset(x, yOf(peak)))
                     }
                     if (p.lossCount > 0) {
                         val x = xOf(p.elapsedMs)
@@ -10072,7 +10151,12 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
             }
             Text(text, color = TextDark, fontSize = 11.sp, fontWeight = FontWeight.Bold, lineHeight = 15.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
         } ?: Text(
-            if (autoFollow && running) "$rangeText · 红色=丢包，橙色=高延迟；拖动查看历史，双击回实时" else "$rangeText · 红色=丢包，橙色=高延迟；拖动查看历史",
+            when {
+                running && autoFollow -> "$rangeText · 红色=丢包，橙色=高延迟；拖动查看历史，双击回实时"
+                running -> "$rangeText · 红色=丢包，橙色=高延迟；双击回实时"
+                windowSpanMs < fullSpanMs -> "$rangeText · 双指缩放/左右拖动查看细节，双击回全局"
+                else -> "$rangeText · 双指放大查看细节"
+            },
             color = Muted,
             fontSize = 10.sp,
             maxLines = 1,
