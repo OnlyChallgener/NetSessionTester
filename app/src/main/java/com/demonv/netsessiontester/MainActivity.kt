@@ -9665,8 +9665,6 @@ private fun NetworkEnvironmentSettingsCard(
                 InfoMetricTile("nat", "NAT", probeInfo.natType, Color(0xFFFFE4E6), ErrorRed, Modifier.weight(1f), onClick = onOpenNatDiagnostics)
                 InfoMetricTile("carrier", "运营商", probeInfo.carrier, Color(0xFFF3E8FF), Purple, Modifier.weight(1f))
             }
-            NetworkToolShortcutRow(onOpenNsLookup = onOpenNsLookup, onOpenTracket = onOpenTracket, onOpenMtu = onOpenMtu, onOpenRoaming = onOpenRoaming)
-            Text("NAT类型需手动诊断；网络信息只做轻量展示。", color = Muted, fontSize = 11.sp, modifier = Modifier.fillMaxWidth(), maxLines = 1, overflow = TextOverflow.Ellipsis)
             return@SoftCard
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
@@ -10086,9 +10084,16 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
                 val successPoints = sortedVisible.filter { it.latencyMs != null }
                 val expectedGapMs = sortedVisible.zipWithNext().map { (a,b) -> (b.elapsedMs - a.elapsedMs).coerceAtLeast(1L) }.minOrNull()?.coerceAtLeast(1L) ?: 1_000L
                 val normalGapLimit = maxOf(expectedGapMs * 3L, 900L)
+                fun chartLatencyOf(p: PingPoint): Int? {
+                    val latency = p.latencyMs ?: return null
+                    val peak = p.maxLatencyMs ?: latency
+                    val highPoint = p.highLatency || peak >= (minY + ((maxY - minY) * 0.85f)).roundToInt()
+                    // 高延迟是一次成功响应，不是断点；聚合点里如果有峰值，用峰值参与主折线，避免橙点悬空。
+                    return if (highPoint && peak > latency) peak else latency
+                }
                 fun drawSegment(a: PingPoint, b: PingPoint, dashed: Boolean) {
-                    val la = a.latencyMs ?: return
-                    val lb = b.latencyMs ?: return
+                    val la = chartLatencyOf(a) ?: return
+                    val lb = chartLatencyOf(b) ?: return
                     val path = Path().apply {
                         moveTo(xOf(a.elapsedMs), yOf(la))
                         lineTo(xOf(b.elapsedMs), yOf(lb))
@@ -10107,6 +10112,7 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
                     val between = sortedVisible.filter { it.elapsedMs > a.elapsedMs && it.elapsedMs < b.elapsedMs }
                     val hasRealLoss = between.any { it.lossCount > 0 || it.latencyMs == null }
                     val gapMs = b.elapsedMs - a.elapsedMs
+                    // SUCCESS / HIGH_LATENCY 都是成功点，必须实线连接；虚线只代表中间存在缺测/超时/GAP。
                     val dashed = hasRealLoss || gapMs > normalGapLimit
                     drawSegment(a, b, dashed = dashed)
                 }
@@ -10115,14 +10121,13 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
                     val latency = p.latencyMs
                     if (latency != null && p.lossCount == 0) {
                         val x = xOf(p.elapsedMs)
-                        val y = yOf(latency)
                         val minSample = p.minLatencyMs
                         val maxSample = p.maxLatencyMs
                         val peak = maxSample ?: latency
                         val highPoint = p.highLatency || peak >= (minY + ((maxY - minY) * 0.85f)).roundToInt()
                         if (highPoint && minSample != null && maxSample != null && maxSample > minSample) {
                             // 只有独立橙色高延迟点才画细蓝竖线，普通点不画竖线。
-                            drawLine(Blue.copy(alpha = 0.22f), Offset(x, yOf(minSample)), Offset(x, yOf(maxSample)), strokeWidth = 1.1f, cap = StrokeCap.Round)
+                            drawLine(Blue.copy(alpha = 0.16f), Offset(x, yOf(minSample)), Offset(x, yOf(maxSample)), strokeWidth = 1.0f, cap = StrokeCap.Round)
                         }
                         if (highPoint) drawCircle(Orange, radius = 3.5f, center = Offset(x, yOf(peak)))
                     }
