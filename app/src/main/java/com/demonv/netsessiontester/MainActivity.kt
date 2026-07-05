@@ -291,6 +291,49 @@ private enum class PingProtocolMode(val label: String) {
     AUTO("自动"), IPV4("IPv4"), IPV6("IPv6")
 }
 
+private data class TargetPreset(val value: String, val note: String = "")
+
+private val DefaultTargetPresets = listOf(
+    TargetPreset("www.baidu.com", "默认"),
+    TargetPreset("www.qq.com", "腾讯"),
+    TargetPreset("www.huawei.com", "华为"),
+    TargetPreset("223.5.5.5", "阿里DNS"),
+    TargetPreset("119.29.29.29", "腾讯DNS")
+)
+
+private val DefaultPingTargetPresets = listOf(
+    TargetPreset("223.5.5.5", "默认"),
+    TargetPreset("192.168.0.1", "常见路由器"),
+    TargetPreset("192.168.1.1", "常见路由器"),
+    TargetPreset("192.168.5.1", "内网网关"),
+    TargetPreset("192.168.110.1", "内网网关"),
+    TargetPreset("www.qq.com", "腾讯"),
+    TargetPreset("www.baidu.com", "百度"),
+    TargetPreset("119.29.29.29", "腾讯DNS")
+)
+
+private data class PingIntervalPreset(val label: String, val intervalMs: String)
+private val DefaultPingIntervalPresets = listOf(
+    PingIntervalPreset("语音 25", "25"),
+    PingIntervalPreset("游戏 30", "30"),
+    PingIntervalPreset("视频 40", "40"),
+    PingIntervalPreset("100", "100"),
+    PingIntervalPreset("200", "200"),
+    PingIntervalPreset("500", "500"),
+    PingIntervalPreset("网页 1000", "1000")
+)
+
+private data class PingTimeoutPreset(val label: String, val valueMs: String?)
+private val DefaultPingTimeoutPresets = listOf(
+    PingTimeoutPreset("自动", null),
+    PingTimeoutPreset("300", "300"),
+    PingTimeoutPreset("500", "500"),
+    PingTimeoutPreset("800", "800"),
+    PingTimeoutPreset("1000", "1000"),
+    PingTimeoutPreset("1500", "1500"),
+    PingTimeoutPreset("3000", "3000")
+)
+
 private data class PingLogEntry(
     val timeEpochMs: Long = System.currentTimeMillis(),
     val target: String,
@@ -501,11 +544,11 @@ private fun cleanTargetText(value: String): String = value.trim().trimEnd('/')
 
 private fun loadTargetHistory(context: Context, key: String): List<String> {
     val raw = context.getSharedPreferences("target_history_store", Context.MODE_PRIVATE).getString(key, "") ?: ""
-    return raw.split("\n").map { it.trim() }.filter { it.isNotBlank() }.distinct().take(5)
+    return raw.split("\n").map { it.trim() }.filter { it.isNotBlank() }.distinct().take(10)
 }
 
 private fun saveTargetHistory(context: Context, key: String, items: List<String>) {
-    val clean = items.map { cleanTargetText(it) }.filter { it.isNotBlank() }.distinct().take(5)
+    val clean = items.map { cleanTargetText(it) }.filter { it.isNotBlank() }.distinct().take(10)
     context.getSharedPreferences("target_history_store", Context.MODE_PRIVATE)
         .edit()
         .putString(key, clean.joinToString("\n"))
@@ -517,7 +560,7 @@ private fun rememberTargetHistoryItem(context: Context, key: String, target: Str
     if (clean.isBlank()) return loadTargetHistory(context, key)
     val next = listOf(clean) + loadTargetHistory(context, key).filterNot { it.equals(clean, ignoreCase = true) }
     saveTargetHistory(context, key, next)
-    return next.take(5)
+    return next.take(10)
 }
 
 
@@ -2962,16 +3005,9 @@ private fun NetSessionTesterApp() {
     }
 
     fun alignPingWithSessionEnd() {
-        val started = currentStartedAt
-        if (started <= 0L) return
-        val elapsedMs = (System.currentTimeMillis() - started).coerceAtLeast(0L)
-        val last = pingPoints.lastOrNull()
-        if (last != null && last.elapsedMs < elapsedMs) {
-            pingPoints = (pingPoints + last.copy(
-                elapsedSec = (elapsedMs / 1_000L).toInt(),
-                elapsedMs = elapsedMs
-            )).takeLast(2400)
-        }
+        // 不再把最后一个真实点复制到测试结束时间。
+        // 复制点会造成“没有丢包但后半段变虚线”和右侧异常连接。
+        // 图表的 X 轴由真实样本范围决定，结束时间只用于文字统计。
     }
 
     fun safePingIntervalMs(): Long = pingIntervalSetting.toLongOrNull()?.coerceIn(30L, 60_000L) ?: 1_000L
@@ -3069,6 +3105,8 @@ private fun NetSessionTesterApp() {
             val bucketSamples = mutableListOf<Int?>()
             val pendingLogs = mutableListOf<PingLogEntry>()
             val jitterWindow = RttJitterWindow(maxSize = 50)
+            var consecutiveLossStartedAt = 0L
+            var autoInterruptedByLoss = false
 
             fun markOfficialStart() {
                 val official = System.currentTimeMillis()
@@ -3109,6 +3147,25 @@ private fun NetSessionTesterApp() {
                     pingJitterMs = jitterWindow.currentJitterMs()
                 }
                 bucketSamples.add(latency)
+                if (latency == null) {
+                    if (consecutiveLossStartedAt == 0L) consecutiveLossStartedAt = eventTime
+                    if (!autoInterruptedByLoss && eventTime - consecutiveLossStartedAt >= 5_000L) {
+                        autoInterruptedByLoss = true
+                        pendingLogs.add(PingLogEntry(
+                            timeEpochMs = eventTime,
+                            target = target,
+                            protocol = resolved.displayProtocol,
+                            latencyMs = null,
+                            status = "中断",
+                            note = "连续5秒100%丢包，已自动停止并保存记录",
+                            sessionId = sessionId,
+                            elapsedMs = elapsedMs
+                        ))
+                        pingJob?.cancel(CancellationException("连续5秒100%丢包"))
+                    }
+                } else {
+                    consecutiveLossStartedAt = 0L
+                }
                 val status = when {
                     latency == null -> failure ?: "超时"
                     latency >= 100 -> "高延迟"
@@ -4723,6 +4780,7 @@ private fun TargetAndModeCard(
     hostHistory: List<String>,
     onPickHostHistory: (String) -> Unit,
     onDeleteHostHistory: (String) -> Unit,
+    hostPresets: List<TargetPreset> = DefaultTargetPresets,
     port: String,
     onPortChange: (String) -> Unit,
     result: com.demonv.netsessiontester.model.ResolveResult,
@@ -4741,8 +4799,10 @@ private fun TargetAndModeCard(
             onValueChange = onHostChange,
             placeholder = "www.baidu.com",
             history = hostHistory,
+            presets = hostPresets,
             onPick = onPickHostHistory,
             onDelete = onDeleteHostHistory,
+            onAdd = onPickHostHistory,
             leadingMark = "host"
         )
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.Bottom) {
@@ -4775,7 +4835,7 @@ private fun TargetAndModeCard(
                         .padding(horizontal = 13.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    AppIconGlyph("privacy", Blue, Modifier.width(18.dp).height(18.dp))
+                    AppIconGlyph(if (maskPrivacy) "privacy_on" else "privacy", Blue, Modifier.width(18.dp).height(18.dp))
                     Spacer(Modifier.width(10.dp))
                     Text("隐私", color = TextDark, fontSize = 13.sp, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
                     Switch(checked = maskPrivacy, onCheckedChange = onMaskPrivacyChange)
@@ -5067,13 +5127,42 @@ private fun SettingsPage(
                             onValueChange = onPingTargetChange,
                             placeholder = "223.5.5.5",
                             history = pingTargetHistory,
+                            presets = DefaultPingTargetPresets,
                             onPick = onPickPingTargetHistory,
                             onDelete = onDeletePingTargetHistory,
+                            onAdd = onPickPingTargetHistory,
                             leadingMark = "target"
                         )
                         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                            ParamField("间隔ms", pingIntervalMs, { onPingIntervalMsChange(it.onlyDigits()) }, Modifier.weight(1f), leadingMark = "time")
+                            ParamField("间隔ms", pingIntervalMs, {
+                                val clean = it.onlyDigits()
+                                onPingIntervalMsChange(clean)
+                                clean.toLongOrNull()?.let { ms -> onPingTimeoutMsChange(recommendedPingTimeoutMsForInterval(ms).toString()) }
+                            }, Modifier.weight(1f), leadingMark = "time")
                             ParamField("超时ms", pingTimeoutMs, { onPingTimeoutMsChange(it.onlyDigits()) }, Modifier.weight(1f), leadingMark = "time")
+                        }
+                        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                            DefaultPingIntervalPresets.forEach { preset ->
+                                SoftChoicePill(
+                                    text = preset.label,
+                                    selected = pingIntervalMs == preset.intervalMs,
+                                    onClick = {
+                                        onPingIntervalMsChange(preset.intervalMs)
+                                        onPingTimeoutMsChange(recommendedPingTimeoutMsForInterval(preset.intervalMs.toLong()).toString())
+                                    },
+                                    compact = true
+                                )
+                            }
+                        }
+                        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                            DefaultPingTimeoutPresets.forEach { preset ->
+                                SoftChoicePill(
+                                    text = preset.label,
+                                    selected = if (preset.valueMs == null) pingTimeoutMs == recommendedPingTimeoutMsForInterval(pingIntervalMs.toLongOrNull() ?: 1000L).toString() else pingTimeoutMs == preset.valueMs,
+                                    onClick = { onPingTimeoutMsChange(preset.valueMs ?: recommendedPingTimeoutMsForInterval(pingIntervalMs.toLongOrNull() ?: 1000L).toString()) },
+                                    compact = true
+                                )
+                            }
                         }
                         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                             ParamField("次数", pingCount, onPingCountChange, Modifier.weight(1f), leadingMark = "count")
@@ -5085,7 +5174,7 @@ private fun SettingsPage(
                                     PingProtocolMode.IPV4 -> "仅 IPv4"
                                     PingProtocolMode.IPV6 -> "仅 IPv6"
                                 },
-                                leadingMark = "privacy",
+                                leadingMark = "mode",
                                 modifier = Modifier.weight(1f),
                                 onClick = { protocolMenuOpen = true }
                             )
@@ -6070,7 +6159,7 @@ private fun usesCustomNetGlyph(mark: String): Boolean = mark in setOf(
     "network_info", "ipv4", "ipv6", "session_ipv4", "session_ipv6", "local_ip", "mapping", "nat", "nat1", "nat2", "nat3", "nat4", "filter", "priority", "connection_tree",
     "egress", "dns", "nslookup", "tracket", "mtu", "roaming", "ping", "∿",
     "target", "mode", "tune", "≡", "port", "host", "address", "□", "log",
-    "latency", "time", "hourglass", "count", "privacy", "carrier", "wifi", "confidence",
+    "latency", "time", "hourglass", "count", "privacy", "privacy_on", "carrier", "wifi", "confidence",
     "note", "download", "chart"
 )
 
@@ -6131,14 +6220,20 @@ private fun NetGlyph(mark: String, color: Color, modifier: Modifier = Modifier) 
         }
         when (mark) {
             "network_info" -> {
-                globe(0.50f, 0.50f, 0.36f)
-                line(0.20f, 0.33f, 0.80f, 0.33f, 0.55f, thin)
-                line(0.20f, 0.67f, 0.80f, 0.67f, 0.55f, thin)
+                // 网络信息：正常 WiFi 图标，减少误解。
+                drawArc(color, 205f, 130f, false, topLeft=Offset(0.12f*w,0.14f*h), size=androidx.compose.ui.geometry.Size(0.76f*w,0.76f*h), style=stroke)
+                drawArc(color, 210f, 120f, false, topLeft=Offset(0.27f*w,0.32f*h), size=androidx.compose.ui.geometry.Size(0.46f*w,0.48f*h), style=thin)
+                drawArc(color, 218f, 104f, false, topLeft=Offset(0.40f*w,0.50f*h), size=androidx.compose.ui.geometry.Size(0.20f*w,0.22f*h), style=thin)
+                dot(0.50f,0.80f,0.045f)
             }
             "ipv4", "ipv6", "host", "address" -> globe()
             "local_ip" -> {
-                drawRoundRect(color, topLeft = Offset(0.25f * w, 0.16f * h), size = androidx.compose.ui.geometry.Size(0.31f * w, 0.48f * h), cornerRadius = androidx.compose.ui.geometry.CornerRadius(0.06f * w, 0.06f * h), style = stroke)
-                line(0.405f, 0.64f, 0.405f, 0.79f); line(0.22f, 0.79f, 0.60f, 0.79f); dot(0.22f, 0.79f); dot(0.60f, 0.79f)
+                // 本地IP：电脑套手机，表达本机/局域网终端。
+                drawRoundRect(color, topLeft = Offset(0.16f*w, 0.20f*h), size = androidx.compose.ui.geometry.Size(0.54f*w, 0.38f*h), cornerRadius = androidx.compose.ui.geometry.CornerRadius(0.05f*w,0.05f*h), style=stroke)
+                line(0.34f,0.62f,0.52f,0.62f,0.85f,thin)
+                line(0.27f,0.76f,0.61f,0.76f,0.85f,thin)
+                drawRoundRect(color, topLeft = Offset(0.54f*w,0.34f*h), size = androidx.compose.ui.geometry.Size(0.25f*w,0.44f*h), cornerRadius = androidx.compose.ui.geometry.CornerRadius(0.045f*w,0.045f*h), style=stroke)
+                dot(0.665f,0.71f,0.018f,0.8f)
             }
             "mapping" -> {
                 // 公网映射：上面向左箭头，下面向右箭头，避免和 IPv4/IPv6 地球图标混淆。
@@ -6195,14 +6290,22 @@ private fun NetGlyph(mark: String, color: Color, modifier: Modifier = Modifier) 
                 line(0.40f,0.88f,0.60f,0.88f,0.9f,thin)
                 dot(0.50f,0.40f,0.035f,0.9f)
             }
-            "egress" -> { drawRoundRect(color, Offset(0.18f*w,0.22f*h), androidx.compose.ui.geometry.Size(0.34f*w,0.50f*h), androidx.compose.ui.geometry.CornerRadius(0.04f*w,0.04f*h), style=stroke); dot(0.58f,0.38f,0.035f); dot(0.68f,0.48f,0.035f); arrow(0.54f,0.56f,0.84f,0.56f) }
-            "dns" -> {
-                // DNS诊断：心电图/健康检查感。
+            "egress" -> {
+                // 出网端口：U形端口/接口。
                 val p = Path().apply {
-                    moveTo(0.12f*w,0.56f*h); lineTo(0.28f*w,0.56f*h); lineTo(0.36f*w,0.34f*h);
-                    lineTo(0.46f*w,0.72f*h); lineTo(0.56f*w,0.46f*h); lineTo(0.66f*w,0.56f*h); lineTo(0.88f*w,0.56f*h)
+                    moveTo(0.25f*w,0.22f*h)
+                    lineTo(0.25f*w,0.55f*h)
+                    cubicTo(0.25f*w,0.76f*h,0.75f*w,0.76f*h,0.75f*w,0.55f*h)
+                    lineTo(0.75f*w,0.22f*h)
                 }
                 drawPath(p, color, style=stroke)
+                dot(0.38f,0.28f,0.035f); dot(0.62f,0.28f,0.035f)
+            }
+            "dns" -> {
+                // DNS诊断：小地球 + 放大镜。
+                globe(0.42f, 0.42f, 0.24f)
+                drawCircle(color, radius=0.18f*size.minDimension, center=Offset(0.60f*w,0.60f*h), style=stroke)
+                line(0.72f,0.72f,0.86f,0.86f,1f,stroke)
             }
             "nslookup" -> {
                 // NSLookup：纯放大镜，避免和 DNS 诊断重复。
@@ -6227,17 +6330,33 @@ private fun NetGlyph(mark: String, color: Color, modifier: Modifier = Modifier) 
                 drawArc(color, 218f, 104f, false, topLeft=Offset(0.39f*w,0.51f*h), size=androidx.compose.ui.geometry.Size(0.22f*w,0.22f*h), style=thin)
                 dot(0.50f,0.80f,0.045f)
             }
-            "ping", "∿" -> { val p=Path().apply{ moveTo(0.12f*w,0.65f*h); lineTo(0.28f*w,0.65f*h); lineTo(0.38f*w,0.35f*h); lineTo(0.52f*w,0.76f*h); lineTo(0.64f*w,0.46f*h); lineTo(0.86f*w,0.46f*h) }; drawPath(p,color,style=stroke); dot(0.86f,0.46f,0.04f) }
+            "ping", "∿" -> {
+                // 独立Ping/Ping测试：仪表盘/速度表风格。
+                drawArc(color, 205f, 130f, false, topLeft=Offset(0.18f*w,0.20f*h), size=androidx.compose.ui.geometry.Size(0.64f*w,0.64f*h), style=stroke)
+                line(0.50f,0.58f,0.66f,0.38f,1f,stroke)
+                dot(0.50f,0.58f,0.04f)
+                line(0.28f,0.72f,0.72f,0.72f,0.75f,thin)
+            }
             "connection_tree" -> {
-                // 连接数测试：倒置/横向树状分叉，代表并发连接。
-                line(0.18f, 0.50f, 0.42f, 0.50f, 1f, stroke)
-                line(0.42f, 0.50f, 0.74f, 0.24f, 1f, stroke)
-                line(0.42f, 0.50f, 0.78f, 0.50f, 1f, stroke)
-                line(0.42f, 0.50f, 0.74f, 0.76f, 1f, stroke)
-                dot(0.18f, 0.50f, 0.045f)
-                dot(0.74f, 0.24f, 0.045f)
-                dot(0.78f, 0.50f, 0.045f)
-                dot(0.74f, 0.76f, 0.045f)
+                // 连接数测试：紧凑双闪电 + 电弧，表达并发冲击，不再像树杈。
+                val p1 = Path().apply {
+                    moveTo(0.18f*w, 0.42f*h)
+                    lineTo(0.38f*w, 0.42f*h)
+                    lineTo(0.31f*w, 0.56f*h)
+                    lineTo(0.54f*w, 0.56f*h)
+                }
+                val p2 = Path().apply {
+                    moveTo(0.32f*w, 0.66f*h)
+                    lineTo(0.52f*w, 0.66f*h)
+                    lineTo(0.45f*w, 0.80f*h)
+                    lineTo(0.70f*w, 0.80f*h)
+                }
+                drawPath(p1, color, style = stroke)
+                drawPath(p2, color, style = stroke)
+                drawArc(color.copy(alpha = 0.72f), 210f, 120f, false, topLeft=Offset(0.54f*w,0.30f*h), size=androidx.compose.ui.geometry.Size(0.30f*w,0.38f*h), style=thin)
+                drawArc(color.copy(alpha = 0.48f), 210f, 120f, false, topLeft=Offset(0.64f*w,0.38f*h), size=androidx.compose.ui.geometry.Size(0.22f*w,0.28f*h), style=thin)
+                dot(0.18f, 0.42f, 0.032f)
+                dot(0.70f, 0.80f, 0.032f)
             }
             "session_ipv4", "session_ipv6" -> {
                 globe(0.50f, 0.50f, 0.32f)
@@ -6253,9 +6372,34 @@ private fun NetGlyph(mark: String, color: Color, modifier: Modifier = Modifier) 
             }
             "latency", "time", "hourglass" -> { drawCircle(color, radius=0.28f*size.minDimension, center=Offset(0.48f*w,0.50f*h), style=stroke); line(0.48f,0.50f,0.48f,0.32f); line(0.48f,0.50f,0.64f,0.58f) }
             "count" -> { arrow(0.72f,0.30f,0.32f,0.30f); arrow(0.28f,0.70f,0.68f,0.70f); dot(0.50f,0.50f,0.05f) }
-            "privacy" -> { shield(); dot(0.50f,0.50f,0.05f) }
+            "privacy" -> {
+                // 隐私关闭：小钥匙。
+                drawCircle(color, radius=0.12f*size.minDimension, center=Offset(0.32f*w,0.44f*h), style=stroke)
+                line(0.43f,0.52f,0.80f,0.74f,1f,stroke)
+                line(0.62f,0.63f,0.62f,0.75f,1f,thin)
+                line(0.72f,0.69f,0.72f,0.80f,1f,thin)
+            }
+            "privacy_on" -> {
+                // 隐私开启：遮蔽的小眼睛。
+                val eye = Path().apply {
+                    moveTo(0.15f*w,0.50f*h)
+                    cubicTo(0.32f*w,0.28f*h,0.68f*w,0.28f*h,0.85f*w,0.50f*h)
+                    cubicTo(0.68f*w,0.72f*h,0.32f*w,0.72f*h,0.15f*w,0.50f*h)
+                }
+                drawPath(eye, color, style=stroke)
+                dot(0.50f,0.50f,0.055f)
+                line(0.22f,0.78f,0.82f,0.22f,1f,stroke)
+            }
             "confidence" -> { drawCircle(color, radius=0.31f*size.minDimension, center=Offset(0.50f*w,0.50f*h), style=stroke); line(0.32f,0.51f,0.45f,0.64f); line(0.45f,0.64f,0.72f,0.36f) }
-            "carrier" -> { line(0.30f,0.76f,0.30f,0.54f); line(0.50f,0.76f,0.50f,0.38f); line(0.70f,0.76f,0.70f,0.22f) }
+            "carrier" -> {
+                // 运营商：基站/天线图标。
+                line(0.50f,0.78f,0.50f,0.42f,1f,stroke)
+                dot(0.50f,0.38f,0.035f)
+                drawArc(color, 210f, 120f, false, topLeft=Offset(0.28f*w,0.20f*h), size=androidx.compose.ui.geometry.Size(0.44f*w,0.40f*h), style=thin)
+                drawArc(color, -30f, 120f, false, topLeft=Offset(0.28f*w,0.20f*h), size=androidx.compose.ui.geometry.Size(0.44f*w,0.40f*h), style=thin)
+                line(0.36f,0.78f,0.64f,0.78f,0.85f,thin)
+                line(0.42f,0.62f,0.58f,0.62f,0.7f,thin)
+            }
             "download" -> { arrow(0.50f,0.18f,0.50f,0.62f); line(0.28f,0.78f,0.72f,0.78f) }
             "chart" -> { line(0.18f,0.74f,0.18f,0.58f); line(0.39f,0.74f,0.39f,0.42f); line(0.60f,0.74f,0.60f,0.28f); line(0.81f,0.74f,0.81f,0.50f) }
             else -> dot(0.50f,0.50f,0.18f)
@@ -6300,9 +6444,16 @@ private fun HistoryTextField(
     history: List<String>,
     onPick: (String) -> Unit,
     onDelete: (String) -> Unit,
-    leadingMark: String? = null
+    leadingMark: String? = null,
+    presets: List<TargetPreset> = emptyList(),
+    onAdd: ((String) -> Unit)? = null
 ) {
     var open by remember { mutableStateOf(false) }
+    var addOpen by remember { mutableStateOf(false) }
+    var addValue by remember { mutableStateOf("") }
+    var addNote by remember { mutableStateOf("") }
+    var addError by remember { mutableStateOf<String?>(null) }
+    val canOpen = history.isNotEmpty() || presets.isNotEmpty() || onAdd != null
     Box {
         OutlinedTextField(
             value = value,
@@ -6313,7 +6464,7 @@ private fun HistoryTextField(
                 { AppIconGlyph(mark, Blue, Modifier.width(18.dp).height(18.dp)) }
             },
             trailingIcon = {
-                TextButton(onClick = { if (history.isNotEmpty()) open = true }) { Text("⌄", color = Muted, fontSize = 16.sp, fontWeight = FontWeight.Bold) }
+                TextButton(onClick = { if (canOpen) open = true }) { Text("⌄", color = Muted, fontSize = 16.sp, fontWeight = FontWeight.Bold) }
             },
             textStyle = MaterialTheme.typography.bodyMedium.copy(fontSize = 13.sp),
             shape = ShapeM,
@@ -6323,30 +6474,69 @@ private fun HistoryTextField(
     if (open) {
         AlertDialog(
             onDismissRequest = { open = false },
-            confirmButton = {},
-            title = { Text("最近使用", fontWeight = FontWeight.Bold, color = TextDark) },
+            confirmButton = {
+                if (onAdd != null) TextButton(onClick = { addValue = ""; addNote = ""; addError = null; addOpen = true }) { Text("添加", fontWeight = FontWeight.Bold) }
+            },
+            title = { Text("选择目标", fontWeight = FontWeight.Bold, color = TextDark) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
-                    history.take(5).forEach { item ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .background(Color(0xFFF8FAFC), ShapeM)
-                                .clickable {
-                                    onPick(item)
-                                    open = false
+                    if (presets.isNotEmpty()) {
+                        Text("预设", color = Muted, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        presets.forEach { preset ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth().background(Color(0xFFF8FAFC), ShapeM).clickable { onPick(preset.value); open = false }.padding(horizontal = 12.dp, vertical = 9.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(preset.value, color = TextDark, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                                if (preset.note.isNotBlank()) Text(preset.note, color = Muted, fontSize = 11.sp, maxLines = 1)
+                            }
+                        }
+                    }
+                    if (history.isNotEmpty()) {
+                        Text("自定义/最近", color = Muted, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        history.take(10).forEach { item ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth().background(Color(0xFFF8FAFC), ShapeM).clickable { onPick(item); open = false }.padding(horizontal = 12.dp, vertical = 9.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(item, color = TextDark, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                                IconButton(onClick = { onDelete(item) }, modifier = Modifier.width(32.dp).height(32.dp)) {
+                                    Icon(Icons.Filled.Close, contentDescription = null, tint = Muted, modifier = Modifier.width(16.dp).height(16.dp))
                                 }
-                                .padding(horizontal = 12.dp, vertical = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(item, color = TextDark, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-                            IconButton(onClick = { onDelete(item) }, modifier = Modifier.width(32.dp).height(32.dp)) {
-                                Icon(Icons.Filled.Close, contentDescription = null, tint = Muted, modifier = Modifier.width(16.dp).height(16.dp))
                             }
                         }
                     }
                 }
             },
+            shape = ShapeL
+        )
+    }
+    if (addOpen && onAdd != null) {
+        AlertDialog(
+            onDismissRequest = { addOpen = false },
+            title = { Text("添加目标", fontWeight = FontWeight.Bold, color = TextDark) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(value = addValue, onValueChange = { addValue = it; addError = null }, label = { Text("域名 / IP") }, singleLine = true, shape = ShapeM)
+                    OutlinedTextField(value = addNote, onValueChange = { addNote = it }, label = { Text("备注（可选）") }, singleLine = true, shape = ShapeM)
+                    addError?.let { Text(it, color = ErrorRed, fontSize = 12.sp) }
+                    Text("最多保存10个自定义目标，预设不会被删除。", color = Muted, fontSize = 11.sp)
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val normalized = normalizeNetworkTargetInput(addValue, "")
+                    if (normalized.error != null || normalized.host.isBlank()) {
+                        addError = normalized.error ?: "请输入正确的域名或IP"
+                    } else {
+                        onAdd(normalized.host)
+                        onValueChange(normalized.host)
+                        addOpen = false
+                        open = false
+                    }
+                }) { Text("添加", fontWeight = FontWeight.Bold) }
+            },
+            dismissButton = { TextButton(onClick = { addOpen = false }) { Text("取消") } },
             shape = ShapeL
         )
     }
@@ -9817,7 +10007,8 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
                 // 成功点之间按质量分段：连续成功用实线；中间发生丢包/超时或长间隔时，用浅蓝虚线桥接。
                 val sortedVisible = visible.sortedBy { it.elapsedMs }
                 val successPoints = sortedVisible.filter { it.latencyMs != null }
-                val normalGapLimit = maxOf(900L, windowSpanMs / 28L)
+                val expectedGapMs = sortedVisible.zipWithNext().map { (a,b) -> (b.elapsedMs - a.elapsedMs).coerceAtLeast(1L) }.minOrNull()?.coerceAtLeast(1L) ?: 1_000L
+                val normalGapLimit = maxOf(expectedGapMs * 3L, 900L)
                 fun drawSegment(a: PingPoint, b: PingPoint, dashed: Boolean) {
                     val la = a.latencyMs ?: return
                     val lb = b.latencyMs ?: return
@@ -9837,12 +10028,10 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
                 }
                 successPoints.zipWithNext().forEach { (a, b) ->
                     val between = sortedVisible.filter { it.elapsedMs > a.elapsedMs && it.elapsedMs < b.elapsedMs }
-                    val missingCount = between.sumOf { it.lossCount } + between.count { it.latencyMs == null }
+                    val hasRealLoss = between.any { it.lossCount > 0 || it.latencyMs == null }
                     val gapMs = b.elapsedMs - a.elapsedMs
-                    when {
-                        missingCount == 0 && gapMs <= normalGapLimit -> drawSegment(a, b, dashed = false)
-                        else -> drawSegment(a, b, dashed = true)
-                    }
+                    val dashed = hasRealLoss || gapMs > normalGapLimit
+                    drawSegment(a, b, dashed = dashed)
                 }
 
                 visible.forEach { p ->
@@ -9850,7 +10039,13 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
                     if (latency != null && p.lossCount == 0) {
                         val x = xOf(p.elapsedMs)
                         val y = yOf(latency)
-                        if (p.highLatency || latency >= maxOf(minY + 1, (maxY * 0.85f).roundToInt())) drawCircle(Orange, radius = 3.5f, center = Offset(x, y))
+                        val minSample = p.minLatencyMs
+                        val maxSample = p.maxLatencyMs
+                        if (minSample != null && maxSample != null && maxSample > minSample) {
+                            drawLine(Blue.copy(alpha = 0.22f), Offset(x, yOf(minSample)), Offset(x, yOf(maxSample)), strokeWidth = 1.1f, cap = StrokeCap.Round)
+                        }
+                        val peak = maxSample ?: latency
+                        if (p.highLatency || peak >= maxOf(minY + 1, (maxY * 0.85f).roundToInt())) drawCircle(Orange, radius = 3.5f, center = Offset(x, yOf(peak)))
                     }
                     if (p.lossCount > 0) {
                         val x = xOf(p.elapsedMs)

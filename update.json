@@ -1,15 +1,14 @@
 {
-  "versionCode": 136,
+  "versionCode": 138,
   "versionName": "V1.1.15",
-  "title": "自测版本 V1.1.15 build136",
+  "title": "自测版本 V1.1.15 build138",
   "status": "draft",
   "minReadyFileSize": 3000000,
   "content": [
-    "Ping 图表 X 轴按实际时长动态铺满，避免右侧大面积留白",
-    "Ping 图表 Y 轴按可视 RTT 自适应，减少上下留白并增加三位数安全边距",
-    "修复历史图表滑动时空数据和越界可能导致闪退的问题",
-    "Ping 响应日志增加运行秒列，便于查看高频记录顺序",
-    "更新机制增加 status=ready 与 APK 可用性检查，避免 Release 未上传时提前弹更新"
+    "图标专项自测：隐私钥匙/遮蔽眼、本地IP电脑手机、DNS地球放大镜",
+    "网络信息标题改为WiFi图标，出网端口改为U形端口，运营商改为基站天线",
+    "独立Ping和Ping测试改为仪表盘图标，连接数测试改为左右链路图标",
+    "保留build137的目标预设、Ping预设、图表修复和更新机制逻辑"
   ],
   "apkUrl": "",
   "githubUrl": "",
