@@ -8826,11 +8826,16 @@ private fun RoamingToolPage(onBack: () -> Unit) {
     var history by remember { mutableStateOf(loadRoamingHistory(context.applicationContext)) }
     var showHistory by remember { mutableStateOf(false) }
     var expandedHistoryIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
+    var lastCapabilitySignature by remember { mutableStateOf("") }
+    var lastLinkSignature by remember { mutableStateOf("") }
     val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { }
 
     fun appendNetworkEvent(label: String) {
         val now = System.currentTimeMillis()
         val elapsed = runStartMs?.let { ((now - it) / 1000L).toInt().coerceAtLeast(0) } ?: 0
+        // 事件去重：ConnectivityManager 可能连续回调完全相同的能力/链路内容，避免事件区刷屏。
+        val last = networkEvents.lastOrNull()
+        if (last?.label == label) return
         networkEvents = (networkEvents + RoamingNetworkEvent(
             timeText = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(now)),
             elapsedSec = elapsed,
@@ -8848,9 +8853,10 @@ private fun RoamingToolPage(onBack: () -> Unit) {
         savedRunId = runId
     }
 
-    fun stop() {
+    fun stop(reason: String = "手动停止") {
         job?.cancel()
         job = null
+        if (running && reason != "手动停止") appendNetworkEvent("网络事件：$reason")
         if (running) saveCurrentRunIfNeeded()
         running = false
     }
@@ -8866,7 +8872,11 @@ private fun RoamingToolPage(onBack: () -> Unit) {
                 }
 
                 override fun onLost(network: Network) {
-                    scope.launch { appendNetworkEvent("网络事件：网络丢失/可能切换") }
+                    scope.launch {
+                        appendNetworkEvent("网络事件：网络丢失/可能切换")
+                        delay(1500)
+                        if (running) stop("网络断开超过1.5秒，已中断并保存")
+                    }
                 }
 
                 override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
@@ -8881,7 +8891,11 @@ private fun RoamingToolPage(onBack: () -> Unit) {
                     val validated = if (networkCapabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) "已验证" else "未验证"
                     val metered = if (networkCapabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)) "非计费" else "可能计费"
                     val vpn = if (networkCapabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) " · VPN" else ""
-                    scope.launch { appendNetworkEvent("能力变化：$transport · $internet · $validated · $metered$vpn") }
+                    val signature = "$transport|$internet|$validated|$metered|$vpn"
+                    if (signature != lastCapabilitySignature) {
+                        lastCapabilitySignature = signature
+                        scope.launch { appendNetworkEvent("能力变化：$transport · $internet · $validated · $metered$vpn") }
+                    }
                 }
 
                 override fun onLinkPropertiesChanged(network: Network, linkProperties: LinkProperties) {
@@ -8889,11 +8903,30 @@ private fun RoamingToolPage(onBack: () -> Unit) {
                     val iface = linkProperties.interfaceName ?: "未知接口"
                     val mtu = linkProperties.mtu
                     val hasIpv6 = linkProperties.linkAddresses.any { it.address is Inet6Address }
-                    scope.launch { appendNetworkEvent("链路变化：$iface · DNS ${dnsCount}个 · MTU $mtu · IPv6 ${if (hasIpv6) "有" else "无"}") }
+                    val signature = "$iface|$dnsCount|$mtu|$hasIpv6"
+                    if (signature != lastLinkSignature) {
+                        lastLinkSignature = signature
+                        scope.launch { appendNetworkEvent("链路变化：$iface · DNS ${dnsCount}个 · MTU $mtu · IPv6 ${if (hasIpv6) "有" else "无"}") }
+                    }
                 }
             }
             runCatching { cm?.registerDefaultNetworkCallback(callback) }
             onDispose { runCatching { cm?.unregisterNetworkCallback(callback) } }
+        }
+    }
+
+    DisposableEffect(running) {
+        val lifecycleOwner = context as? LifecycleOwner
+        if (lifecycleOwner == null) {
+            onDispose { }
+        } else {
+            val observer = LifecycleEventObserver { _, event ->
+                if (event == Lifecycle.Event.ON_STOP && running) {
+                    stop("APP进入后台/锁屏，漫游测试已中断并保存")
+                }
+            }
+            lifecycleOwner.lifecycle.addObserver(observer)
+            onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
         }
     }
 
@@ -9031,8 +9064,10 @@ private fun RoamingLiveCard(
             MiniMetric("漫游", events.size.toString(), Purple, Modifier.weight(1f))
         }
         ToolMonoLine("BSSID", latest?.bssid ?: "—")
-        ToolMonoLine("网关", latest?.gatewayMs?.let { "${it}ms" } ?: "—")
-        ToolMonoLine("外网", latest?.externalMs?.let { "${it}ms" } ?: "—")
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            MiniMetric("网关", latest?.gatewayMs?.let { "${it}ms" } ?: "—", Blue, Modifier.weight(1f))
+            MiniMetric("外网", latest?.externalMs?.let { "${it}ms" } ?: "—", Purple, Modifier.weight(1f))
+        }
         if (networkEvents.isNotEmpty()) {
             Text("网络事件 / 能力变化 / 链路变化", color = TextDark, fontWeight = FontWeight.Bold, fontSize = 12.sp)
             networkEvents.takeLast(3).forEach { e ->
@@ -9048,7 +9083,7 @@ private fun RoamingLiveCard(
         if (!running && samples.isNotEmpty()) {
             RoamingSummaryCard(samples, events)
         }
-        Text("说明：漫游判断以 BSSID 切换为准；竖线表示 BSSID 漫游切换；网络事件=网络可用/丢失；能力变化=WiFi/蜂窝/VPN、Internet、验证状态；链路变化=DNS、接口、MTU、IPv6 地址变化。", color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
+        Text("说明：竖线表示 BSSID/AP 切换，点击竖线可查看切换浮层；能力/链路事件已去重，后台或网络断开会中断并保存。", color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
     }
 }
 
@@ -9129,12 +9164,64 @@ private fun RoamingHistoryItem(
     }
 }
 
+private fun roamingSwitchIndexNear(samples: List<RoamingSample>, index: Int, radius: Int = 2): Int? {
+    if (samples.size < 2) return null
+    val start = (index - radius).coerceAtLeast(1)
+    val end = (index + radius).coerceAtMost(samples.lastIndex)
+    for (i in start..end) {
+        val before = samples.getOrNull(i - 1)
+        val after = samples.getOrNull(i)
+        if (before != null && after != null && before.bssid != after.bssid && before.bssid != "未知" && after.bssid != "未知") return i
+    }
+    return null
+}
+
+private fun roamingEventForSwitchIndex(samples: List<RoamingSample>, switchIndex: Int): RoamingEventInfo? {
+    if (switchIndex <= 0 || switchIndex >= samples.size) return null
+    val before = samples[switchIndex - 1]
+    val after = samples[switchIndex]
+    if (before.bssid == after.bssid || before.bssid == "未知" || after.bssid == "未知") return null
+    val window = samples.filter { abs(it.elapsedSec - after.elapsedSec) <= 3 }
+    return RoamingEventInfo(
+        timeText = after.timeText,
+        oldBssid = before.bssid,
+        newBssid = after.bssid,
+        durationText = "约${(after.elapsedSec - before.elapsedSec).coerceAtLeast(0).coerceAtMost(5)}s",
+        beforeRssi = before.rssi,
+        afterRssi = after.rssi,
+        lossCount = window.count { it.loss },
+        maxLatencyMs = window.flatMap { listOfNotNull(it.gatewayMs, it.externalMs) }.maxOrNull()
+    )
+}
+
+@Composable
+private fun RoamingSwitchPopup(event: RoamingEventInfo) {
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = Color(0xFFFFF7ED),
+        border = BorderStroke(1.dp, Orange.copy(alpha = 0.28f)),
+        shadowElevation = 0.dp,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(Modifier.padding(horizontal = 10.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("AP切换", color = Orange, fontWeight = FontWeight.ExtraBold, fontSize = 12.sp, modifier = Modifier.weight(1f))
+                Text(event.timeText, color = Muted, fontSize = 10.sp)
+            }
+            Text("${event.oldBssid}  →  ${event.newBssid}", color = TextDark, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text("RSSI ${event.beforeRssi ?: "—"}→${event.afterRssi ?: "—"}dBm · 切换附近丢包${event.lossCount} · 最高延迟${event.maxLatencyMs?.let { "${it}ms" } ?: "—"}", color = Muted, fontSize = 11.sp)
+        }
+    }
+}
+
 @Composable
 private fun RoamingPingChartCard(samples: List<RoamingSample>) {
     var selectedIndex by remember { mutableStateOf<Int?>(null) }
     val plot = samples.takeLast(180)
     val baseIndex = (samples.size - plot.size).coerceAtLeast(0)
-    val selected = selectedIndex?.coerceIn(0, samples.lastIndex)?.let { samples.getOrNull(it) }
+    val selectedSafeIndex = selectedIndex?.takeIf { samples.isNotEmpty() }?.coerceIn(0, samples.lastIndex)
+    val selected = selectedSafeIndex?.let { samples.getOrNull(it) }
+    val selectedSwitch = selectedSafeIndex?.let { idx -> roamingSwitchIndexNear(samples, idx)?.let { roamingEventForSwitchIndex(samples, it) } }
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -9148,6 +9235,7 @@ private fun RoamingPingChartCard(samples: List<RoamingSample>) {
             Text("网关/外网 · 竖线=漫游", color = Muted, fontSize = 11.sp)
         }
         RoamingPingCanvas(plot = plot, baseIndex = baseIndex, onSelect = { selectedIndex = it })
+        selectedSwitch?.let { RoamingSwitchPopup(it) }
         selected?.let { RoamingSampleDetailLine(it) }
     }
 }
@@ -9157,7 +9245,9 @@ private fun RoamingSignalChartCard(samples: List<RoamingSample>) {
     var selectedIndex by remember { mutableStateOf<Int?>(null) }
     val plot = samples.takeLast(180)
     val baseIndex = (samples.size - plot.size).coerceAtLeast(0)
-    val selected = selectedIndex?.coerceIn(0, samples.lastIndex)?.let { samples.getOrNull(it) }
+    val selectedSafeIndex = selectedIndex?.takeIf { samples.isNotEmpty() }?.coerceIn(0, samples.lastIndex)
+    val selected = selectedSafeIndex?.let { samples.getOrNull(it) }
+    val selectedSwitch = selectedSafeIndex?.let { idx -> roamingSwitchIndexNear(samples, idx)?.let { roamingEventForSwitchIndex(samples, it) } }
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -9171,6 +9261,7 @@ private fun RoamingSignalChartCard(samples: List<RoamingSample>) {
             Text("RSSI · 竖线=切换", color = Muted, fontSize = 11.sp)
         }
         RoamingSignalCanvas(plot = plot, baseIndex = baseIndex, onSelect = { selectedIndex = it })
+        selectedSwitch?.let { RoamingSwitchPopup(it) }
         selected?.let { RoamingSampleDetailLine(it) }
     }
 }
@@ -9338,7 +9429,7 @@ private fun RoamingEventMiniCard(event: RoamingEventInfo) {
         verticalArrangement = Arrangement.spacedBy(3.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("漫游切换", color = Orange, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.weight(1f))
+            Text("AP切换", color = Orange, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.weight(1f))
             Text(event.timeText, color = Muted, fontSize = 10.sp)
         }
         Text("${event.oldBssid}  →  ${event.newBssid}", color = TextDark, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)

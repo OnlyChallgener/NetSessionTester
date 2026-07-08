@@ -1,17 +1,16 @@
 {
-  "versionCode": 140,
+  "versionCode": 141,
   "versionName": "V1.1.15",
-  "build": 140,
-  "status": "ready",
+  "build": 141,
+  "status": "draft",
   "minReadyFileSize": 3000000,
-  "title": "发现新版本 V1.1.15 build140",
+  "title": "V1.1.15 build141 自测版",
   "content": [
-    "修复 Ping 图表高延迟点断线问题",
-    "高延迟点现在会正常参与蓝色实线连接",
-    "网络信息折叠状态只显示 IPv4 / IPv6 / NAT / 运营商",
-    "展开网络信息后仍显示完整诊断项和工具入口"
+    "漫游测试事件去重",
+    "后台/锁屏和网络断开自动中断保存",
+    "AP切换竖线点击浮层"
   ],
-  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.1.15-140/NetSessionTester-V1.1.15-build140-signed.apk",
-  "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/tag/v1.1.15-140",
+  "apkUrl": "",
+  "githubUrl": "",
   "force": false
 }
