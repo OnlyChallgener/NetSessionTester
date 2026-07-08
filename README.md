@@ -1,8 +1,21 @@
-# NetSessionTester V1.1.15 build143
+# NetSessionTester
 
-自测版：漫游测试增加内/外丢包分离显示和疑似粘连 AP 判定。
+NetSessionTester is an Android network test utility for connection-count testing, Ping monitoring, NAT diagnostics, NSLookup, MTU checks, WiFi roaming observation, and Tracket route tracing.
 
-重点：
-- 路由器+外网模式下，丢包显示为“内x%/外y%”。
-- 可配置粘连 AP 参数：弱信号阈值、候选优势、持续时间。
-- 候选 AP 仅作为诊断依据，APP 不强制终端漫游。
+Current release candidate: `V1.1.15 build145`.
+
+## Release Notes Layout
+
+- `CHANGELOG.md`: formal version change log for released or release-candidate builds.
+- `TEST_NOTES_current.md`: current build validation checklist.
+- `docs/BUILD_HISTORY.md`: compact timeline of older local self-test and release-fix builds.
+- `docs/RELEASE_TEMPLATE.md`: template for future release preparation.
+
+Do not add new root-level files such as `README_selftest_buildXXX.md` or `TEST_NOTES_vX_buildXXX.md`. Add current validation details to `TEST_NOTES_current.md`, and fold older build summaries into `docs/BUILD_HISTORY.md` after the build is no longer current.
+
+## Build Notes
+
+- Package name and signing configuration are unchanged.
+- `versionCode` is managed in `app/build.gradle.kts`.
+- Public update metadata is managed in `update.json`.
+- This checkout may not include a Gradle wrapper; use Android Studio or the configured CI build environment when local Gradle is unavailable.

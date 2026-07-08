@@ -1,3 +1,31 @@
+## V1.1.16 build146
+
+- 清理根目录冗余历史日志文件。
+- 新增 docs/BUILD_HISTORY.md，统一记录历史 build。
+- 新增 docs/RELEASE_TEMPLATE.md，统一后续发版模板。
+- 设置 - 网络信息 - 路由追踪支持暂停/继续。
+- 优化路由追踪停止、返回、后台、网络切换时的资源释放。
+- 优化测试页、历史页、图表刷新性能，减少页面卡顿。
+- 检查并优化稳定性、兼容性、权限和性能问题。
+
+# V1.1.15 build145
+
+## 发版前清理与稳定性
+- 根目录历史自测/发版说明已合并到 `docs/BUILD_HISTORY.md`，后续只保留 `CHANGELOG.md`、`TEST_NOTES_current.md` 和 `docs/` 下的长期文档。
+- 新增 `docs/RELEASE_TEMPLATE.md`，用于后续发版前统一填写版本、权限、验证和风险项。
+- `update.json` 更新到 build145，并改为正常 UTF-8 JSON 内容。
+
+## 网络信息 / Tracket 路由追踪
+- Tracket 追踪新增 Running / Paused / Finished / Failed / Canceled 状态。
+- 运行中点击主按钮可暂停，暂停后按钮显示继续追踪，并保留已完成节点。
+- 继续追踪从当前 TTL 进度往后执行，不清空已有结果。
+- 停止、返回页面、网络不可用或 APP 进入后台时会取消追踪协程并销毁当前 ping 子进程。
+- 暂停、继续、停止、完成、失败写入轻量事件行，避免高频刷屏。
+
+## 兼容性与权限
+- 未新增敏感权限；本次路由追踪继续使用已有 `INTERNET` 与 `ACCESS_NETWORK_STATE`。
+- ping/traceroute 子进程运行在 `Dispatchers.IO`，UI 状态通过 Compose state 在页面协程中更新。
+
 # V1.1.15 build144
 
 ## P0 必须项

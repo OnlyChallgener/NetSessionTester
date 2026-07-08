@@ -105,7 +105,7 @@ class HistoryStore(private val context: Context) {
 
     fun count(): Int {
         if (!file.exists()) return 0
-        return file.readLines().size
+        return file.useLines { lines -> lines.count() }
     }
 
 

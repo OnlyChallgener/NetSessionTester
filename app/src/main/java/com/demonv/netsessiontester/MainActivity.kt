@@ -194,6 +194,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -287,6 +288,45 @@ private data class PingPoint(
     val minLatencyMs: Int? = latencyMs,
     val maxLatencyMs: Int? = latencyMs
 )
+
+private data class HistoryUiSnapshot(
+    val history: List<SessionSummary>,
+    val sizeKb: Int,
+    val savedCount: Int,
+    val counts: HistoryCounts
+)
+
+private data class PingCompactStats(
+    val current: Int?,
+    val avg: Int?,
+    val max: Int?,
+    val min: Int?,
+    val sampleTotal: Int,
+    val lossTotal: Int,
+    val lossPercent: Int
+)
+
+private data class PingLineSegment(val from: PingPoint, val to: PingPoint, val dashed: Boolean)
+
+private const val TEST_UI_REFRESH_MS = 500L
+private const val PING_LOG_SAVE_DEBOUNCE_MS = 400L
+private const val MAX_RENDER_PING_POINTS = 300
+private const val MAX_RENDER_SESSION_POINTS = 180
+
+private fun <T> downsampleForRender(items: List<T>, maxPoints: Int): List<T> {
+    if (items.size <= maxPoints) return items
+    val step = ceil(items.size / maxPoints.toDouble()).roundToInt().coerceAtLeast(1)
+    return items.filterIndexed { index, _ -> index % step == 0 || index == items.lastIndex }.takeLast(maxPoints)
+}
+
+private fun compactPingPointsForRender(points: List<PingPoint>): List<PingPoint> =
+    downsampleForRender(points.sortedBy { it.elapsedMs }, MAX_RENDER_PING_POINTS)
+
+private fun compactSessionPointsForRender(points: List<ChartPoint>): List<ChartPoint> =
+    points.groupBy { it.protocol }
+        .values
+        .flatMap { downsampleForRender(it.sortedBy { point -> point.elapsedSec }, (MAX_RENDER_SESSION_POINTS / 2).coerceAtLeast(1)) }
+        .sortedWith(compareBy<ChartPoint> { it.protocol.ordinal }.thenBy { it.elapsedSec })
 
 private enum class PingProtocolMode(val label: String) {
     AUTO("自动"), IPV4("IPv4"), IPV6("IPv6")
@@ -2536,7 +2576,12 @@ private fun NetSessionTesterApp() {
     var chartPoints by remember { mutableStateOf<List<ChartPoint>>(emptyList()) }
     var lastChartSampleAt by remember { mutableStateOf<Map<IpProtocol, Long>>(emptyMap()) }
     var pingPoints by remember { mutableStateOf<List<PingPoint>>(emptyList()) }
+    var displayChartPoints by remember { mutableStateOf<List<ChartPoint>>(emptyList()) }
+    var displayPingPoints by remember { mutableStateOf<List<PingPoint>>(emptyList()) }
+    var displayPingJitterMs by remember { mutableStateOf<Double?>(null) }
+    var displayPingLogCount by remember { mutableStateOf(0) }
     var pingJob by remember { mutableStateOf<Job?>(null) }
+    var pingLogSaveJob by remember { mutableStateOf<Job?>(null) }
     var pingIntervalLabel by remember { mutableStateOf("停止") }
     var pingActiveTargetLabel by remember { mutableStateOf("") }
     var pingRunning by remember { mutableStateOf(false) }
@@ -2631,12 +2676,34 @@ private fun NetSessionTesterApp() {
 
     fun safeHistoryLimit(): Int = historyLimit.toIntOrNull()?.coerceIn(10, 100) ?: 30
 
+    suspend fun loadHistoryUiSnapshot(period: String, limit: Int): HistoryUiSnapshot = withContext(Dispatchers.IO) {
+        HistoryUiSnapshot(
+            history = historyStore.load(period, limit),
+            sizeKb = historyStore.sizeKb(),
+            savedCount = historyStore.count(),
+            counts = historyStore.counts()
+        )
+    }
+
+    fun applyHistoryUiSnapshot(snapshot: HistoryUiSnapshot) {
+        state = state.copy(history = snapshot.history)
+        historySizeKb = snapshot.sizeKb
+        historySavedCount = snapshot.savedCount
+        historyCounts = snapshot.counts
+    }
+
     fun refreshHistory() {
         scope.launch {
-            state = state.copy(history = historyStore.load(historyPeriod, safeHistoryLimit()))
-            historySizeKb = historyStore.sizeKb()
-            historySavedCount = historyStore.count()
-            historyCounts = historyStore.counts()
+            applyHistoryUiSnapshot(loadHistoryUiSnapshot(historyPeriod, safeHistoryLimit()))
+        }
+    }
+
+    fun persistPingLogs(snapshot: List<PingLogEntry>) {
+        val appContext = context.applicationContext
+        pingLogSaveJob?.cancel()
+        pingLogSaveJob = scope.launch(Dispatchers.IO) {
+            delay(PING_LOG_SAVE_DEBOUNCE_MS)
+            savePingLogs(appContext, snapshot)
         }
     }
 
@@ -2676,14 +2743,20 @@ private fun NetSessionTesterApp() {
     }
 
     LaunchedEffect(Unit) {
-        state = state.copy(history = historyStore.load(historyPeriod, 30), logs = logStore.load())
-        pingLogs = loadPingLogs(context.applicationContext)
-        hostHistory = loadTargetHistory(context.applicationContext, "tcp_target_history_v1")
-        pingTargetHistory = loadTargetHistory(context.applicationContext, "ping_target_history_v1")
-        logSizeKb = logStore.sizeKb()
-        historySizeKb = historyStore.sizeKb()
-        historySavedCount = historyStore.count()
-        historyCounts = historyStore.counts()
+        val appContext = context.applicationContext
+        val initialHistory = loadHistoryUiSnapshot(historyPeriod, 30)
+        val initialLogs = logStore.load()
+        val initialPingLogs = withContext(Dispatchers.IO) { loadPingLogs(appContext) }
+        val initialHostHistory = withContext(Dispatchers.IO) { loadTargetHistory(appContext, "tcp_target_history_v1") }
+        val initialPingTargetHistory = withContext(Dispatchers.IO) { loadTargetHistory(appContext, "ping_target_history_v1") }
+        val initialLogSizeKb = withContext(Dispatchers.IO) { logStore.sizeKb() }
+        applyHistoryUiSnapshot(initialHistory)
+        state = state.copy(logs = initialLogs)
+        pingLogs = initialPingLogs
+        displayPingLogCount = initialPingLogs.size
+        hostHistory = initialHostHistory
+        pingTargetHistory = initialPingTargetHistory
+        logSizeKb = initialLogSizeKb
         val saved = settingsStore.load()
         host = saved.host.ifBlank { "www.baidu.com" }
         port = saved.port
@@ -2704,12 +2777,20 @@ private fun NetSessionTesterApp() {
         pingProtocolSetting = runCatching { PingProtocolMode.valueOf(saved.pingProtocol) }.getOrDefault(PingProtocolMode.AUTO)
         natRfc5780Servers = normalizeNatServerList(saved.natRfc5780Servers, "stunserver2025.stunprotocol.org:3478")
         natRfc3489Servers = normalizeNatServerList(saved.natRfc3489Servers, "stun.voip.aebc.com:3478")
-        state = state.copy(history = historyStore.load(historyPeriod, historyLimit.toIntOrNull()?.coerceIn(10, 100) ?: 30))
-        historySavedCount = historyStore.count()
-        historyCounts = historyStore.counts()
+        applyHistoryUiSnapshot(loadHistoryUiSnapshot(historyPeriod, historyLimit.toIntOrNull()?.coerceIn(10, 100) ?: 30))
         settingsLoaded = true
         lastNetworkInfoSignature = currentNetworkSignature(context)
         refreshPublicIp()
+    }
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            displayPingPoints = compactPingPointsForRender(pingPoints)
+            displayChartPoints = compactSessionPointsForRender(chartPoints)
+            displayPingJitterMs = pingJitterMs
+            displayPingLogCount = pingLogs.size
+            delay(if (pingRunning || state.isAdding) TEST_UI_REFRESH_MS else 1_000L)
+        }
     }
 
     LaunchedEffect(pingRunning, pingSessionStartedAt) {
@@ -2769,7 +2850,10 @@ private fun NetSessionTesterApp() {
 
     fun appendLog(line: LogLine) {
         state = state.copy(logs = (state.logs + line).takeLast(500))
-        scope.launch { logStore.append(line); logSizeKb = logStore.sizeKb() }
+        scope.launch {
+            logStore.append(line)
+            logSizeKb = withContext(Dispatchers.IO) { logStore.sizeKb() }
+        }
     }
 
     fun showBottomNotice(
@@ -2947,6 +3031,7 @@ private fun NetSessionTesterApp() {
 
     fun resetCurrentCharts() {
         chartPoints = emptyList()
+        displayChartPoints = emptyList()
         lastChartSampleAt = emptyMap()
         // Ping 独立运行，不随会话曲线清空。
     }
@@ -3024,14 +3109,16 @@ private fun NetSessionTesterApp() {
     fun appendPingLog(entry: PingLogEntry) {
         val next = trimPingLogSessions(pingLogs + entry)
         pingLogs = next
-        savePingLogs(context.applicationContext, next)
+        displayPingLogCount = next.size
+        persistPingLogs(next)
     }
 
     fun appendPingLogs(entries: List<PingLogEntry>) {
         if (entries.isEmpty()) return
         val next = trimPingLogSessions(pingLogs + entries)
         pingLogs = next
-        savePingLogs(context.applicationContext, next)
+        displayPingLogCount = next.size
+        persistPingLogs(next)
     }
 
     fun appendPingPoint(sec: Int, latencyMs: Int?) {
@@ -3316,19 +3403,23 @@ private fun NetSessionTesterApp() {
 
     fun clearPingData() {
         pingPoints = emptyList()
+        displayPingPoints = emptyList()
         pingLogs = emptyList()
+        displayPingLogCount = 0
         pingJitterMs = null
+        displayPingJitterMs = null
         pingSessionStartedAt = 0L
         pingSessionEndedAt = 0L
         pingDurationTick = System.currentTimeMillis()
-        savePingLogs(context.applicationContext, emptyList())
+        persistPingLogs(emptyList())
         pingIntervalLabel = if (pingRunning) "${pingProtocolSetting.label} · ${safePingIntervalMs()}ms" else "停止"
     }
 
     fun deletePingLogSession(sessionId: Long) {
         val next = trimPingLogSessions(pingLogs.filterNot { it.sessionId == sessionId || (it.sessionId == 0L && it.timeEpochMs == sessionId) })
         pingLogs = next
-        savePingLogs(context.applicationContext, next)
+        displayPingLogCount = next.size
+        persistPingLogs(next)
         scope.launch { snackbarHostState.showSnackbar("已删除 1 条 Ping 历史") }
     }
 
@@ -3791,10 +3882,7 @@ private fun NetSessionTesterApp() {
         scope.launch {
             historyStore.delete(summary.id)
             val safeLimit = historyLimit.toIntOrNull()?.coerceIn(10, 100) ?: 30
-            historyCounts = historyStore.counts()
-            historySavedCount = historyStore.count()
-            historySizeKb = historyStore.sizeKb()
-            state = state.copy(history = historyStore.load(historyPeriod, safeLimit))
+            applyHistoryUiSnapshot(loadHistoryUiSnapshot(historyPeriod, safeLimit))
             if (detailSummary?.id == summary.id) detailSummary = null
             snackbarHostState.showSnackbar("已删除 1 条检测历史")
         }
@@ -3811,10 +3899,7 @@ private fun NetSessionTesterApp() {
                         scope.launch {
                             historyStore.updateRemark(item.id, editingRemarkText)
                             val safeHistoryLimit = historyLimit.toIntOrNull()?.coerceIn(10, 100) ?: 30
-                            state = state.copy(history = historyStore.load(historyPeriod, safeHistoryLimit))
-                            historyCounts = historyStore.counts()
-                            historySavedCount = historyStore.count()
-                            historySizeKb = historyStore.sizeKb()
+                            applyHistoryUiSnapshot(loadHistoryUiSnapshot(historyPeriod, safeHistoryLimit))
                             snackbarHostState.showSnackbar("备注已保存")
                         }
                     }
@@ -4079,16 +4164,16 @@ private fun NetSessionTesterApp() {
                     testPort = (currentTestConfig?.port ?: port.toIntOrNull() ?: 80),
                     chartMode = chartMode,
                     onChartModeChange = { chartMode = it },
-                    chartPoints = chartPoints,
-                    pingPoints = pingPoints,
+                    chartPoints = displayChartPoints,
+                    pingPoints = displayPingPoints,
                     pingIntervalLabel = pingIntervalLabel,
                     pingActiveTargetLabel = pingActiveTargetLabel.ifBlank { pingTarget },
                     pingRunning = pingRunning,
                     pingDurationMs = if (pingSessionStartedAt > 0L) {
                         ((if (pingRunning) pingDurationTick else (pingSessionEndedAt.takeIf { it > 0L } ?: System.currentTimeMillis())) - pingSessionStartedAt).coerceAtLeast(0L)
                     } else 0L,
-                    pingJitterMs = pingJitterMs,
-                    pingLogs = pingLogs,
+                    pingJitterMs = displayPingJitterMs,
+                    pingLogCount = displayPingLogCount,
                     onStartPing = { startPingMonitor(reset = true) },
                     onStopPing = { stopPingMonitor() },
                     onClearPing = { clearPingData() },
@@ -4131,16 +4216,13 @@ private fun NetSessionTesterApp() {
                         scope.launch {
                             val safeLimit = limit.toIntOrNull()?.coerceIn(10, 100) ?: 30
                             historyStore.trim(100)
-                            historySizeKb = historyStore.sizeKb()
-                            historySavedCount = historyStore.count()
-                            historyCounts = historyStore.counts()
-                            state = state.copy(history = historyStore.load(historyPeriod, safeLimit))
+                            applyHistoryUiSnapshot(loadHistoryUiSnapshot(historyPeriod, safeLimit))
                         }
                     },
                     onHistoryPeriodChange = { period ->
                         historyPeriod = period
                         scope.launch {
-                            state = state.copy(history = historyStore.load(period, safeHistoryLimit()))
+                            applyHistoryUiSnapshot(loadHistoryUiSnapshot(period, safeHistoryLimit()))
                         }
                     },
                     onEditRemark = { summary ->
@@ -5232,7 +5314,7 @@ private fun TestPage(
     pingRunning: Boolean,
     pingDurationMs: Long,
     pingJitterMs: Double?,
-    pingLogs: List<PingLogEntry>,
+    pingLogCount: Int,
     onStartPing: () -> Unit,
     onStopPing: () -> Unit,
     onClearPing: () -> Unit,
@@ -5268,16 +5350,22 @@ private fun TestPage(
     }
     val defaultCards = listOf("control", "release", "ping", "ipv4", "ipv6", "diagnosis", "logs")
     var testCardOrder by remember { mutableStateOf(loadCardOrder(context.applicationContext, "test_card_order_v2", defaultCards)) }
-    val visibleIds = buildList {
-        add("control")
-        if (releaseUi.visible || releaseBusy) add("release")
-        add("ping")
-        if (showIpv4) add("ipv4")
-        if (showIpv6) add("ipv6")
-        add("diagnosis")
-        add("logs")
+    val visibleIds = remember(releaseUi.visible, releaseBusy, showIpv4, showIpv6) {
+        buildList {
+            add("control")
+            if (releaseUi.visible || releaseBusy) add("release")
+            add("ping")
+            if (showIpv4) add("ipv4")
+            if (showIpv6) add("ipv6")
+            add("diagnosis")
+            add("logs")
+        }
     }
-    val visibleOrder = (testCardOrder.filter { it in visibleIds } + visibleIds.filterNot { it in testCardOrder }).distinct()
+    val visibleOrder = remember(testCardOrder, visibleIds) {
+        (testCardOrder.filter { it in visibleIds } + visibleIds.filterNot { it in testCardOrder }).distinct()
+    }
+    val ipv4ChartPoints = remember(chartPoints) { chartPoints.filter { it.protocol == IpProtocol.IPV4 } }
+    val ipv6ChartPoints = remember(chartPoints) { chartPoints.filter { it.protocol == IpProtocol.IPV6 } }
     fun updateTestOrder(nextVisible: List<String>) {
         val merged = (nextVisible + testCardOrder.filterNot { it in nextVisible } + defaultCards.filterNot { it in nextVisible || it in testCardOrder }).distinct()
         testCardOrder = merged
@@ -5338,14 +5426,14 @@ private fun TestPage(
                         running = pingRunning,
                         durationMs = pingDurationMs,
                         jitterMs = pingJitterMs,
-                        logCount = pingLogs.size,
+                        logCount = pingLogCount,
                         onStart = onStartPing,
                         onStop = onStopPing,
                         onClear = onClearPing,
                         onLog = onShowPingLog
                     )
-                    "ipv4" -> SessionStatsCard("IPv4 会话", ipv4Stats, maskPrivacy, chartPoints.filter { it.protocol == IpProtocol.IPV4 }, chartMode, onChartModeChange)
-                    "ipv6" -> SessionStatsCard("IPv6 会话", ipv6Stats, maskPrivacy, chartPoints.filter { it.protocol == IpProtocol.IPV6 }, chartMode, onChartModeChange)
+                    "ipv4" -> SessionStatsCard("IPv4 会话", ipv4Stats, maskPrivacy, ipv4ChartPoints, chartMode, onChartModeChange)
+                    "ipv6" -> SessionStatsCard("IPv6 会话", ipv6Stats, maskPrivacy, ipv6ChartPoints, chartMode, onChartModeChange)
                     "diagnosis" -> DiagnosisAdviceInlineCard(mode, ipv4Stats, ipv6Stats)
                     "logs" -> RecentLogCard(logs, maskPrivacy, onMoreLogs)
                 }
@@ -6886,14 +6974,17 @@ private fun FailureMiniChart(points: List<ChartPoint>) {
 
 @Composable
 private fun SessionGrowthChart(points: List<ChartPoint>) {
-    val sorted = points.sortedBy { it.elapsedSec }
-    val showFailureMiniCurve = shouldShowFailureMiniCurve(sorted)
+    val sorted = remember(points) { downsampleForRender(points.sortedBy { it.elapsedSec }, MAX_RENDER_SESSION_POINTS) }
+    val showFailureMiniCurve = remember(sorted) { shouldShowFailureMiniCurve(sorted) }
     val minX = sorted.firstOrNull()?.elapsedSec ?: 0
     val maxXRaw = sorted.lastOrNull()?.elapsedSec ?: (minX + 1)
     val maxX = maxOf(minX + 1, maxXRaw)
-    val maxSessionY = sessionYAxisMax(sorted.maxOfOrNull { it.active } ?: 0)
+    val maxSessionY = remember(sorted) { sessionYAxisMax(sorted.maxOfOrNull { it.active } ?: 0) }
     val step = chartXAxisStep(maxX - minX)
     val last = sorted.lastOrNull()
+    val yLabels = remember(maxSessionY) { axisLabels(maxSessionY) }
+    val xLabels = remember(minX, maxX, step) { timeLabels(minX, maxX, step) }
+    val failSummary = remember(sorted) { failureIntervalSummary(sorted) }
     Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("会话数", color = Muted, fontSize = 10.sp)
@@ -6908,7 +6999,7 @@ private fun SessionGrowthChart(points: List<ChartPoint>) {
         }
         Row(modifier = Modifier.fillMaxWidth().height(158.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(modifier = Modifier.width(34.dp).height(145.dp), verticalArrangement = Arrangement.SpaceBetween) {
-                axisLabels(maxSessionY).forEach { Text(it.toString(), color = Muted, fontSize = 9.sp, maxLines = 1) }
+                yLabels.forEach { Text(it.toString(), color = Muted, fontSize = 9.sp, maxLines = 1) }
             }
             Canvas(modifier = Modifier.weight(1f).height(145.dp).background(Color(0xFFF8FAFC), ShapeS).padding(6.dp)) {
                 val w = size.width
@@ -6934,9 +7025,8 @@ private fun SessionGrowthChart(points: List<ChartPoint>) {
             }
         }
         Row(modifier = Modifier.fillMaxWidth().padding(start = 34.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-            timeLabels(minX, maxX, step).forEach { Text("${it}s", color = Muted, fontSize = 10.sp) }
+            xLabels.forEach { Text("${it}s", color = Muted, fontSize = 10.sp) }
         }
-        val failSummary = failureIntervalSummary(sorted)
         if (failSummary.isNotBlank()) {
             Text(failSummary, color = ErrorRed, fontSize = 10.sp, lineHeight = 13.sp, fontWeight = FontWeight.Bold)
         }
@@ -7165,6 +7255,15 @@ private enum class ToolIpPolicy(val label: String) {
     AUTO("自动"),
     IPV6_FIRST("IPv6优先"),
     IPV4_FIRST("IPv4优先")
+}
+
+private enum class TracketRunState {
+    Idle,
+    Running,
+    Paused,
+    Finished,
+    Failed,
+    Canceled
 }
 
 private data class NsLookupToolRecord(
@@ -7582,19 +7681,31 @@ private suspend fun runTracketToolLive(
     policy: ToolIpPolicy,
     maxHops: Int,
     timeoutMs: Int,
+    activeProcess: java.util.concurrent.atomic.AtomicReference<Process?>? = null,
+    shouldPause: suspend () -> Boolean = { false },
+    onEvent: suspend (String) -> Unit = {},
     onHop: suspend (String) -> Unit
 ): TracketToolRecord = withContext(Dispatchers.IO) {
     val host = cleanToolHost(input)
     val dns = dnsTextFromSnapshot(dnsSnapshot)
     val start = System.currentTimeMillis()
-    runCatching {
+    try {
         val resolved = InetAddress.getAllByName(host).toList().filterNot { it.isLoopbackAddress }
         val target = chooseToolTargetAddress(resolved, policy) ?: error("无法解析目标")
         val targetIp = target.hostAddress?.substringBefore('%') ?: host
         val ipv6 = target is Inet6Address
         val hops = mutableListOf<String>()
         for (ttl in 1..maxHops) {
-            val output = runPingWithTtl(host = targetIp, ttl = ttl, ipv6 = ipv6, timeoutMs = timeoutMs)
+            currentCoroutineContext().ensureActive()
+            while (shouldPause()) {
+                delay(200)
+                currentCoroutineContext().ensureActive()
+            }
+            val output = runPingWithTtl(host = targetIp, ttl = ttl, ipv6 = ipv6, timeoutMs = timeoutMs, activeProcess = activeProcess)
+            while (shouldPause()) {
+                delay(200)
+                currentCoroutineContext().ensureActive()
+            }
             val hopIp = parseTracerouteHop(output)
             val rtt = parseTracerouteRtt(output)
             val line = when {
@@ -7606,6 +7717,7 @@ private suspend fun runTracketToolLive(
             withContext(Dispatchers.Main) { onHop(line) }
             if (isTracerouteReached(output, targetIp)) break
         }
+        withContext(Dispatchers.Main) { onEvent("路由追踪完成") }
         TracketToolRecord(
             host = host,
             dnsServers = dns,
@@ -7616,9 +7728,13 @@ private suspend fun runTracketToolLive(
             hops = hops,
             costMs = (System.currentTimeMillis() - start).coerceAtLeast(0L)
         )
-    }.getOrElse { e ->
+    } catch (e: CancellationException) {
+        withContext(Dispatchers.Main) { onEvent("路由追踪已停止") }
+        throw e
+    } catch (e: Throwable) {
         val msg = e.message ?: "追踪失败"
         withContext(Dispatchers.Main) { onHop("错误：$msg") }
+        withContext(Dispatchers.Main) { onEvent("路由追踪失败") }
         TracketToolRecord(
             host = host,
             dnsServers = dns,
@@ -7633,7 +7749,13 @@ private suspend fun runTracketToolLive(
     }
 }
 
-private fun runPingWithTtl(host: String, ttl: Int, ipv6: Boolean, timeoutMs: Int = 1200): String {
+private suspend fun runPingWithTtl(
+    host: String,
+    ttl: Int,
+    ipv6: Boolean,
+    timeoutMs: Int = 1200,
+    activeProcess: java.util.concurrent.atomic.AtomicReference<Process?>? = null
+): String {
     val waitMs = timeoutMs.coerceIn(500, 10000)
     val waitSeconds = ((waitMs + 999) / 1000).coerceIn(1, 10).toString()
     val timeoutArgs = listOf("-c", "1", "-W", waitSeconds, "-t", ttl.toString(), host)
@@ -7651,12 +7773,21 @@ private fun runPingWithTtl(host: String, ttl: Int, ipv6: Boolean, timeoutMs: Int
         )
     }
     for (cmd in commands) {
+        currentCoroutineContext().ensureActive()
         val text = runCatching {
             val process = ProcessBuilder(cmd).redirectErrorStream(true).start()
-            val output = process.inputStream.bufferedReader().use { it.readText() }
-            process.waitFor((waitMs + 800).toLong(), TimeUnit.MILLISECONDS)
-            runCatching { process.destroy() }
-            output
+            activeProcess?.set(process)
+            try {
+                val completed = process.waitFor((waitMs + 800).toLong(), TimeUnit.MILLISECONDS)
+                if (!completed) {
+                    process.destroy()
+                    if (!process.waitFor(250, TimeUnit.MILLISECONDS)) process.destroyForcibly()
+                }
+                process.inputStream.bufferedReader().use { it.readText() }
+            } finally {
+                runCatching { process.destroy() }
+                activeProcess?.compareAndSet(process, null)
+            }
         }.getOrDefault("")
         if (text.isNotBlank()) return text
     }
@@ -8015,8 +8146,12 @@ private fun TracketToolPage(onBack: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val store = remember { NetToolHistoryStore(context.applicationContext) }
+    val tracePaused = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
+    val traceProcess = remember { java.util.concurrent.atomic.AtomicReference<Process?>(null) }
+    val traceRunToken = remember { java.util.concurrent.atomic.AtomicLong(0L) }
     var host by remember { mutableStateOf("www.baidu.com") }
-    var running by remember { mutableStateOf(false) }
+    var runState by remember { mutableStateOf(TracketRunState.Idle) }
+    var traceJob by remember { mutableStateOf<Job?>(null) }
     var ipPolicy by remember { mutableStateOf(ToolIpPolicy.IPV6_FIRST) }
     var maxHopsText by remember { mutableStateOf("30") }
     var timeoutMsText by remember { mutableStateOf("1200") }
@@ -8026,12 +8161,90 @@ private fun TracketToolPage(onBack: () -> Unit) {
     var expandedIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
     val localDns by remember { mutableStateOf(readLocalDnsServers(context.applicationContext)) }
     val recentHosts = remember(records) { records.map { it.host }.distinct().take(8) }
+    val tracingActive = runState == TracketRunState.Running || runState == TracketRunState.Paused
+
+    fun appendTraceEvent(text: String) {
+        val stamp = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
+        liveHops = (liveHops + "· $stamp  $text").takeLast(40)
+    }
+
+    fun completedHopCount(): Int = liveHops.count { !it.startsWith("·") }
+    fun isCurrentTrace(token: Long): Boolean = traceRunToken.get() == token
+
+    fun stopTrace(reason: String = "追踪已停止") {
+        tracePaused.set(false)
+        traceRunToken.incrementAndGet()
+        traceProcess.getAndSet(null)?.let { process ->
+            runCatching { process.destroy() }
+            runCatching { process.destroyForcibly() }
+        }
+        traceJob?.cancel()
+        traceJob = null
+        if (tracingActive) {
+            appendTraceEvent(reason)
+            runState = TracketRunState.Canceled
+            liveTitle = reason
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            tracePaused.set(false)
+            traceRunToken.incrementAndGet()
+            traceProcess.getAndSet(null)?.let { process ->
+                runCatching { process.destroy() }
+                runCatching { process.destroyForcibly() }
+            }
+            traceJob?.cancel()
+        }
+    }
+
+    DisposableEffect(tracingActive) {
+        if (!tracingActive) {
+            onDispose { }
+        } else {
+            val lifecycleOwner = context as? LifecycleOwner
+            val observer = LifecycleEventObserver { _, event ->
+                if (event == Lifecycle.Event.ON_STOP) {
+                    stopTrace("APP进入后台，路由追踪已停止")
+                }
+            }
+            lifecycleOwner?.lifecycle?.addObserver(observer)
+            onDispose { lifecycleOwner?.lifecycle?.removeObserver(observer) }
+        }
+    }
+
+    DisposableEffect(tracingActive) {
+        if (!tracingActive) {
+            onDispose { }
+        } else {
+            val cm = context.getSystemService(ConnectivityManager::class.java)
+            val callback = object : ConnectivityManager.NetworkCallback() {
+                override fun onLost(network: Network) {
+                    scope.launch { stopTrace("网络已断开，路由追踪已停止") }
+                }
+
+                override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
+                    if (!networkCapabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) {
+                        scope.launch { stopTrace("当前网络不可用，路由追踪已停止") }
+                    }
+                }
+            }
+            runCatching { cm?.registerDefaultNetworkCallback(callback) }
+            onDispose { runCatching { cm?.unregisterNetworkCallback(callback) } }
+        }
+    }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize().padding(horizontal = 14.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        item { ToolPageHeader("追踪配置", "逐跳追踪域名经过的 IP；结果以系统返回为准", onBack) }
+        item {
+            ToolPageHeader("追踪配置", "逐跳追踪域名经过的 IP；结果以系统返回为准") {
+                stopTrace("返回页面，路由追踪已停止")
+                onBack()
+            }
+        }
         item {
             SoftCard {
                 ConfigLongRow(
@@ -8078,38 +8291,92 @@ private fun TracketToolPage(onBack: () -> Unit) {
                 }
                 Button(
                     onClick = {
-                        if (running) return@Button
-                        running = true
+                        when (runState) {
+                            TracketRunState.Running -> {
+                                runState = TracketRunState.Paused
+                                tracePaused.set(true)
+                                liveTitle = "已暂停：保留 ${completedHopCount()} 跳结果"
+                                appendTraceEvent("路由追踪已暂停")
+                                return@Button
+                            }
+                            TracketRunState.Paused -> {
+                                runState = TracketRunState.Running
+                                tracePaused.set(false)
+                                liveTitle = "继续追踪：已完成 ${completedHopCount()} 跳"
+                                appendTraceEvent("路由追踪继续")
+                                return@Button
+                            }
+                            else -> Unit
+                        }
+                        traceJob?.cancel()
+                        val token = traceRunToken.incrementAndGet()
+                        runState = TracketRunState.Running
+                        tracePaused.set(false)
                         liveHops = emptyList()
                         liveTitle = "正在追踪：第 0 / ${maxHopsText.safeInt(30, 1, 30)} 跳"
-                        scope.launch {
+                        appendTraceEvent("路由追踪开始")
+                        traceJob = scope.launch {
                             val maxHops = maxHopsText.safeInt(30, 1, 30)
                             val timeout = timeoutMsText.safeInt(1200, 500, 10000)
-                            val record = runTracketToolLive(
-                                context = context.applicationContext,
-                                input = host,
-                                dnsSnapshot = localDns,
-                                policy = ipPolicy,
-                                maxHops = maxHops,
-                                timeoutMs = timeout,
-                                onHop = { line ->
-                                    liveHops = liveHops + line
-                                    liveTitle = if (line.startsWith("错误：")) "追踪失败" else "正在追踪：第 ${liveHops.size} / $maxHops 跳"
+                            try {
+                                val record = runTracketToolLive(
+                                    context = context.applicationContext,
+                                    input = host,
+                                    dnsSnapshot = localDns,
+                                    policy = ipPolicy,
+                                    maxHops = maxHops,
+                                    timeoutMs = timeout,
+                                    activeProcess = traceProcess,
+                                    shouldPause = { tracePaused.get() },
+                                    onEvent = { if (isCurrentTrace(token)) appendTraceEvent(it) },
+                                    onHop = { line ->
+                                        if (isCurrentTrace(token)) {
+                                            liveHops = liveHops + line
+                                            liveTitle = if (line.startsWith("错误：")) "追踪失败" else "正在追踪：第 ${completedHopCount()} / $maxHops 跳"
+                                        }
+                                    }
+                                )
+                                if (isCurrentTrace(token)) {
+                                    if (record.error.isBlank()) {
+                                        runState = TracketRunState.Finished
+                                        liveTitle = "追踪完成：${record.hops.size} 跳 · ${record.costMs}ms"
+                                    } else {
+                                        runState = TracketRunState.Failed
+                                        liveTitle = "追踪失败：${record.error}"
+                                    }
+                                    store.addTracket(record)
+                                    records = store.loadTracket()
                                 }
-                            )
-                            if (record.error.isBlank()) liveTitle = "追踪完成：${record.hops.size} 跳 · ${record.costMs}ms"
-                            store.addTracket(record)
-                            records = store.loadTracket()
-                            running = false
+                            } catch (_: CancellationException) {
+                                if (isCurrentTrace(token)) runState = TracketRunState.Canceled
+                            } finally {
+                                if (isCurrentTrace(token)) traceJob = null
+                            }
                         }
                     },
                     modifier = Modifier.fillMaxWidth().height(48.dp),
                     shape = RoundedCornerShape(18.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = Blue)
-                ) { Text(if (running) "追踪中..." else "开始追踪", fontWeight = FontWeight.ExtraBold) }
+                ) {
+                    Text(
+                        when (runState) {
+                            TracketRunState.Running -> "暂停追踪"
+                            TracketRunState.Paused -> "继续追踪"
+                            else -> "开始追踪"
+                        },
+                        fontWeight = FontWeight.ExtraBold
+                    )
+                }
+                if (tracingActive) {
+                    OutlinedButton(
+                        onClick = { stopTrace("手动停止，路由追踪已取消") },
+                        modifier = Modifier.fillMaxWidth().height(42.dp),
+                        shape = RoundedCornerShape(16.dp)
+                    ) { Text("停止追踪", fontWeight = FontWeight.Bold) }
+                }
             }
         }
-        if (running || liveHops.isNotEmpty()) {
+        if (tracingActive || liveHops.isNotEmpty()) {
             item { TracketLiveProcessCard(title = liveTitle, hops = liveHops) }
         }
         item { Text("追踪历史", color = TextDark, fontWeight = FontWeight.Bold, fontSize = 15.sp, modifier = Modifier.padding(top = 4.dp)) }
@@ -10253,38 +10520,44 @@ private fun PingCompactChartCard(
     onClear: () -> Unit,
     onLog: () -> Unit
 ) {
-    val successes = pingPoints.mapNotNull { it.latencyMs }
-    val current = successes.lastOrNull()
-    val avg = successes.takeIf { it.isNotEmpty() }?.average()?.roundToInt()
-    val max = pingPoints.mapNotNull { it.maxLatencyMs ?: it.latencyMs }.maxOrNull()
-    val min = pingPoints.mapNotNull { it.minLatencyMs ?: it.latencyMs }.minOrNull()
-    val sampleTotal = pingPoints.sumOf { it.sampleCount }.coerceAtLeast(0)
-    val lossTotal = pingPoints.sumOf { it.lossCount }
-    val loss = if (sampleTotal > 0) ((lossTotal * 100f) / sampleTotal).roundToInt() else 0
+    val stats = remember(pingPoints) {
+        val successes = pingPoints.mapNotNull { it.latencyMs }
+        val sampleTotal = pingPoints.sumOf { it.sampleCount }.coerceAtLeast(0)
+        val lossTotal = pingPoints.sumOf { it.lossCount }
+        PingCompactStats(
+            current = successes.lastOrNull(),
+            avg = successes.takeIf { it.isNotEmpty() }?.average()?.roundToInt(),
+            max = pingPoints.mapNotNull { it.maxLatencyMs ?: it.latencyMs }.maxOrNull(),
+            min = pingPoints.mapNotNull { it.minLatencyMs ?: it.latencyMs }.minOrNull(),
+            sampleTotal = sampleTotal,
+            lossTotal = lossTotal,
+            lossPercent = if (sampleTotal > 0) ((lossTotal * 100f) / sampleTotal).roundToInt() else 0
+        )
+    }
     SoftCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
             SectionTitle("ping", "Ping 测试", Blue)
             Spacer(Modifier.width(8.dp))
-            StatusChip(if (running) "运行中 · ${sampleTotal}次" else intervalLabel, if (running) GreenSoft else BlueSoft, if (running) Green else Blue, compact = true)
+            StatusChip(if (running) "运行中 · ${stats.sampleTotal}次" else intervalLabel, if (running) GreenSoft else BlueSoft, if (running) Green else Blue, compact = true)
             Spacer(Modifier.weight(1f))
             val stateText = when {
-                running && loss == 0 -> "● 正常 · 实时"
-                running -> "● 丢包 $loss% · 实时"
-                loss == 0 -> "● 已停止"
-                else -> "● 丢包 $loss% · 已停止"
+                running && stats.lossPercent == 0 -> "● 正常 · 实时"
+                running -> "● 丢包 ${stats.lossPercent}% · 实时"
+                stats.lossPercent == 0 -> "● 已停止"
+                else -> "● 丢包 ${stats.lossPercent}% · 已停止"
             }
-            StatusChip(stateText, if (loss == 0) GreenSoft else RedSoft, if (loss == 0) Green else ErrorRed, compact = true)
+            StatusChip(stateText, if (stats.lossPercent == 0) GreenSoft else RedSoft, if (stats.lossPercent == 0) Green else ErrorRed, compact = true)
         }
         Row(
             horizontalArrangement = Arrangement.spacedBy(6.dp),
             modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
         ) {
-            MiniMetric("当前", current?.let { "${it}ms" } ?: "—", Blue, Modifier.width(72.dp))
-            MiniMetric("平均", avg?.let { "${it}ms" } ?: "—", Navy, Modifier.width(72.dp))
-            MiniMetric("最高", max?.let { "${it}ms" } ?: "—", Orange, Modifier.width(72.dp))
-            MiniMetric("最低", min?.let { "${it}ms" } ?: "—", Green, Modifier.width(72.dp))
-            MiniMetric("丢包", "$loss%", if (loss == 0) Muted else ErrorRed, Modifier.width(72.dp))
-            MiniMetric("超时", "${lossTotal}次", if (lossTotal == 0) Muted else ErrorRed, Modifier.width(72.dp))
+            MiniMetric("当前", stats.current?.let { "${it}ms" } ?: "—", Blue, Modifier.width(72.dp))
+            MiniMetric("平均", stats.avg?.let { "${it}ms" } ?: "—", Navy, Modifier.width(72.dp))
+            MiniMetric("最高", stats.max?.let { "${it}ms" } ?: "—", Orange, Modifier.width(72.dp))
+            MiniMetric("最低", stats.min?.let { "${it}ms" } ?: "—", Green, Modifier.width(72.dp))
+            MiniMetric("丢包", "${stats.lossPercent}%", if (stats.lossPercent == 0) Muted else ErrorRed, Modifier.width(72.dp))
+            MiniMetric("超时", "${stats.lossTotal}次", if (stats.lossTotal == 0) Muted else ErrorRed, Modifier.width(72.dp))
             MiniMetric("抖动", jitterMs?.let { formatPingJitter(it) } ?: "—", Purple, Modifier.width(72.dp))
             MiniMetric("时长", formatPingDuration(durationMs), Navy, Modifier.width(72.dp))
         }
@@ -10326,7 +10599,7 @@ private fun MiniMetric(label: String, value: String, color: Color, modifier: Mod
 
 @Composable
 private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "", running: Boolean = false, jitterMs: Double? = null) {
-    val allPoints = points.sortedBy { it.elapsedMs }
+    val allPoints = remember(points) { compactPingPointsForRender(points) }
     val latestMs = allPoints.lastOrNull()?.elapsedMs ?: 0L
     val earliestMs = allPoints.firstOrNull()?.elapsedMs ?: 0L
     val fullSpanMs = (latestMs - earliestMs).coerceAtLeast(1_000L)
@@ -10373,22 +10646,28 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
         viewEndMs.coerceIn(minEnd, maxEnd)
     }
     val viewStartMs = (effectiveViewEndMs - windowSpanMs).coerceAtLeast(0L)
-    var visible = allPoints.filter { it.elapsedMs in viewStartMs..effectiveViewEndMs }
-    if (visible.isEmpty() && allPoints.isNotEmpty()) {
-        val fallbackEnd = latestMs.coerceAtLeast(windowSpanMs)
-        val fallbackStart = (fallbackEnd - windowSpanMs).coerceAtLeast(0L)
-        visible = allPoints.filter { it.elapsedMs in fallbackStart..fallbackEnd }
+    val visible = remember(allPoints, viewStartMs, effectiveViewEndMs, latestMs, windowSpanMs) {
+        val window = allPoints.filter { it.elapsedMs in viewStartMs..effectiveViewEndMs }
+        if (window.isNotEmpty() || allPoints.isEmpty()) {
+            window
+        } else {
+            val fallbackEnd = latestMs.coerceAtLeast(windowSpanMs)
+            val fallbackStart = (fallbackEnd - windowSpanMs).coerceAtLeast(0L)
+            allPoints.filter { it.elapsedMs in fallbackStart..fallbackEnd }
+        }
     }
-    val values = visible.flatMap { listOfNotNull(it.minLatencyMs ?: it.latencyMs, it.latencyMs, it.maxLatencyMs ?: it.latencyMs) }
-    val yRange = computePingYAxisRange(values)
+    val values = remember(visible) {
+        visible.flatMap { listOfNotNull(it.minLatencyMs ?: it.latencyMs, it.latencyMs, it.maxLatencyMs ?: it.latencyMs) }
+    }
+    val yRange = remember(values) { computePingYAxisRange(values) }
     val minY = yRange.min
     val maxY = yRange.max
-    val sampleTotal = visible.sumOf { it.sampleCount }
-    val lossTotal = visible.sumOf { it.lossCount }
     val instantStartMs = (latestMs - 2_000L).coerceAtLeast(0L)
-    val instantSamples = allPoints.filter { it.elapsedMs >= instantStartMs && it.elapsedMs <= latestMs }.sumOf { it.sampleCount }
+    val instantSamples = remember(allPoints, instantStartMs, latestMs) {
+        allPoints.filter { it.elapsedMs >= instantStartMs && it.elapsedMs <= latestMs }.sumOf { it.sampleCount }
+    }
     val instantSpanSec = ((latestMs - instantStartMs).coerceAtLeast(1_000L) / 1000f).coerceAtLeast(1f)
-    val totalSamples = allPoints.sumOf { it.sampleCount }
+    val totalSamples = remember(allPoints) { allPoints.sumOf { it.sampleCount } }
     val averageSpanSec = (latestMs.coerceAtLeast(1_000L) / 1000f).coerceAtLeast(1f)
     val instantRateText = if (instantSamples > 0) "瞬时${String.format(java.util.Locale.US, "%.1f", instantSamples / instantSpanSec)}/s" else "瞬时—"
     val averageRateText = if (totalSamples > 0) "平均${String.format(java.util.Locale.US, "%.1f", totalSamples / averageSpanSec)}/s" else "平均—"
@@ -10401,6 +10680,17 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
     val targetDisplay = labelParts.firstOrNull().orEmpty()
     val engineDisplay = labelParts.firstOrNull { it.startsWith("TCP:", ignoreCase = true) } ?: "ICMP"
     val selected = selectedPoint
+    val axisLabels = remember(yRange) { pingAxisLabels(yRange) }
+    val axisTicks = remember(viewStartMs, effectiveViewEndMs, chartWidthPx) { pingAxisTicks(viewStartMs, effectiveViewEndMs, chartWidthPx) }
+    val successSegments = remember(visible) {
+        val successPoints = visible.filter { it.latencyMs != null }
+        val expectedGapMs = visible.zipWithNext().map { (a, b) -> (b.elapsedMs - a.elapsedMs).coerceAtLeast(1L) }.minOrNull()?.coerceAtLeast(1L) ?: 1_000L
+        val normalGapLimit = maxOf(expectedGapMs * 3L, 900L)
+        successPoints.zipWithNext().map { (a, b) ->
+            val hasRealLoss = visible.any { it.elapsedMs > a.elapsedMs && it.elapsedMs < b.elapsedMs && (it.lossCount > 0 || it.latencyMs == null) }
+            PingLineSegment(a, b, dashed = hasRealLoss || b.elapsedMs - a.elapsedMs > normalGapLimit)
+        }
+    }
 
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -10523,7 +10813,7 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
                     typeface = Typeface.create(Typeface.DEFAULT, Typeface.NORMAL)
                 }
 
-                pingAxisLabels(yRange).forEach { tick ->
+                axisLabels.forEach { tick ->
                     val y = yOf(tick)
                     drawLine(Border.copy(alpha = 0.45f), Offset(left, y), Offset(right, y), strokeWidth = 1f)
                     val label = tick.toString()
@@ -10531,7 +10821,7 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
                     drawContext.canvas.nativeCanvas.drawText(label, (left - 12f - tw).coerceAtLeast(12f), (y + 7f).coerceIn(top + 10f, bottom - 3f), axisPaint)
                 }
 
-                pingAxisTicks(viewStartMs, effectiveViewEndMs, plotW).forEach { tickMs ->
+                axisTicks.forEach { tickMs ->
                     val x = xOf(tickMs)
                     drawLine(Border.copy(alpha = 0.25f), Offset(x, top), Offset(x, bottom), strokeWidth = 1f)
                     val label = formatPingAxisTime(tickMs)
@@ -10543,10 +10833,6 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
                 // 丢包不再铺满整张图，统一绘制成底部小立柱，避免整块发红。
 
                 // 成功点之间按质量分段：连续成功用实线；中间发生丢包/超时或长间隔时，用浅蓝虚线桥接。
-                val sortedVisible = visible.sortedBy { it.elapsedMs }
-                val successPoints = sortedVisible.filter { it.latencyMs != null }
-                val expectedGapMs = sortedVisible.zipWithNext().map { (a,b) -> (b.elapsedMs - a.elapsedMs).coerceAtLeast(1L) }.minOrNull()?.coerceAtLeast(1L) ?: 1_000L
-                val normalGapLimit = maxOf(expectedGapMs * 3L, 900L)
                 fun chartLatencyOf(p: PingPoint): Int? {
                     val latency = p.latencyMs ?: return null
                     val peak = p.maxLatencyMs ?: latency
@@ -10571,13 +10857,8 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
                         )
                     )
                 }
-                successPoints.zipWithNext().forEach { (a, b) ->
-                    val between = sortedVisible.filter { it.elapsedMs > a.elapsedMs && it.elapsedMs < b.elapsedMs }
-                    val hasRealLoss = between.any { it.lossCount > 0 || it.latencyMs == null }
-                    val gapMs = b.elapsedMs - a.elapsedMs
-                    // SUCCESS / HIGH_LATENCY 都是成功点，必须实线连接；虚线只代表中间存在缺测/超时/GAP。
-                    val dashed = hasRealLoss || gapMs > normalGapLimit
-                    drawSegment(a, b, dashed = dashed)
+                successSegments.forEach { segment ->
+                    drawSegment(segment.from, segment.to, dashed = segment.dashed)
                 }
 
                 visible.forEach { p ->
