@@ -15,7 +15,7 @@
     "漫游测试进入后台/锁屏3秒内返回继续测试，超过3秒自动中断并保存",
     "连接数测试明确使用折线趋势图，保留峰值/最高值视图"
   ],
-  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.1.15-144/NetSessionTester-V1.1.15-build144-signed.apk",
-  "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/tag/v1.1.15-144",
+  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.1.15-build144/NetSessionTester-V1.1.15-build144-signed.apk",
+  "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/tag/v1.1.15-build144",
   "force": false
 }
