@@ -194,6 +194,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -7167,6 +7168,15 @@ private enum class ToolIpPolicy(val label: String) {
     IPV4_FIRST("IPv4优先")
 }
 
+private enum class TracketRunState {
+    Idle,
+    Running,
+    Paused,
+    Finished,
+    Failed,
+    Canceled
+}
+
 private data class NsLookupToolRecord(
     val id: Long = System.currentTimeMillis(),
     val timeText: String = toolNowText(),
@@ -7582,19 +7592,31 @@ private suspend fun runTracketToolLive(
     policy: ToolIpPolicy,
     maxHops: Int,
     timeoutMs: Int,
+    activeProcess: java.util.concurrent.atomic.AtomicReference<Process?>? = null,
+    shouldPause: suspend () -> Boolean = { false },
+    onEvent: suspend (String) -> Unit = {},
     onHop: suspend (String) -> Unit
 ): TracketToolRecord = withContext(Dispatchers.IO) {
     val host = cleanToolHost(input)
     val dns = dnsTextFromSnapshot(dnsSnapshot)
     val start = System.currentTimeMillis()
-    runCatching {
+    try {
         val resolved = InetAddress.getAllByName(host).toList().filterNot { it.isLoopbackAddress }
         val target = chooseToolTargetAddress(resolved, policy) ?: error("无法解析目标")
         val targetIp = target.hostAddress?.substringBefore('%') ?: host
         val ipv6 = target is Inet6Address
         val hops = mutableListOf<String>()
         for (ttl in 1..maxHops) {
-            val output = runPingWithTtl(host = targetIp, ttl = ttl, ipv6 = ipv6, timeoutMs = timeoutMs)
+            currentCoroutineContext().ensureActive()
+            while (shouldPause()) {
+                delay(200)
+                currentCoroutineContext().ensureActive()
+            }
+            val output = runPingWithTtl(host = targetIp, ttl = ttl, ipv6 = ipv6, timeoutMs = timeoutMs, activeProcess = activeProcess)
+            while (shouldPause()) {
+                delay(200)
+                currentCoroutineContext().ensureActive()
+            }
             val hopIp = parseTracerouteHop(output)
             val rtt = parseTracerouteRtt(output)
             val line = when {
@@ -7606,6 +7628,7 @@ private suspend fun runTracketToolLive(
             withContext(Dispatchers.Main) { onHop(line) }
             if (isTracerouteReached(output, targetIp)) break
         }
+        withContext(Dispatchers.Main) { onEvent("路由追踪完成") }
         TracketToolRecord(
             host = host,
             dnsServers = dns,
@@ -7616,9 +7639,13 @@ private suspend fun runTracketToolLive(
             hops = hops,
             costMs = (System.currentTimeMillis() - start).coerceAtLeast(0L)
         )
-    }.getOrElse { e ->
+    } catch (e: CancellationException) {
+        withContext(Dispatchers.Main) { onEvent("路由追踪已停止") }
+        throw e
+    } catch (e: Throwable) {
         val msg = e.message ?: "追踪失败"
         withContext(Dispatchers.Main) { onHop("错误：$msg") }
+        withContext(Dispatchers.Main) { onEvent("路由追踪失败") }
         TracketToolRecord(
             host = host,
             dnsServers = dns,
@@ -7633,7 +7660,13 @@ private suspend fun runTracketToolLive(
     }
 }
 
-private fun runPingWithTtl(host: String, ttl: Int, ipv6: Boolean, timeoutMs: Int = 1200): String {
+private suspend fun runPingWithTtl(
+    host: String,
+    ttl: Int,
+    ipv6: Boolean,
+    timeoutMs: Int = 1200,
+    activeProcess: java.util.concurrent.atomic.AtomicReference<Process?>? = null
+): String {
     val waitMs = timeoutMs.coerceIn(500, 10000)
     val waitSeconds = ((waitMs + 999) / 1000).coerceIn(1, 10).toString()
     val timeoutArgs = listOf("-c", "1", "-W", waitSeconds, "-t", ttl.toString(), host)
@@ -7651,12 +7684,21 @@ private fun runPingWithTtl(host: String, ttl: Int, ipv6: Boolean, timeoutMs: Int
         )
     }
     for (cmd in commands) {
+        currentCoroutineContext().ensureActive()
         val text = runCatching {
             val process = ProcessBuilder(cmd).redirectErrorStream(true).start()
-            val output = process.inputStream.bufferedReader().use { it.readText() }
-            process.waitFor((waitMs + 800).toLong(), TimeUnit.MILLISECONDS)
-            runCatching { process.destroy() }
-            output
+            activeProcess?.set(process)
+            try {
+                val completed = process.waitFor((waitMs + 800).toLong(), TimeUnit.MILLISECONDS)
+                if (!completed) {
+                    process.destroy()
+                    if (!process.waitFor(250, TimeUnit.MILLISECONDS)) process.destroyForcibly()
+                }
+                process.inputStream.bufferedReader().use { it.readText() }
+            } finally {
+                runCatching { process.destroy() }
+                activeProcess?.compareAndSet(process, null)
+            }
         }.getOrDefault("")
         if (text.isNotBlank()) return text
     }
@@ -8015,8 +8057,12 @@ private fun TracketToolPage(onBack: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val store = remember { NetToolHistoryStore(context.applicationContext) }
+    val tracePaused = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
+    val traceProcess = remember { java.util.concurrent.atomic.AtomicReference<Process?>(null) }
+    val traceRunToken = remember { java.util.concurrent.atomic.AtomicLong(0L) }
     var host by remember { mutableStateOf("www.baidu.com") }
-    var running by remember { mutableStateOf(false) }
+    var runState by remember { mutableStateOf(TracketRunState.Idle) }
+    var traceJob by remember { mutableStateOf<Job?>(null) }
     var ipPolicy by remember { mutableStateOf(ToolIpPolicy.IPV6_FIRST) }
     var maxHopsText by remember { mutableStateOf("30") }
     var timeoutMsText by remember { mutableStateOf("1200") }
@@ -8026,12 +8072,90 @@ private fun TracketToolPage(onBack: () -> Unit) {
     var expandedIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
     val localDns by remember { mutableStateOf(readLocalDnsServers(context.applicationContext)) }
     val recentHosts = remember(records) { records.map { it.host }.distinct().take(8) }
+    val tracingActive = runState == TracketRunState.Running || runState == TracketRunState.Paused
+
+    fun appendTraceEvent(text: String) {
+        val stamp = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
+        liveHops = (liveHops + "· $stamp  $text").takeLast(40)
+    }
+
+    fun completedHopCount(): Int = liveHops.count { !it.startsWith("·") }
+    fun isCurrentTrace(token: Long): Boolean = traceRunToken.get() == token
+
+    fun stopTrace(reason: String = "追踪已停止") {
+        tracePaused.set(false)
+        traceRunToken.incrementAndGet()
+        traceProcess.getAndSet(null)?.let { process ->
+            runCatching { process.destroy() }
+            runCatching { process.destroyForcibly() }
+        }
+        traceJob?.cancel()
+        traceJob = null
+        if (tracingActive) {
+            appendTraceEvent(reason)
+            runState = TracketRunState.Canceled
+            liveTitle = reason
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            tracePaused.set(false)
+            traceRunToken.incrementAndGet()
+            traceProcess.getAndSet(null)?.let { process ->
+                runCatching { process.destroy() }
+                runCatching { process.destroyForcibly() }
+            }
+            traceJob?.cancel()
+        }
+    }
+
+    DisposableEffect(tracingActive) {
+        if (!tracingActive) {
+            onDispose { }
+        } else {
+            val lifecycleOwner = context as? LifecycleOwner
+            val observer = LifecycleEventObserver { _, event ->
+                if (event == Lifecycle.Event.ON_STOP) {
+                    stopTrace("APP进入后台，路由追踪已停止")
+                }
+            }
+            lifecycleOwner?.lifecycle?.addObserver(observer)
+            onDispose { lifecycleOwner?.lifecycle?.removeObserver(observer) }
+        }
+    }
+
+    DisposableEffect(tracingActive) {
+        if (!tracingActive) {
+            onDispose { }
+        } else {
+            val cm = context.getSystemService(ConnectivityManager::class.java)
+            val callback = object : ConnectivityManager.NetworkCallback() {
+                override fun onLost(network: Network) {
+                    scope.launch { stopTrace("网络已断开，路由追踪已停止") }
+                }
+
+                override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
+                    if (!networkCapabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) {
+                        scope.launch { stopTrace("当前网络不可用，路由追踪已停止") }
+                    }
+                }
+            }
+            runCatching { cm?.registerDefaultNetworkCallback(callback) }
+            onDispose { runCatching { cm?.unregisterNetworkCallback(callback) } }
+        }
+    }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize().padding(horizontal = 14.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        item { ToolPageHeader("追踪配置", "逐跳追踪域名经过的 IP；结果以系统返回为准", onBack) }
+        item {
+            ToolPageHeader("追踪配置", "逐跳追踪域名经过的 IP；结果以系统返回为准") {
+                stopTrace("返回页面，路由追踪已停止")
+                onBack()
+            }
+        }
         item {
             SoftCard {
                 ConfigLongRow(
@@ -8078,38 +8202,92 @@ private fun TracketToolPage(onBack: () -> Unit) {
                 }
                 Button(
                     onClick = {
-                        if (running) return@Button
-                        running = true
+                        when (runState) {
+                            TracketRunState.Running -> {
+                                runState = TracketRunState.Paused
+                                tracePaused.set(true)
+                                liveTitle = "已暂停：保留 ${completedHopCount()} 跳结果"
+                                appendTraceEvent("路由追踪已暂停")
+                                return@Button
+                            }
+                            TracketRunState.Paused -> {
+                                runState = TracketRunState.Running
+                                tracePaused.set(false)
+                                liveTitle = "继续追踪：已完成 ${completedHopCount()} 跳"
+                                appendTraceEvent("路由追踪继续")
+                                return@Button
+                            }
+                            else -> Unit
+                        }
+                        traceJob?.cancel()
+                        val token = traceRunToken.incrementAndGet()
+                        runState = TracketRunState.Running
+                        tracePaused.set(false)
                         liveHops = emptyList()
                         liveTitle = "正在追踪：第 0 / ${maxHopsText.safeInt(30, 1, 30)} 跳"
-                        scope.launch {
+                        appendTraceEvent("路由追踪开始")
+                        traceJob = scope.launch {
                             val maxHops = maxHopsText.safeInt(30, 1, 30)
                             val timeout = timeoutMsText.safeInt(1200, 500, 10000)
-                            val record = runTracketToolLive(
-                                context = context.applicationContext,
-                                input = host,
-                                dnsSnapshot = localDns,
-                                policy = ipPolicy,
-                                maxHops = maxHops,
-                                timeoutMs = timeout,
-                                onHop = { line ->
-                                    liveHops = liveHops + line
-                                    liveTitle = if (line.startsWith("错误：")) "追踪失败" else "正在追踪：第 ${liveHops.size} / $maxHops 跳"
+                            try {
+                                val record = runTracketToolLive(
+                                    context = context.applicationContext,
+                                    input = host,
+                                    dnsSnapshot = localDns,
+                                    policy = ipPolicy,
+                                    maxHops = maxHops,
+                                    timeoutMs = timeout,
+                                    activeProcess = traceProcess,
+                                    shouldPause = { tracePaused.get() },
+                                    onEvent = { if (isCurrentTrace(token)) appendTraceEvent(it) },
+                                    onHop = { line ->
+                                        if (isCurrentTrace(token)) {
+                                            liveHops = liveHops + line
+                                            liveTitle = if (line.startsWith("错误：")) "追踪失败" else "正在追踪：第 ${completedHopCount()} / $maxHops 跳"
+                                        }
+                                    }
+                                )
+                                if (isCurrentTrace(token)) {
+                                    if (record.error.isBlank()) {
+                                        runState = TracketRunState.Finished
+                                        liveTitle = "追踪完成：${record.hops.size} 跳 · ${record.costMs}ms"
+                                    } else {
+                                        runState = TracketRunState.Failed
+                                        liveTitle = "追踪失败：${record.error}"
+                                    }
+                                    store.addTracket(record)
+                                    records = store.loadTracket()
                                 }
-                            )
-                            if (record.error.isBlank()) liveTitle = "追踪完成：${record.hops.size} 跳 · ${record.costMs}ms"
-                            store.addTracket(record)
-                            records = store.loadTracket()
-                            running = false
+                            } catch (_: CancellationException) {
+                                if (isCurrentTrace(token)) runState = TracketRunState.Canceled
+                            } finally {
+                                if (isCurrentTrace(token)) traceJob = null
+                            }
                         }
                     },
                     modifier = Modifier.fillMaxWidth().height(48.dp),
                     shape = RoundedCornerShape(18.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = Blue)
-                ) { Text(if (running) "追踪中..." else "开始追踪", fontWeight = FontWeight.ExtraBold) }
+                ) {
+                    Text(
+                        when (runState) {
+                            TracketRunState.Running -> "暂停追踪"
+                            TracketRunState.Paused -> "继续追踪"
+                            else -> "开始追踪"
+                        },
+                        fontWeight = FontWeight.ExtraBold
+                    )
+                }
+                if (tracingActive) {
+                    OutlinedButton(
+                        onClick = { stopTrace("手动停止，路由追踪已取消") },
+                        modifier = Modifier.fillMaxWidth().height(42.dp),
+                        shape = RoundedCornerShape(16.dp)
+                    ) { Text("停止追踪", fontWeight = FontWeight.Bold) }
+                }
             }
         }
-        if (running || liveHops.isNotEmpty()) {
+        if (tracingActive || liveHops.isNotEmpty()) {
             item { TracketLiveProcessCard(title = liveTitle, hops = liveHops) }
         }
         item { Text("追踪历史", color = TextDark, fontWeight = FontWeight.Bold, fontSize = 15.sp, modifier = Modifier.padding(top = 4.dp)) }
