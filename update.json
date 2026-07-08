@@ -1,17 +1,19 @@
 {
-  "versionCode": 143,
+  "versionCode": 144,
   "versionName": "V1.1.15",
-  "build": 143,
+  "build": 144,
   "status": "draft",
   "minReadyFileSize": 3000000,
-  "title": "发现新版本 V1.1.15 build143",
+  "title": "发现新版本 V1.1.15 build144",
   "content": [
-    "漫游测试丢包卡片区分网关/外网：路由器+外网显示内x%/外y%",
-    "新增疑似粘连AP判定参数：弱信号阈值、候选优势差、持续时间",
-    "基于同SSID候选AP扫描结果记录疑似粘连AP",
-    "测试总结增加网关/外网丢包和粘连AP诊断"
+    "漫游实时区取消单独丢包卡片，改为粘连AP卡片，并把内网丢包/外网丢包分开放在网关/外网旁边",
+    "稳定/标准/漫游三种模式自动匹配推荐Ping超时，同时保留自定义超时和恢复自动入口",
+    "新增漫游质量评分，综合丢包、Ping抖动、RSSI抖动、AP切换和疑似粘连AP",
+    "疑似粘连AP判定加入Ping抖动、RSSI抖动和近期丢包因素",
+    "Ping图表选中竖线、漫游信号切换竖线改为短竖线，不再贯穿整张图",
+    "连接数测试明确使用折线趋势图，保留峰值/最高值视图"
   ],
-  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.1.15-143/NetSessionTester-V1.1.15-build143-signed.apk",
-  "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/tag/v1.1.15-143",
+  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.1.15-144/NetSessionTester-V1.1.15-build144-signed.apk",
+  "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/tag/v1.1.15-144",
   "force": false
 }
