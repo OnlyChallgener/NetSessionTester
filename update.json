@@ -1,17 +1,18 @@
 {
-  "versionCode": 145,
-  "versionName": "V1.1.15",
-  "build": 145,
-  "status": "release-candidate",
+  "versionCode": 146,
+  "versionName": "V1.1.16",
+  "build": 146,
+  "status": "ready",
   "minReadyFileSize": 3000000,
-  "title": "发现新版本 V1.1.15 build145",
+  "title": "发现新版本 V1.1.16 build146",
   "content": [
-    "清理根目录历史自测/发版说明，改为 CHANGELOG、TEST_NOTES_current 与 docs/BUILD_HISTORY 统一维护",
-    "设置 -> 网络信息 -> Tracket 路由追踪支持暂停、继续和停止，暂停时保留已完成节点",
-    "停止、返回页面、网络不可用或 APP 进入后台时会取消追踪任务并释放 ping 子进程",
-    "路由追踪失败时显示友好错误信息，不再把协程取消误记为普通失败历史"
+    "清理冗余历史日志文件，新增统一构建历史和发版模板",
+    "路由追踪支持暂停和继续，暂停后保留已完成节点",
+    "优化路由追踪停止、返回、后台和异常网络下的资源释放",
+    "优化测试页、历史页和图表刷新性能，减少页面卡顿",
+    "检查并优化稳定性、兼容性、性能和必要权限处理"
   ],
-  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.1.15-145/NetSessionTester-V1.1.15-build145-signed.apk",
-  "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/tag/v1.1.15-145",
+  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.1.16-146/NetSessionTester-V1.1.16-build146-signed.apk",
+  "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/tag/v1.1.16-146",
   "force": false
 }
