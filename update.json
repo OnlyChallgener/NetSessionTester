@@ -1,16 +1,17 @@
 {
-  "versionCode": 141,
+  "versionCode": 143,
   "versionName": "V1.1.15",
-  "build": 141,
+  "build": 143,
   "status": "draft",
   "minReadyFileSize": 3000000,
-  "title": "V1.1.15 build141 自测版",
+  "title": "发现新版本 V1.1.15 build143",
   "content": [
-    "漫游测试事件去重",
-    "后台/锁屏和网络断开自动中断保存",
-    "AP切换竖线点击浮层"
+    "漫游测试丢包卡片区分网关/外网：路由器+外网显示内x%/外y%",
+    "新增疑似粘连AP判定参数：弱信号阈值、候选优势差、持续时间",
+    "基于同SSID候选AP扫描结果记录疑似粘连AP",
+    "测试总结增加网关/外网丢包和粘连AP诊断"
   ],
-  "apkUrl": "",
-  "githubUrl": "",
+  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.1.15-143/NetSessionTester-V1.1.15-build143-signed.apk",
+  "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/tag/v1.1.15-143",
   "force": false
 }
