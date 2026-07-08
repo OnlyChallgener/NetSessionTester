@@ -8906,15 +8906,11 @@ private fun writeRoamingHistory(context: Context, records: List<RoamingHistoryRe
 }
 
 private fun roamingPingAxisMax(values: List<Int>): Int {
-    val maxValue = values.maxOrNull() ?: return 50
-    return when {
-        maxValue <= 50 -> 50
-        maxValue <= 100 -> 100
-        maxValue <= 200 -> 200
-        maxValue <= 500 -> 500
-        maxValue <= 1000 -> 1000
-        else -> (ceil(maxValue / 500.0) * 500).roundToInt().coerceAtLeast(1500)
-    }
+    val maxValue = values.filter { it in 0..20_000 }.maxOrNull() ?: return 50
+    val padded = (maxValue * 1.12f).roundToInt().coerceAtLeast(20)
+    val fineSteps = listOf(20, 30, 40, 50, 60, 80, 100, 120, 150, 180, 200, 250, 300, 400, 500, 750, 1000, 1500, 2000)
+    return fineSteps.firstOrNull { it >= padded }
+        ?: (ceil(padded / 500.0) * 500).roundToInt().coerceAtLeast(2500)
 }
 
 private fun roamingTimeLabel(sec: Int): String {
@@ -9146,12 +9142,13 @@ private fun RoamingToolPage(onBack: () -> Unit) {
                 override fun onLinkPropertiesChanged(network: Network, linkProperties: LinkProperties) {
                     val dnsCount = linkProperties.dnsServers.size
                     val iface = linkProperties.interfaceName ?: "未知接口"
-                    val mtu = linkProperties.mtu
+                    val mtu = linkProperties.mtu.takeIf { it > 0 }
                     val hasIpv6 = linkProperties.linkAddresses.any { it.address is Inet6Address }
-                    val signature = "$iface|$dnsCount|$mtu|$hasIpv6"
+                    val mtuText = mtu?.let { " · MTU $it" }.orEmpty()
+                    val signature = "$iface|$dnsCount|${mtu ?: "无"}|$hasIpv6"
                     if (signature != lastLinkSignature) {
                         lastLinkSignature = signature
-                        scope.launch { appendNetworkEvent("链路变化：$iface · DNS ${dnsCount}个 · MTU $mtu · IPv6 ${if (hasIpv6) "有" else "无"}") }
+                        scope.launch { appendNetworkEvent("链路变化：$iface · DNS ${dnsCount}个$mtuText · IPv6 ${if (hasIpv6) "有" else "无"}") }
                     }
                 }
             }
@@ -9721,15 +9718,33 @@ private fun RoamingSignalCanvas(plot: List<RoamingSample>, baseIndex: Int, onSel
                 if (!signalStarted) { path.moveTo(x(i), yy); signalStarted = true } else path.lineTo(x(i), yy)
             }
         }
+        plot.zipWithNext().forEachIndexed { i, pair ->
+            val afterRssi = pair.second.rssi
+            if (afterRssi != null && pair.first.bssid != pair.second.bssid && pair.first.bssid != "未知" && pair.second.bssid != "未知") {
+                val xx = x(i + 1)
+                val endY = yRssi(afterRssi)
+                val marker = Path().apply {
+                    moveTo(xx, bottom)
+                    lineTo(xx, endY)
+                }
+                drawPath(
+                    marker,
+                    color = Orange.copy(alpha = 0.26f),
+                    style = Stroke(
+                        width = 1.5f,
+                        cap = StrokeCap.Round,
+                        pathEffect = PathEffect.dashPathEffect(floatArrayOf(6f, 7f), 0f)
+                    )
+                )
+            }
+        }
         drawPath(path, Green, style = Stroke(width = 3f, cap = StrokeCap.Round))
         plot.zipWithNext().forEachIndexed { i, pair ->
-            if (pair.first.bssid != pair.second.bssid && pair.first.bssid != "未知" && pair.second.bssid != "未知") {
+            val afterRssi = pair.second.rssi
+            if (afterRssi != null && pair.first.bssid != pair.second.bssid && pair.first.bssid != "未知" && pair.second.bssid != "未知") {
                 val xx = x(i + 1)
-                val y1 = yRssi(pair.first.rssi)
-                val y2 = yRssi(pair.second.rssi)
-                val lineTop = (min(y1, y2) - 16f).coerceAtLeast(top)
-                val lineBottom = (max(y1, y2) + 16f).coerceAtMost(bottom)
-                drawLine(Orange, Offset(xx, lineTop), Offset(xx, lineBottom), strokeWidth = 2.5f, cap = StrokeCap.Round)
+                val endY = yRssi(afterRssi)
+                drawCircle(Orange.copy(alpha = 0.68f), radius = 3f, center = Offset(xx, endY))
             }
         }
     }

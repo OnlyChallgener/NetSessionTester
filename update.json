@@ -10,7 +10,8 @@
     "稳定/标准/漫游三种模式自动匹配推荐Ping超时，同时保留自定义超时和恢复自动入口",
     "新增漫游质量评分，综合丢包、Ping抖动、RSSI抖动、AP切换和疑似粘连AP",
     "疑似粘连AP判定加入Ping抖动、RSSI抖动和近期丢包因素",
-    "Ping图表选中竖线、漫游信号切换竖线改为短竖线，不再贯穿整张图",
+    "链路变化隐藏MTU 0，漫游Ping图表Y轴档位更细，减少图表空白",
+    "漫游信号AP切换竖线改为淡色虚线，从X轴连接到切换后RSSI端点",
     "连接数测试明确使用折线趋势图，保留峰值/最高值视图"
   ],
   "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.1.15-144/NetSessionTester-V1.1.15-build144-signed.apk",
