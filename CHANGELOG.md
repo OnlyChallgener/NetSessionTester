@@ -22,6 +22,10 @@
 - 修复高频分离采样下 `null` 被误渲染成 Ping 图断点的问题：网关/外网分别记录 Success、Timeout、NotScheduled、BusySkipped、Canceled、Unknown 状态。
 - NotScheduled / BusySkipped / Unknown 不计入丢包率，也不会画红点或强制断线；Ping 图红点仅代表明确 timeout/loss。
 - 漫游事件断流耗时只基于连续明确 timeout/loss，不再由采样缺口、未调度或 busy skipped 形成断流。
+- 修复漫游事件详情“断流耗时”和“丢包次数”口径不一致：事件卡片默认显示最长连续网关 timeout/loss run 的“连丢”数量，不再把事件窗口总丢包混作断流丢包。
+- 漫游事件断流窗口收窄为事件附近窗口，避免多次 AP 往返切换时重复统计同一段 timeout，降低“弱信号切回好信号却显示 6s+ 断流”的误判。
+- 流式 ICMP Ping 进程结束或被系统调度打断时不再回填大量“超时”样本，只根据真实 seq 跳变推断丢包，避免采样缺口被误报成长期断流。
+
 
 # V1.1.15 build145
 
