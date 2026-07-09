@@ -8457,6 +8457,7 @@ private data class RoamingSample(
     val externalState: RoamingProbeState = RoamingProbeState.UNKNOWN,
     val gatewayTested: Boolean = true,
     val externalTested: Boolean = true,
+    val wifiTimeline: Boolean = true,
     val loss: Boolean,
     val ssid: String = "未知",
     val candidateBssid: String? = null,
@@ -8549,15 +8550,16 @@ private enum class RoamingTargetMode(val label: String) {
 private enum class RoamingSampleMode(
     val label: String,
     val desc: String,
+    val wifiSnapshotMs: Int,
     val gatewayProbeMs: Int,
     val externalProbeMs: Int,
     val recommendedTimeoutMs: Int,
     val candidateApText: String,
     val lostGraceMs: Long = 8_000L
 ) {
-    STABLE("稳定", "长时间观察，结果更稳", 500, 1000, 1000, "60s"),
-    STANDARD("标准", "日常推荐，兼顾精度和稳定", 200, 500, 700, "30–60s"),
-    ROAMING("极速", "高频捕捉切换断流，短时测试", 100, 500, 500, "开始前一次 + 被动监听")
+    STABLE("稳定", "长时间观察，结果更稳", 100, 500, 1000, 1000, "60s"),
+    STANDARD("标准", "日常推荐，兼顾精度和稳定", 50, 300, 1000, 700, "30–60s"),
+    ROAMING("极速", "高频捕捉切换断流，短时测试", 25, 200, 500, 500, "开始前一次 + 被动监听")
 }
 
 private suspend fun resolveMtuAddress(hostInput: String, policy: ToolIpPolicy): Pair<InetAddress?, String?> = withContext(Dispatchers.IO) {
@@ -9077,12 +9079,13 @@ private fun roamingWindowAnalysis(before: List<RoamingSample>, after: List<Roami
 }
 
 private fun buildRoamingEvents(samples: List<RoamingSample>, targetMode: RoamingTargetMode): List<RoamingEventInfo> {
-    if (samples.size < 2) return emptyList()
+    val timeline = samples.filter { it.wifiTimeline }.sortedBy { it.elapsedRealtimeMs }
+    if (timeline.size < 2) return emptyList()
     val events = mutableListOf<RoamingEventInfo>()
-    var lastStableIndex: Int? = samples.indexOfFirst { it.hasStableWifi() }.takeIf { it >= 0 }
+    var lastStableIndex: Int? = timeline.indexOfFirst { it.hasStableWifi() }.takeIf { it >= 0 }
     var unstableStartedAtMs: Long? = null
-    for (i in 1 until samples.size) {
-        val cur = samples[i]
+    for (i in 1 until timeline.size) {
+        val cur = timeline[i]
         if (!cur.hasStableWifi()) {
             if (lastStableIndex != null && unstableStartedAtMs == null) unstableStartedAtMs = cur.elapsedRealtimeMs
             continue
@@ -9093,7 +9096,7 @@ private fun buildRoamingEvents(samples: List<RoamingSample>, targetMode: Roaming
             unstableStartedAtMs = null
             continue
         }
-        val oldStable = samples[oldIndex]
+        val oldStable = timeline[oldIndex]
         val reconnected = unstableStartedAtMs?.let { cur.elapsedRealtimeMs - it >= 1_500L } == true
         val eventType = roamingEventType(oldStable, cur, reconnected)
         if (eventType.isNotBlank() && oldStable.elapsedRealtimeMs < cur.elapsedRealtimeMs) {
@@ -9104,10 +9107,11 @@ private fun buildRoamingEvents(samples: List<RoamingSample>, targetMode: Roaming
             // 趋势分析仍看前后 5s，但不用于断流主指标。
             val beforeWindow = samples.filter { it.elapsedRealtimeMs in (oldStable.elapsedRealtimeMs - 5_000L)..oldStable.elapsedRealtimeMs }
             val afterWindow = samples.filter { it.elapsedRealtimeMs in cur.elapsedRealtimeMs..(cur.elapsedRealtimeMs + 5_000L) }
-            val maxLatency = metricWindow.flatMap { listOfNotNull(it.gatewayMs, it.externalMs) }.maxOrNull()
+            val maxLatency = metricWindow.mapNotNull { it.gatewayMs }.maxOrNull()
+                ?: metricWindow.mapNotNull { it.externalMs }.maxOrNull()
             val confirmationMs = (cur.elapsedRealtimeMs - oldStable.elapsedRealtimeMs).coerceAtLeast(0L)
-            val confirmationText = "确认${roamingShortDurationText(confirmationMs)}"
-            val disruption = roamingDisruptionForWindow(samples, targetMode, metricWindowStartMs, metricWindowEndMs)
+            val confirmationText = "AP确认窗口约${roamingShortDurationText(confirmationMs)}"
+            val disruption = roamingDisruptionForWindow(samples, RoamingTargetMode.GATEWAY, metricWindowStartMs, metricWindowEndMs)
             events += RoamingEventInfo(
                 timeText = cur.timeText,
                 eventType = eventType,
@@ -9828,6 +9832,7 @@ private fun RoamingToolPage(onBack: () -> Unit) {
                                     appendNetworkEvent("候选AP扫描：开始前尝试一次；测试中优先使用系统被动监听")
                                     runCatching { (context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager).startScan() }
                                 }
+                                val wifiSnapshotInterval = sampleMode.wifiSnapshotMs.toLong()
                                 val gatewayInterval = sampleMode.gatewayProbeMs.toLong()
                                 val externalInterval = sampleMode.externalProbeMs.toLong()
                                 val timeout = timeoutMs.safeInt(1000, 300, 10000)
@@ -9844,7 +9849,7 @@ private fun RoamingToolPage(onBack: () -> Unit) {
                                         failure == null || failure == "超时" || failure?.equals("timeout", ignoreCase = true) == true -> RoamingProbeState.TIMEOUT
                                         else -> RoamingProbeState.UNKNOWN
                                     }
-                                    fun makeSample(now: Long, elapsedNow: Long, gwMs: Int?, extMs: Int?, gatewayTested: Boolean, externalTested: Boolean, gwFailure: String? = null, extFailure: String? = null): RoamingSample {
+                                    fun makeSample(now: Long, elapsedNow: Long, gwMs: Int?, extMs: Int?, gatewayTested: Boolean, externalTested: Boolean, gwFailure: String? = null, extFailure: String? = null, wifiTimeline: Boolean = false): RoamingSample {
                                         val wifi = readWifiSnapshot(context.applicationContext)
                                         val gatewayState = probeState(gatewayTested, gwMs, gwFailure)
                                         val externalState = probeState(externalTested, extMs, extFailure)
@@ -9863,6 +9868,7 @@ private fun RoamingToolPage(onBack: () -> Unit) {
                                             externalState = externalState,
                                             gatewayTested = gatewayTested,
                                             externalTested = externalTested,
+                                            wifiTimeline = wifiTimeline,
                                             loss = roamingIsLossState(gatewayState) || roamingIsLossState(externalState),
                                             ssid = wifi.ssid,
                                             candidateBssid = wifi.candidateBssid,
@@ -9873,13 +9879,21 @@ private fun RoamingToolPage(onBack: () -> Unit) {
                                         val now = System.currentTimeMillis()
                                         if (pendingSamples.isEmpty()) return
                                         if (!force && now - lastUiCommitMs < TEST_UI_REFRESH_MS) return
-                                        samples = (samples + pendingSamples.toList()).takeLast(maxSamples)
+                                        samples = (samples + pendingSamples.toList()).sortedBy { it.elapsedRealtimeMs }.takeLast(maxSamples)
                                         pendingSamples.clear()
                                         lastUiCommitMs = now
                                     }
                                     suspend fun addSample(sample: RoamingSample) {
                                         pendingSamples += sample
                                         commitSamples()
+                                    }
+                                    suspend fun runWifiSnapshotLoop() {
+                                        while (currentCoroutineContext().isActive) {
+                                            val now = System.currentTimeMillis()
+                                            val elapsedNow = SystemClock.elapsedRealtime()
+                                            addSample(makeSample(now, elapsedNow, null, null, gatewayTested = false, externalTested = false, wifiTimeline = true))
+                                            delay(wifiSnapshotInterval)
+                                        }
                                     }
                                     suspend fun runSinglePingLoop(target: String, intervalMs: Long, gatewayMode: Boolean) {
                                         while (currentCoroutineContext().isActive) {
@@ -9924,6 +9938,7 @@ private fun RoamingToolPage(onBack: () -> Unit) {
                                     }
                                     try {
                                         val probeJobs = mutableListOf<Job>()
+                                        probeJobs += roamingScope.launch { runWifiSnapshotLoop() }
                                         if (gatewaySampled) probeJobs += launchProbe(readGatewayAddress(context.applicationContext), gatewayInterval, gatewayMode = true)
                                         if (externalSampled) probeJobs += launchProbe(externalTarget.trim().ifBlank { "223.5.5.5" }, externalInterval, gatewayMode = false)
                                         probeJobs.forEach { it.join() }
@@ -10017,7 +10032,7 @@ private fun RoamingLiveCard(
         if (!running && samples.isNotEmpty()) {
             RoamingSummaryCard(samples, events, stickyEvents, targetMode)
         }
-        Text("说明：普通 APP 无法读取驱动级 roam complete；确认耗时是 Android 采样确认，断流耗时按 Ping timeout/loss 估算。", color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
+        Text("说明：普通 APP 无法读取驱动级 roam complete；AP确认窗口是 Android Wi-Fi 快照采样确认，断流耗时按网关 Ping timeout/loss 估算。", color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
     }
 }
 
@@ -10099,24 +10114,32 @@ private fun RoamingHistoryItem(
 }
 
 private fun roamingSwitchIndexNear(samples: List<RoamingSample>, index: Int, radius: Int = 2): Int? {
-    if (samples.size < 2) return null
-    val start = (index - radius).coerceAtLeast(1)
-    val end = (index + radius).coerceAtMost(samples.lastIndex)
+    val selectedElapsedMs = samples.getOrNull(index)?.elapsedRealtimeMs ?: return null
+    val timeline = samples.mapIndexed { originalIndex, sample -> originalIndex to sample }
+        .filter { it.second.wifiTimeline }
+        .sortedBy { it.second.elapsedRealtimeMs }
+    if (timeline.size < 2) return null
+    val nearest = timeline.indices.minByOrNull { abs(timeline[it].second.elapsedRealtimeMs - selectedElapsedMs) } ?: return null
+    val start = (nearest - radius).coerceAtLeast(1)
+    val end = (nearest + radius).coerceAtMost(timeline.lastIndex)
     for (i in start..end) {
-        val before = samples.getOrNull(i - 1)
-        val after = samples.getOrNull(i)
-        if (before != null && after != null && roamingMarkerChanged(before, after)) return i
+        val before = timeline.getOrNull(i - 1)?.second
+        val after = timeline.getOrNull(i)?.second
+        if (before != null && after != null && roamingMarkerChanged(before, after)) return timeline[i].first
     }
     return null
 }
 
 private fun roamingEventForSwitchIndex(samples: List<RoamingSample>, switchIndex: Int, targetMode: RoamingTargetMode): RoamingEventInfo? {
     if (switchIndex <= 0 || switchIndex >= samples.size) return null
-    val newStable = samples.drop(switchIndex).firstOrNull { it.hasStableWifi() } ?: return null
-    val oldIndex = samples.subList(0, switchIndex).indexOfLast { it.hasStableWifi() }
+    val selectedElapsedMs = samples.getOrNull(switchIndex)?.elapsedRealtimeMs ?: return null
+    val timeline = samples.filter { it.wifiTimeline }.sortedBy { it.elapsedRealtimeMs }
+    val newStable = timeline.firstOrNull { it.elapsedRealtimeMs >= selectedElapsedMs && it.hasStableWifi() } ?: return null
+    val timelineIndex = timeline.indexOf(newStable)
+    val oldIndex = timeline.subList(0, timelineIndex.coerceAtLeast(0)).indexOfLast { it.hasStableWifi() }
     if (oldIndex < 0) return null
-    val oldStable = samples[oldIndex]
-    val unstable = samples.subList((oldIndex + 1).coerceAtMost(switchIndex), switchIndex + 1).filter { !it.hasStableWifi() }
+    val oldStable = timeline[oldIndex]
+    val unstable = timeline.subList((oldIndex + 1).coerceAtMost(timelineIndex), timelineIndex + 1).filter { !it.hasStableWifi() }
     val reconnected = unstable.firstOrNull()?.let { newStable.elapsedRealtimeMs - it.elapsedRealtimeMs >= 1_500L } == true
     val eventType = roamingEventType(oldStable, newStable, reconnected)
     if (eventType.isBlank()) return null
@@ -10125,7 +10148,7 @@ private fun roamingEventForSwitchIndex(samples: List<RoamingSample>, switchIndex
     val metricWindow = samples.filter { it.elapsedRealtimeMs in metricWindowStartMs..metricWindowEndMs }
     val beforeWindow = samples.filter { it.elapsedRealtimeMs in (oldStable.elapsedRealtimeMs - 5_000L)..oldStable.elapsedRealtimeMs }
     val afterWindow = samples.filter { it.elapsedRealtimeMs in newStable.elapsedRealtimeMs..(newStable.elapsedRealtimeMs + 5_000L) }
-    val disruption = roamingDisruptionForWindow(samples, targetMode, metricWindowStartMs, metricWindowEndMs)
+    val disruption = roamingDisruptionForWindow(samples, RoamingTargetMode.GATEWAY, metricWindowStartMs, metricWindowEndMs)
     return RoamingEventInfo(
         timeText = newStable.timeText,
         eventType = eventType,
@@ -10134,12 +10157,13 @@ private fun roamingEventForSwitchIndex(samples: List<RoamingSample>, switchIndex
         oldBand = roamingBandText(oldStable.frequencyMhz),
         newBand = roamingBandText(newStable.frequencyMhz),
         confirmationMs = (newStable.elapsedRealtimeMs - oldStable.elapsedRealtimeMs).coerceAtLeast(0L),
-        confirmationText = "确认${roamingShortDurationText(newStable.elapsedRealtimeMs - oldStable.elapsedRealtimeMs)}",
+        confirmationText = "AP确认窗口约${roamingShortDurationText(newStable.elapsedRealtimeMs - oldStable.elapsedRealtimeMs)}",
         disruptionText = disruption.text,
         beforeRssi = oldStable.rssi,
         afterRssi = newStable.rssi,
         lossCount = disruption.lossCount,
-        maxLatencyMs = metricWindow.flatMap { listOfNotNull(it.gatewayMs, it.externalMs) }.maxOrNull(),
+        maxLatencyMs = metricWindow.mapNotNull { it.gatewayMs }.maxOrNull()
+            ?: metricWindow.mapNotNull { it.externalMs }.maxOrNull(),
         analysisText = roamingWindowAnalysis(beforeWindow, afterWindow)
     )
 }
@@ -10168,9 +10192,10 @@ private fun RoamingSwitchPopup(event: RoamingEventInfo) {
 @Composable
 private fun RoamingPingChartCard(samples: List<RoamingSample>) {
     var selectedIndex by remember { mutableStateOf<Int?>(null) }
-    val window = samples.takeLast(900)
-    val baseIndex = (samples.size - window.size).coerceAtLeast(0)
-    val indexedPlot = downsampleForRender(window.mapIndexed { index, sample -> (baseIndex + index) to sample }, 300)
+    val window = samples.mapIndexed { index, sample -> index to sample }
+        .sortedBy { it.second.elapsedRealtimeMs }
+        .takeLast(900)
+    val indexedPlot = downsampleForRender(window, 300)
     val plot = indexedPlot.map { it.second }
     val selectedSafeIndex = selectedIndex?.takeIf { samples.isNotEmpty() }?.coerceIn(0, samples.lastIndex)
     val selected = selectedSafeIndex?.let { samples.getOrNull(it) }
@@ -10194,9 +10219,11 @@ private fun RoamingPingChartCard(samples: List<RoamingSample>) {
 @Composable
 private fun RoamingSignalChartCard(samples: List<RoamingSample>, targetMode: RoamingTargetMode) {
     var selectedIndex by remember { mutableStateOf<Int?>(null) }
-    val window = samples.takeLast(900)
-    val baseIndex = (samples.size - window.size).coerceAtLeast(0)
-    val indexedPlot = downsampleForRender(window.mapIndexed { index, sample -> (baseIndex + index) to sample }, 300)
+    val window = samples.mapIndexed { index, sample -> index to sample }
+        .filter { it.second.wifiTimeline }
+        .sortedBy { it.second.elapsedRealtimeMs }
+        .takeLast(900)
+    val indexedPlot = downsampleForRender(window, 300)
     val plot = indexedPlot.map { it.second }
     val selectedSafeIndex = selectedIndex?.takeIf { samples.isNotEmpty() }?.coerceIn(0, samples.lastIndex)
     val selected = selectedSafeIndex?.let { samples.getOrNull(it) }
@@ -10488,7 +10515,7 @@ private fun RoamingSummaryCard(samples: List<RoamingSample>, events: List<Roamin
         val quality = computeRoamingQuality(samples, events, stickyEvents, targetMode)
         Text("漫游质量：${quality.label} · ${quality.summary}", color = quality.color, fontWeight = FontWeight.Bold, fontSize = 11.sp, lineHeight = 15.sp)
         Text("丢包：内网${roamingLossPercentText(gwTotal, gwLoss)} / 外网${roamingLossPercentText(extTotal, extLoss)}", color = if (gwLoss + extLoss > 0) ErrorRed else Muted, fontWeight = FontWeight.Bold, fontSize = 11.sp)
-        Text("漫游事件：${events.size}次 · 最长确认${events.maxByOrNull { it.confirmationMs }?.confirmationText?.removePrefix("确认") ?: "—"} · 断流连丢${events.sumOf { it.lossCount }}", color = if (events.isEmpty()) Muted else Orange, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+        Text("漫游事件：${events.size}次 · 最长AP确认${events.maxByOrNull { it.confirmationMs }?.confirmationText?.removePrefix("AP确认窗口约") ?: "—"} · 断流连丢${events.sumOf { it.lossCount }}", color = if (events.isEmpty()) Muted else Orange, fontWeight = FontWeight.Bold, fontSize = 11.sp)
         Text("粘连AP/频段：${if (stickyEvents.isEmpty()) "未发现明显粘连" else "疑似${stickyEvents.size}段 · 最长${stickyEvents.maxByOrNull { it.durationText.removeSuffix("s").toDoubleOrNull() ?: 0.0 }?.durationText ?: "—"}"}", color = if (stickyEvents.isEmpty()) Muted else Orange, fontWeight = FontWeight.Bold, fontSize = 11.sp)
     }
 }
