@@ -314,6 +314,7 @@ private const val TEST_UI_REFRESH_MS = 500L
 private const val PING_LOG_SAVE_DEBOUNCE_MS = 400L
 private const val MAX_RENDER_PING_POINTS = 300
 private const val MAX_RENDER_SESSION_POINTS = 180
+private const val MAX_RENDER_ROAMING_POINTS = 360
 
 private fun <T> downsampleForRender(items: List<T>, maxPoints: Int): List<T> {
     if (items.size <= maxPoints) return items
@@ -329,6 +330,30 @@ private fun compactSessionPointsForRender(points: List<ChartPoint>): List<ChartP
         .values
         .flatMap { downsampleForRender(it.sortedBy { point -> point.elapsedSec }, (MAX_RENDER_SESSION_POINTS / 2).coerceAtLeast(1)) }
         .sortedWith(compareBy<ChartPoint> { it.protocol.ordinal }.thenBy { it.elapsedSec })
+
+private data class RoamingPlotData(val samples: List<RoamingSample>, val originalIndices: List<Int>)
+
+private fun roamingPlotDataForRender(samples: List<RoamingSample>, running: Boolean): RoamingPlotData {
+    if (samples.isEmpty()) return RoamingPlotData(emptyList(), emptyList())
+    if (running) {
+        val liveCount = 180
+        val start = (samples.size - liveCount).coerceAtLeast(0)
+        val plot = samples.drop(start)
+        return RoamingPlotData(plot, (start until samples.size).toList())
+    }
+    if (samples.size <= MAX_RENDER_ROAMING_POINTS) {
+        return RoamingPlotData(samples, samples.indices.toList())
+    }
+    val step = ceil(samples.size / MAX_RENDER_ROAMING_POINTS.toDouble()).roundToInt().coerceAtLeast(1)
+    val rawIndexed = samples.withIndex()
+        .filter { it.index % step == 0 || it.index == samples.lastIndex }
+    val indexed = if (rawIndexed.size <= MAX_RENDER_ROAMING_POINTS) {
+        rawIndexed
+    } else {
+        listOf(rawIndexed.first()) + rawIndexed.drop(1).takeLast(MAX_RENDER_ROAMING_POINTS - 1)
+    }
+    return RoamingPlotData(indexed.map { it.value }, indexed.map { it.index })
+}
 
 private enum class PingProtocolMode(val label: String) {
     AUTO("自动"), IPV4("IPv4"), IPV6("IPv6")
@@ -8875,7 +8900,8 @@ private data class RoamingPingWindowEntry(val epochMs: Long, val loss: Boolean)
 
 private class RoamingPingProbeState(
     private val warmupMs: Long = 1_000L,
-    private val windowMs: Long = 5_000L
+    private val windowMs: Long = 5_000L,
+    private val firstLossGraceMs: Long = 2_000L
 ) {
     var latestMs: Int? = null
         private set
@@ -8890,17 +8916,28 @@ private class RoamingPingProbeState(
     var lossCount: Int = 0
         private set
 
+    private var firstProbeAtMs: Long? = null
+    private var hasCountedSuccess: Boolean = false
     private val recent = java.util.ArrayDeque<RoamingPingWindowEntry>()
 
     fun update(latencyMs: Int?, epochMs: Long) {
         if (readyAtMs == null) readyAtMs = epochMs
+        if (firstProbeAtMs == null) firstProbeAtMs = epochMs
         latestMs = latencyMs
         lastProbeAtMs = epochMs
         if (isReady(epochMs)) {
             val loss = latencyMs == null
-            sentCount++
-            if (loss) lossCount++ else successCount++
-            recent.addLast(RoamingPingWindowEntry(epochMs, loss))
+            val startupLoss = loss && !hasCountedSuccess && firstProbeAtMs?.let { epochMs - it < firstLossGraceMs } == true
+            if (!startupLoss) {
+                sentCount++
+                if (loss) {
+                    lossCount++
+                } else {
+                    successCount++
+                    hasCountedSuccess = true
+                }
+                recent.addLast(RoamingPingWindowEntry(epochMs, loss))
+            }
         }
         prune(epochMs)
     }
@@ -8908,10 +8945,10 @@ private class RoamingPingProbeState(
     fun isReady(nowMs: Long): Boolean = readyAtMs?.let { nowMs - it >= warmupMs } == true
 
     fun activeLatency(nowMs: Long, staleMs: Long): Int? =
-        if (isReady(nowMs) && lastProbeAtMs > 0L && nowMs - lastProbeAtMs <= staleMs) latestMs else null
+        if (isReady(nowMs) && sentCount > 0 && lastProbeAtMs > 0L && nowMs - lastProbeAtMs <= staleMs) latestMs else null
 
     fun activeLoss(nowMs: Long, staleMs: Long): Boolean =
-        isReady(nowMs) && (lastProbeAtMs <= 0L || nowMs - lastProbeAtMs > staleMs || latestMs == null)
+        isReady(nowMs) && sentCount > 0 && (lastProbeAtMs <= 0L || nowMs - lastProbeAtMs > staleMs || latestMs == null)
 
     fun windowLossPercent(nowMs: Long): Int? {
         prune(nowMs)
@@ -8983,6 +9020,7 @@ private fun normalizeWifiBssid(raw: String?): String? {
 
 private fun requiredWifiInfoPermissions(): List<String> = buildList {
     add(Manifest.permission.ACCESS_FINE_LOCATION)
+    add(Manifest.permission.ACCESS_COARSE_LOCATION)
     if (Build.VERSION.SDK_INT >= 33) add(Manifest.permission.NEARBY_WIFI_DEVICES)
 }
 
@@ -9026,10 +9064,12 @@ private fun readWifiSnapshot(context: Context): WifiSnapshot {
         val activeInfo = wifiInfoFromActiveNetwork(appContext)
         val legacyInfo = runCatching { wifi.connectionInfo }.getOrNull()
 
-        fun firstValidRssi(): Int? = listOf(activeInfo?.rssi, legacyInfo?.rssi).firstOrNull { it != null && it in -120..0 }
-        fun firstValidSpeed(): Int? = listOf(activeInfo?.linkSpeed, legacyInfo?.linkSpeed).firstOrNull { it != null && it > 0 }
-        fun firstValidFrequency(): Int? = listOf(activeInfo?.frequency, legacyInfo?.frequency).firstOrNull { it != null && it > 0 }
-        fun firstValidSsid(): String = listOf(activeInfo?.ssid, legacyInfo?.ssid)
+        // RSSI/速率优先用 WifiManager.connectionInfo：多数机型这里更新更实时。
+        // NetworkCapabilities.transportInfo 用来补 BSSID，但 RSSI 在部分系统上可能是缓存值，容易把信号图画成直线。
+        fun firstValidRssi(): Int? = listOf(legacyInfo?.rssi, activeInfo?.rssi).firstOrNull { it != null && it in -120..0 }
+        fun firstValidSpeed(): Int? = listOf(legacyInfo?.linkSpeed, activeInfo?.linkSpeed).firstOrNull { it != null && it > 0 }
+        fun firstValidFrequency(): Int? = listOf(legacyInfo?.frequency, activeInfo?.frequency).firstOrNull { it != null && it > 0 }
+        fun firstValidSsid(): String = listOf(legacyInfo?.ssid, activeInfo?.ssid)
             .map { normalizeWifiSsid(it) }
             .firstOrNull { it != "未知" } ?: "未知"
 
@@ -9190,6 +9230,12 @@ private fun roamingRssiJitterDb(samples: List<RoamingSample>): Double? {
     return values.zipWithNext().map { (a, b) -> abs(a - b).toDouble() }.average()
 }
 
+private fun roamingRssiVariationDb(samples: List<RoamingSample>): Int {
+    val values = samples.mapNotNull { it.rssi }
+    if (values.size < 2) return 0
+    return ((values.maxOrNull() ?: 0) - (values.minOrNull() ?: 0)).coerceAtLeast(0)
+}
+
 private fun computeRoamingQuality(
     samples: List<RoamingSample>,
     events: List<RoamingEventInfo>,
@@ -9197,17 +9243,26 @@ private fun computeRoamingQuality(
     targetMode: RoamingTargetMode
 ): RoamingQuality {
     if (samples.isEmpty()) return RoamingQuality("待测", 0, Muted, "开始后自动评分")
-    val total = samples.size.coerceAtLeast(1)
-    val gatewayLoss = samples.count { targetMode != RoamingTargetMode.EXTERNAL && it.gatewayMs == null }
-    val externalLoss = samples.count { targetMode != RoamingTargetMode.GATEWAY && it.externalMs == null }
+    // 高频 Wi-Fi 采样会产生大量“没有新 Ping 结果”的样本，不能按 gatewayMs/externalMs 是否为空来算丢包。
+    // 丢包只按真实 Ping 探测结果计数，避免开头/采样间隔内误判丢包。
+    val latest = samples.lastOrNull()
+    val gatewaySent = latest?.gatewayPingSent ?: samples.count { targetMode != RoamingTargetMode.EXTERNAL && it.gatewayMs != null }
+    val externalSent = latest?.externalPingSent ?: samples.count { targetMode != RoamingTargetMode.GATEWAY && it.externalMs != null }
+    val gatewayLoss = latest?.gatewayPingLoss ?: 0
+    val externalLoss = latest?.externalPingLoss ?: 0
     val activeLoss = when (targetMode) {
         RoamingTargetMode.GATEWAY_AND_EXTERNAL -> max(gatewayLoss, externalLoss)
         RoamingTargetMode.GATEWAY -> gatewayLoss
         RoamingTargetMode.EXTERNAL -> externalLoss
     }
-    val lossPercent = activeLoss * 100.0 / total
+    val activeSent = when (targetMode) {
+        RoamingTargetMode.GATEWAY_AND_EXTERNAL -> max(gatewaySent, externalSent)
+        RoamingTargetMode.GATEWAY -> gatewaySent
+        RoamingTargetMode.EXTERNAL -> externalSent
+    }.coerceAtLeast(1)
+    val lossPercent = activeLoss * 100.0 / activeSent
     val latencyJitter = roamingLatencyJitterMs(samples) ?: 0.0
-    val rssiJitter = roamingRssiJitterDb(samples) ?: 0.0
+    val rssiVariation = roamingRssiVariationDb(samples)
     val switchLoss = events.sumOf { it.lossCount }
     val maxLatency = samples.flatMap { listOfNotNull(it.gatewayMs, it.externalMs) }.maxOrNull() ?: 0
     var score = 100
@@ -9225,8 +9280,8 @@ private fun computeRoamingQuality(
         else -> 0
     }
     score -= when {
-        rssiJitter >= 12.0 -> 10
-        rssiJitter >= 7.0 -> 6
+        rssiVariation >= 18 -> 10
+        rssiVariation >= 10 -> 6
         else -> 0
     }
     score -= (switchLoss * 4).coerceAtMost(18)
@@ -9249,7 +9304,7 @@ private fun computeRoamingQuality(
         score >= 60 -> Orange
         else -> ErrorRed
     }
-    val summary = "${score}分 · 丢包${String.format(Locale.getDefault(), "%.1f", lossPercent)}% · Ping抖动${latencyJitter.roundToInt()}ms · RSSI抖动${String.format(Locale.getDefault(), "%.1f", rssiJitter)}dB"
+    val summary = "${score}分 · 丢包${String.format(Locale.getDefault(), "%.1f", lossPercent)}% · Ping抖动${latencyJitter.roundToInt()}ms · RSSI波动${rssiVariation}dB"
     return RoamingQuality(label, score, color, summary)
 }
 
@@ -9576,6 +9631,8 @@ private fun RoamingToolPage(onBack: () -> Unit) {
     var lastCapabilitySignature by remember { mutableStateOf("") }
     var lastLinkSignature by remember { mutableStateOf("") }
     var pendingStartAfterPermission by remember { mutableStateOf(false) }
+    var showWifiPermissionDialog by remember { mutableStateOf(false) }
+    var showAppSettingsDialog by remember { mutableStateOf(false) }
     var showLocationSettingsDialog by remember { mutableStateOf(false) }
     fun appendNetworkEvent(label: String) {
         val now = System.currentTimeMillis()
@@ -9639,16 +9696,16 @@ private fun RoamingToolPage(onBack: () -> Unit) {
             val extTarget = externalTarget.trim().ifBlank { "223.5.5.5" }
             val gatewayResolved = if (targetMode != RoamingTargetMode.EXTERNAL) resolvePingTarget(gateway, PingProtocolMode.AUTO) else null
             val externalResolved = if (targetMode != RoamingTargetMode.GATEWAY) resolvePingTarget(extTarget, PingProtocolMode.AUTO) else null
-            val gatewayProbe = RoamingPingProbeState(warmupMs = 0L)
-            val externalProbe = RoamingPingProbeState(warmupMs = 0L)
+            val gatewayProbe = RoamingPingProbeState(warmupMs = 1_000L)
+            val externalProbe = RoamingPingProbeState(warmupMs = 1_000L)
             var lastBssid = "未知"
             var lastBand = "未知"
             var lastFrequency: Int? = null
             val staleMs = max(max(timeout.toLong() + pingInterval * 2L, pingInterval * 4L), 500L)
             val maxSamples = when (sampleMode) {
-                RoamingSampleMode.ROAMING -> 2_400
-                RoamingSampleMode.STANDARD -> 1_200
-                RoamingSampleMode.STABLE -> 900
+                RoamingSampleMode.ROAMING -> 7_200
+                RoamingSampleMode.STANDARD -> 7_200
+                RoamingSampleMode.STABLE -> 3_600
             }
 
             suspend fun startRoamingPingLoop(
@@ -9748,8 +9805,21 @@ private fun RoamingToolPage(onBack: () -> Unit) {
                 }
             }
         } else {
+            val shouldStart = pendingStartAfterPermission
             pendingStartAfterPermission = false
-            Toast.makeText(context, "权限不足：只能测试 Ping，无法记录 BSSID/AP 切换", Toast.LENGTH_LONG).show()
+            showAppSettingsDialog = true
+            if (shouldStart) {
+                appendNetworkEvent("权限不足：未获得 Wi-Fi 信息权限，可在设置授权后再开始；也可仅测试 Ping")
+            }
+        }
+    }
+
+    fun openAppSettings() {
+        runCatching {
+            val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                data = Uri.fromParts("package", context.packageName, null)
+            }
+            context.startActivity(intent)
         }
     }
 
@@ -9757,7 +9827,7 @@ private fun RoamingToolPage(onBack: () -> Unit) {
         val missing = missingWifiInfoPermissions(context.applicationContext)
         if (missing.isNotEmpty()) {
             pendingStartAfterPermission = startAfterGrant
-            permissionLauncher.launch(missing.toTypedArray())
+            showWifiPermissionDialog = true
             return
         }
         if (!isSystemLocationEnabled(context.applicationContext)) {
@@ -9766,6 +9836,22 @@ private fun RoamingToolPage(onBack: () -> Unit) {
             return
         }
         if (startAfterGrant) startRoamingTest() else Toast.makeText(context, "Wi-Fi 信息权限已具备", Toast.LENGTH_SHORT).show()
+    }
+
+    fun launchWifiInfoPermissionRequest() {
+        val missing = missingWifiInfoPermissions(context.applicationContext)
+        if (missing.isEmpty()) {
+            showWifiPermissionDialog = false
+            if (pendingStartAfterPermission) {
+                pendingStartAfterPermission = false
+                startRoamingTest()
+            } else {
+                Toast.makeText(context, "Wi-Fi 信息权限已具备", Toast.LENGTH_SHORT).show()
+            }
+            return
+        }
+        showWifiPermissionDialog = false
+        permissionLauncher.launch(missing.toTypedArray())
     }
 
     DisposableEffect(running, runStartMs) {
@@ -9863,6 +9949,37 @@ private fun RoamingToolPage(onBack: () -> Unit) {
                 history = loadRoamingHistory(context.applicationContext)
                 expandedHistoryIds = expandedHistoryIds - id
             }
+        )
+    }
+
+
+    if (showWifiPermissionDialog) {
+        AlertDialog(
+            onDismissRequest = { showWifiPermissionDialog = false; pendingStartAfterPermission = false },
+            title = { Text("需要 Wi-Fi 信息权限") },
+            text = { Text("用于读取当前连接 AP、BSSID、频段、信道和信号强度。未授权时仍可测试 Ping，但无法记录 AP/频段切换详情。", color = Muted, fontSize = 13.sp, lineHeight = 18.sp) },
+            confirmButton = { TextButton(onClick = { launchWifiInfoPermissionRequest() }) { Text("授权") } },
+            dismissButton = {
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    TextButton(onClick = { showWifiPermissionDialog = false; openAppSettings() }) { Text("去设置") }
+                    TextButton(onClick = {
+                        val shouldStart = pendingStartAfterPermission
+                        showWifiPermissionDialog = false
+                        pendingStartAfterPermission = false
+                        if (shouldStart) startRoamingTest()
+                    }) { Text("仅测 Ping") }
+                }
+            }
+        )
+    }
+
+    if (showAppSettingsDialog) {
+        AlertDialog(
+            onDismissRequest = { showAppSettingsDialog = false },
+            title = { Text("权限未开启") },
+            text = { Text("系统没有授予 Wi-Fi 信息权限。请到应用详情中允许“位置/附近设备”，否则 BSSID、AP切换、频段/信道可能无法记录。", color = Muted, fontSize = 13.sp, lineHeight = 18.sp) },
+            confirmButton = { TextButton(onClick = { showAppSettingsDialog = false; openAppSettings() }) { Text("去应用设置") } },
+            dismissButton = { TextButton(onClick = { showAppSettingsDialog = false }) { Text("知道了") } }
         )
     }
 
@@ -10038,8 +10155,8 @@ private fun RoamingLiveCard(
                 Text("${e.timeText} · ${e.label}", color = Muted, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
         }
-        RoamingPingChartCard(samples)
-        RoamingSignalChartCard(samples)
+        RoamingPingChartCard(samples, running)
+        RoamingSignalChartCard(samples, running)
         if (events.isNotEmpty()) {
             Text("AP切换详情", color = TextDark, fontWeight = FontWeight.Bold, fontSize = 13.sp)
             events.takeLast(4).forEach { RoamingEventMiniCard(it) }
@@ -10188,10 +10305,10 @@ private fun RoamingSwitchPopup(event: RoamingEventInfo) {
 }
 
 @Composable
-private fun RoamingPingChartCard(samples: List<RoamingSample>) {
+private fun RoamingPingChartCard(samples: List<RoamingSample>, running: Boolean) {
     var selectedIndex by remember { mutableStateOf<Int?>(null) }
-    val plot = samples.takeLast(180)
-    val baseIndex = (samples.size - plot.size).coerceAtLeast(0)
+    val plotData = remember(samples, running) { roamingPlotDataForRender(samples, running) }
+    val plot = plotData.samples
     val selectedSafeIndex = selectedIndex?.takeIf { samples.isNotEmpty() }?.coerceIn(0, samples.lastIndex)
     val selected = selectedSafeIndex?.let { samples.getOrNull(it) }
     Column(
@@ -10206,16 +10323,16 @@ private fun RoamingPingChartCard(samples: List<RoamingSample>) {
             Text("Ping表", color = TextDark, fontWeight = FontWeight.Bold, fontSize = 13.sp, modifier = Modifier.weight(1f))
             Text("网关/外网 · 内外丢包分离", color = Muted, fontSize = 11.sp)
         }
-        RoamingPingCanvas(plot = plot, baseIndex = baseIndex, onSelect = { selectedIndex = it })
+        RoamingPingCanvas(plot = plot, originalIndices = plotData.originalIndices, onSelect = { selectedIndex = it })
         selected?.let { RoamingSampleDetailLine(it) }
     }
 }
 
 @Composable
-private fun RoamingSignalChartCard(samples: List<RoamingSample>) {
+private fun RoamingSignalChartCard(samples: List<RoamingSample>, running: Boolean) {
     var selectedIndex by remember { mutableStateOf<Int?>(null) }
-    val plot = samples.takeLast(180)
-    val baseIndex = (samples.size - plot.size).coerceAtLeast(0)
+    val plotData = remember(samples, running) { roamingPlotDataForRender(samples, running) }
+    val plot = plotData.samples
     val selectedSafeIndex = selectedIndex?.takeIf { samples.isNotEmpty() }?.coerceIn(0, samples.lastIndex)
     val selected = selectedSafeIndex?.let { samples.getOrNull(it) }
     val selectedSwitch = selectedSafeIndex?.let { idx -> roamingSwitchIndexNear(samples, idx)?.let { roamingEventForSwitchIndex(samples, it) } }
@@ -10231,14 +10348,14 @@ private fun RoamingSignalChartCard(samples: List<RoamingSample>) {
             Text("信号表", color = TextDark, fontWeight = FontWeight.Bold, fontSize = 13.sp, modifier = Modifier.weight(1f))
             Text("RSSI · 短竖线=切换", color = Muted, fontSize = 11.sp)
         }
-        RoamingSignalCanvas(plot = plot, baseIndex = baseIndex, onSelect = { selectedIndex = it })
+        RoamingSignalCanvas(plot = plot, originalIndices = plotData.originalIndices, onSelect = { selectedIndex = it })
         selectedSwitch?.let { RoamingSwitchPopup(it) }
         selected?.let { RoamingSampleDetailLine(it) }
     }
 }
 
 @Composable
-private fun RoamingPingCanvas(plot: List<RoamingSample>, baseIndex: Int, onSelect: (Int) -> Unit) {
+private fun RoamingPingCanvas(plot: List<RoamingSample>, originalIndices: List<Int>, onSelect: (Int) -> Unit) {
     Canvas(
         modifier = Modifier
             .fillMaxWidth()
@@ -10252,7 +10369,7 @@ private fun RoamingPingCanvas(plot: List<RoamingSample>, baseIndex: Int, onSelec
                     val right = size.width - 24f
                     val ratio = ((pos.x - left) / (right - left).coerceAtLeast(1f)).coerceIn(0f, 1f)
                     val idx = (ratio * (plot.size - 1)).roundToInt().coerceIn(0, plot.lastIndex)
-                    onSelect(baseIndex + idx)
+                    onSelect(originalIndices.getOrNull(idx) ?: idx)
                 }
             }
     ) {
@@ -10307,7 +10424,7 @@ private fun RoamingPingCanvas(plot: List<RoamingSample>, baseIndex: Int, onSelec
 }
 
 @Composable
-private fun RoamingSignalCanvas(plot: List<RoamingSample>, baseIndex: Int, onSelect: (Int) -> Unit) {
+private fun RoamingSignalCanvas(plot: List<RoamingSample>, originalIndices: List<Int>, onSelect: (Int) -> Unit) {
     Canvas(
         modifier = Modifier
             .fillMaxWidth()
@@ -10321,7 +10438,7 @@ private fun RoamingSignalCanvas(plot: List<RoamingSample>, baseIndex: Int, onSel
                     val right = size.width - 24f
                     val ratio = ((pos.x - left) / (right - left).coerceAtLeast(1f)).coerceIn(0f, 1f)
                     val idx = (ratio * (plot.size - 1)).roundToInt().coerceIn(0, plot.lastIndex)
-                    onSelect(baseIndex + idx)
+                    onSelect(originalIndices.getOrNull(idx) ?: idx)
                 }
             }
     ) {
@@ -10338,13 +10455,13 @@ private fun RoamingSignalCanvas(plot: List<RoamingSample>, baseIndex: Int, onSel
         val maxRssi = rssiValues.maxOrNull() ?: -50
         val centerRssi = (minRssi + maxRssi) / 2f
         val spanRssi = (maxRssi - minRssi).coerceAtLeast(1)
-        val halfRange = max(8f, spanRssi * 0.8f)
+        val halfRange = max(3f, spanRssi * 0.9f)
         var axisTop = (centerRssi + halfRange).coerceAtMost(-10f)
         var axisBottom = (centerRssi - halfRange).coerceAtLeast(-95f)
-        if (axisTop - axisBottom < 16f) {
+        if (axisTop - axisBottom < 6f) {
             val mid = (axisTop + axisBottom) / 2f
-            axisTop = (mid + 8f).coerceAtMost(-10f)
-            axisBottom = (mid - 8f).coerceAtLeast(-95f)
+            axisTop = (mid + 3f).coerceAtMost(-10f)
+            axisBottom = (mid - 3f).coerceAtLeast(-95f)
         }
         if (axisTop <= axisBottom) { axisTop = -30f; axisBottom = -90f }
         fun yRssi(v: Int?): Float {
