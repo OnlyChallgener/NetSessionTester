@@ -8539,17 +8539,15 @@ private enum class RoamingTargetMode(val label: String) {
 private enum class RoamingSampleMode(
     val label: String,
     val desc: String,
-    val displayPingMs: Int,
-    val displayRssiMs: Int,
     val gatewayProbeMs: Int,
     val externalProbeMs: Int,
     val recommendedTimeoutMs: Int,
     val candidateApText: String,
     val lostGraceMs: Long = 8_000L
 ) {
-    STABLE("稳定", "适合长时间观察网络稳定性，省电低干扰", 2000, 2000, 100, 500, 1500, "60s"),
-    STANDARD("标准", "默认推荐，兼顾精度与流畅度", 1000, 1000, 50, 300, 1000, "30–60s"),
-    ROAMING("漫游", "短时间精细捕捉漫游事件、丢包和延迟尖峰", 500, 500, 25, 200, 800, "开始前一次 + 被动监听")
+    STABLE("稳定", "长时间观察，结果更稳", 500, 1000, 1000, "60s"),
+    STANDARD("标准", "日常推荐，兼顾精度和稳定", 200, 500, 700, "30–60s"),
+    ROAMING("极速", "高频捕捉切换断流，短时测试", 100, 500, 500, "开始前一次 + 被动监听")
 }
 
 private suspend fun resolveMtuAddress(hostInput: String, policy: ToolIpPolicy): Pair<InetAddress?, String?> = withContext(Dispatchers.IO) {
@@ -9715,7 +9713,7 @@ private fun RoamingToolPage(onBack: () -> Unit) {
                 }
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        "${sampleMode.desc} · Ping ${sampleMode.displayPingMs}ms · RSSI/速率 ${sampleMode.displayRssiMs}ms · 推荐超时 ${sampleMode.recommendedTimeoutMs}ms · 候选AP扫描 ${sampleMode.candidateApText}",
+                        "${sampleMode.desc} · 推荐超时 ${sampleMode.recommendedTimeoutMs}ms · 候选AP扫描 ${sampleMode.candidateApText}",
                         color = Muted,
                         fontSize = 11.sp,
                         lineHeight = 15.sp,
@@ -9823,6 +9821,7 @@ private fun RoamingToolPage(onBack: () -> Unit) {
                                         while (currentCoroutineContext().isActive) {
                                             val now = System.currentTimeMillis()
                                             val elapsedNow = SystemClock.elapsedRealtime()
+                                            // 回退路径串行执行，上一轮未结束时不叠加新任务，也不把 skipped 当丢包。
                                             val latency = pingForRoaming(target, timeout)
                                             addSample(makeSample(now, elapsedNow, if (gatewayMode) latency else null, if (gatewayMode) null else latency, gatewayMode, !gatewayMode))
                                             delay(intervalMs)
@@ -9855,7 +9854,7 @@ private fun RoamingToolPage(onBack: () -> Unit) {
                                     fun launchProbe(target: String, intervalMs: Long, gatewayMode: Boolean): Job = roamingScope.launch {
                                         val usedStream = runStreamPingLoop(target, intervalMs, gatewayMode)
                                         if (!usedStream && currentCoroutineContext().isActive) {
-                                            appendNetworkEvent("${if (gatewayMode) "网关" else "外网"}流式 Ping 不可用，已回退单次 Ping；25ms 实验参数可能受机型调度影响")
+                                            appendNetworkEvent("${if (gatewayMode) "网关" else "外网"}流式 Ping 不可用，已回退单次 Ping；高频参数可能受机型调度影响")
                                             runSinglePingLoop(target, intervalMs, gatewayMode)
                                         }
                                     }
