@@ -8443,7 +8443,19 @@ private data class RoamingSample(
     val ssid: String = "未知",
     val candidateBssid: String? = null,
     val candidateRssi: Int? = null,
-    val frequency: Int? = null
+    val frequency: Int? = null,
+    val gatewayPingSent: Int = 0,
+    val gatewayPingSuccess: Int = 0,
+    val gatewayPingLoss: Int = 0,
+    val gatewayWindowLossPercent: Int? = null,
+    val gatewayPingReady: Boolean = false,
+    val gatewayLastProbeAtMs: Long = 0L,
+    val externalPingSent: Int = 0,
+    val externalPingSuccess: Int = 0,
+    val externalPingLoss: Int = 0,
+    val externalWindowLossPercent: Int? = null,
+    val externalPingReady: Boolean = false,
+    val externalLastProbeAtMs: Long = 0L
 )
 
 private data class RoamingEventInfo(
@@ -8456,7 +8468,10 @@ private data class RoamingEventInfo(
     val lossCount: Int,
     val maxLatencyMs: Int?,
     val oldBand: String = "未知",
-    val newBand: String = "未知"
+    val newBand: String = "未知",
+    val oldFrequency: Int? = null,
+    val newFrequency: Int? = null,
+    val pingRecoveryMs: Long? = null
 )
 
 private data class StickyApEvent(
@@ -8525,9 +8540,9 @@ private enum class RoamingSampleMode(
     val candidateApText: String,
     val lostGraceMs: Long = 8_000L
 ) {
-    STABLE("稳定", "适合长时间观察网络稳定性，省电低干扰", 2000, 2000, 1500, "60s"),
-    STANDARD("标准", "默认推荐，兼顾精度与流畅度", 500, 500, 1000, "30–60s"),
-    ROAMING("漫游", "短时间精细捕捉 AP 切换、丢包和延迟尖峰", 50, 50, 500, "开始前一次 + 被动监听")
+    STABLE("稳定", "低频采样，适合长时间稳定性测试", 2000, 2000, 1500, "60s"),
+    STANDARD("标准", "中频采样，适合日常网络观察", 500, 500, 1000, "30–60s"),
+    ROAMING("漫游", "高频采样，记录 AP / 频段切换和 Ping 恢复", 50, 50, 500, "开始前一次 + 被动监听")
 }
 
 private suspend fun resolveMtuAddress(hostInput: String, policy: ToolIpPolicy): Pair<InetAddress?, String?> = withContext(Dispatchers.IO) {
@@ -8823,6 +8838,133 @@ private fun wifiBandLabel(frequency: Int?): String = when (frequency ?: 0) {
 private fun roamingBandChangeText(oldBand: String, newBand: String): String =
     if (oldBand != "未知" && newBand != "未知" && oldBand != newBand) " · 频段${oldBand}→${newBand}" else ""
 
+private fun wifiChannelLabel(frequency: Int?): String {
+    val f = frequency ?: return "—"
+    return when {
+        f == 2484 -> "14"
+        f in 2412..2472 -> ((f - 2407) / 5).toString()
+        f in 5000..5895 -> ((f - 5000) / 5).toString()
+        f in 5955..7115 -> ((f - 5950) / 5).toString()
+        else -> "—"
+    }
+}
+
+private fun roamingBandChannelText(band: String, frequency: Int?): String {
+    val channel = wifiChannelLabel(frequency)
+    return when {
+        band != "未知" && channel != "—" -> "$band CH.$channel"
+        band != "未知" -> band
+        channel != "—" -> "CH.$channel"
+        else -> "—"
+    }
+}
+
+private fun roamingRssiValueText(value: Int?): String = value?.let { "${it}dBm" } ?: "—"
+
+private fun roamingEventBandSignalLine(event: RoamingEventInfo): String =
+    "频段/信号：${roamingBandChannelText(event.oldBand, event.oldFrequency)} ${roamingRssiValueText(event.beforeRssi)} → ${roamingBandChannelText(event.newBand, event.newFrequency)} ${roamingRssiValueText(event.afterRssi)}"
+
+private fun roamingEventResultLine(event: RoamingEventInfo): String {
+    val pingText = event.pingRecoveryMs?.let { "${it}ms" } ?: event.maxLatencyMs?.let { "${it}ms" } ?: "—"
+    return "结果：切换${event.durationText} · Ping${pingText} · 丢包${event.lossCount}"
+}
+
+private data class RoamingPingWindowEntry(val epochMs: Long, val loss: Boolean)
+
+private class RoamingPingProbeState(
+    private val warmupMs: Long = 1_000L,
+    private val windowMs: Long = 5_000L
+) {
+    var latestMs: Int? = null
+        private set
+    var lastProbeAtMs: Long = 0L
+        private set
+    var readyAtMs: Long? = null
+        private set
+    var sentCount: Int = 0
+        private set
+    var successCount: Int = 0
+        private set
+    var lossCount: Int = 0
+        private set
+
+    private val recent = java.util.ArrayDeque<RoamingPingWindowEntry>()
+
+    fun update(latencyMs: Int?, epochMs: Long) {
+        if (readyAtMs == null) readyAtMs = epochMs
+        latestMs = latencyMs
+        lastProbeAtMs = epochMs
+        if (isReady(epochMs)) {
+            val loss = latencyMs == null
+            sentCount++
+            if (loss) lossCount++ else successCount++
+            recent.addLast(RoamingPingWindowEntry(epochMs, loss))
+        }
+        prune(epochMs)
+    }
+
+    fun isReady(nowMs: Long): Boolean = readyAtMs?.let { nowMs - it >= warmupMs } == true
+
+    fun activeLatency(nowMs: Long, staleMs: Long): Int? =
+        if (isReady(nowMs) && lastProbeAtMs > 0L && nowMs - lastProbeAtMs <= staleMs) latestMs else null
+
+    fun activeLoss(nowMs: Long, staleMs: Long): Boolean =
+        isReady(nowMs) && (lastProbeAtMs <= 0L || nowMs - lastProbeAtMs > staleMs || latestMs == null)
+
+    fun windowLossPercent(nowMs: Long): Int? {
+        prune(nowMs)
+        val total = recent.size
+        if (total <= 0) return null
+        val loss = recent.count { it.loss }
+        return roamingPercent(loss, total)
+    }
+
+    private fun prune(nowMs: Long) {
+        while (recent.isNotEmpty() && nowMs - recent.peekFirst().epochMs > windowMs) {
+            recent.removeFirst()
+        }
+    }
+}
+
+private fun roamingPingWindowLabel(enabled: Boolean, ready: Boolean, percent: Int?): String = when {
+    !enabled -> "—"
+    !ready -> "预热"
+    percent != null -> "${percent}%"
+    else -> "0%"
+}
+
+private fun roamingPingStatusText(sample: RoamingSample?, targetMode: RoamingTargetMode): String {
+    if (sample == null) return "Ping：等待开始"
+    val parts = mutableListOf<String>()
+    if (targetMode != RoamingTargetMode.EXTERNAL) {
+        val status = if (sample.gatewayPingReady) "内网${sample.gatewayPingSent}次" else "内网预热"
+        parts += status
+    }
+    if (targetMode != RoamingTargetMode.GATEWAY) {
+        val status = if (sample.externalPingReady) "外网${sample.externalPingSent}次" else "外网预热"
+        parts += status
+    }
+    return "Ping统计：${parts.joinToString(" · ")}"
+}
+
+private fun roamingPingSummaryText(label: String, enabled: Boolean, sent: Int, success: Int, loss: Int): String {
+    if (!enabled) return "$label：未启用"
+    val lossPercent = roamingLossPercentText(sent, loss)
+    return "$label：发送${sent}次 / 成功${success}次 / 丢包${loss}次 / 丢包率${lossPercent}"
+}
+
+private fun roamingPingLossDelta(window: List<RoamingSample>): Int {
+    val first = window.firstOrNull() ?: return 0
+    val last = window.lastOrNull() ?: return 0
+    val gw = (last.gatewayPingLoss - first.gatewayPingLoss).coerceAtLeast(0)
+    val ext = (last.externalPingLoss - first.externalPingLoss).coerceAtLeast(0)
+    return gw + ext
+}
+
+private fun roamingSampleHasFreshPingAfter(sample: RoamingSample, epochMs: Long): Boolean =
+    (sample.gatewayMs != null && sample.gatewayLastProbeAtMs >= epochMs) ||
+        (sample.externalMs != null && sample.externalLastProbeAtMs >= epochMs)
+
 private fun readWifiSnapshot(context: Context): WifiSnapshot {
     return runCatching {
         val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
@@ -8897,6 +9039,9 @@ private fun buildRoamingEvents(samples: List<RoamingSample>): List<RoamingEventI
             val to = min(samples.size, i + 6)
             val window = samples.subList(from, to)
             val maxLatency = window.flatMap { listOfNotNull(it.gatewayMs, it.externalMs) }.maxOrNull()
+            val pingRecoveryMs = samples.drop(i).firstOrNull {
+                it.epochMs >= cur.epochMs && roamingSampleHasFreshPingAfter(it, cur.epochMs)
+            }?.let { (it.epochMs - cur.epochMs).coerceAtLeast(0L) }
             val afterStable = samples.drop(i).firstOrNull {
                 it.bssid == cur.bssid && it.rssi != null && it.epochMs - cur.epochMs >= 1000L
             } ?: cur
@@ -8909,10 +9054,13 @@ private fun buildRoamingEvents(samples: List<RoamingSample>): List<RoamingEventI
                 durationText = durationText,
                 beforeRssi = lastKnown.rssi,
                 afterRssi = afterStable.rssi,
-                lossCount = window.count { it.loss },
+                lossCount = roamingPingLossDelta(window),
                 maxLatencyMs = maxLatency,
                 oldBand = wifiBandLabel(lastKnown.frequency),
-                newBand = wifiBandLabel(cur.frequency)
+                newBand = wifiBandLabel(cur.frequency),
+                oldFrequency = lastKnown.frequency,
+                newFrequency = cur.frequency,
+                pingRecoveryMs = pingRecoveryMs
             )
         }
         lastKnown = cur
@@ -9112,9 +9260,20 @@ private fun buildRoamingHistoryRecord(
     val speed = samples.mapNotNull { it.linkSpeed }
     val targetText = if (targetMode == RoamingTargetMode.GATEWAY) targetMode.label else "${targetMode.label} · ${externalTarget.ifBlank { "223.5.5.5" }}"
     val eventLines = events.map { e ->
-        "${e.timeText}  ${e.oldBssid} → ${e.newBssid}${roamingBandChangeText(e.oldBand, e.newBand)} · ${e.durationText} · 丢包${e.lossCount} · 最高延迟${e.maxLatencyMs?.let { "${it}ms" } ?: "—"}"
+        "AP切换：${e.oldBssid} → ${e.newBssid}\n${roamingEventBandSignalLine(e)}\n${roamingEventResultLine(e)}"
     }
     val networkLines = networkEvents.map { "${it.timeText}  ${it.label}" }
+    val latest = samples.lastOrNull()
+    val gatewaySummaryText = if (targetMode == RoamingTargetMode.EXTERNAL) {
+        "内网Ping：未启用"
+    } else {
+        "${roamingStatsText("网关", gateway, "ms")} · 发送${latest?.gatewayPingSent ?: 0} / 成功${latest?.gatewayPingSuccess ?: 0} / 丢包${latest?.gatewayPingLoss ?: 0}"
+    }
+    val externalSummaryText = if (targetMode == RoamingTargetMode.GATEWAY) {
+        "外网Ping：未启用"
+    } else {
+        "${roamingStatsText("外网", external, "ms")} · 发送${latest?.externalPingSent ?: 0} / 成功${latest?.externalPingSuccess ?: 0} / 丢包${latest?.externalPingLoss ?: 0}"
+    }
     return RoamingHistoryRecord(
         id = System.currentTimeMillis(),
         timeText = SimpleDateFormat("MM-dd HH:mm:ss", Locale.getDefault()).format(Date()),
@@ -9122,8 +9281,8 @@ private fun buildRoamingHistoryRecord(
         durationText = roamingDurationText(samples),
         sampleCount = samples.size,
         lossCount = samples.count { it.loss },
-        gatewaySummary = roamingStatsText("网关", gateway, "ms"),
-        externalSummary = roamingStatsText("外网", external, "ms"),
+        gatewaySummary = gatewaySummaryText,
+        externalSummary = externalSummaryText,
         rssiSummary = roamingRssiStatsText(rssi),
         speedSummary = roamingStatsText("速率", speed, "Mbps"),
         roamingSummary = "AP切换：${events.size}次 · 切换附近总丢包${events.sumOf { it.lossCount }}",
@@ -9585,10 +9744,8 @@ private fun RoamingToolPage(onBack: () -> Unit) {
                                     val extTarget = externalTarget.trim().ifBlank { "223.5.5.5" }
                                     val gatewayResolved = if (targetMode != RoamingTargetMode.EXTERNAL) resolvePingTarget(gateway, PingProtocolMode.AUTO) else null
                                     val externalResolved = if (targetMode != RoamingTargetMode.GATEWAY) resolvePingTarget(extTarget, PingProtocolMode.AUTO) else null
-                                    var latestGatewayMs: Int? = null
-                                    var latestExternalMs: Int? = null
-                                    var lastGatewayProbeAt = 0L
-                                    var lastExternalProbeAt = 0L
+                                    val gatewayProbe = RoamingPingProbeState()
+                                    val externalProbe = RoamingPingProbeState()
                                     var lastBssid = "未知"
                                     var lastBand = "未知"
                                     var lastFrequency: Int? = null
@@ -9602,7 +9759,7 @@ private fun RoamingToolPage(onBack: () -> Unit) {
                                     suspend fun startRoamingPingStream(
                                         name: String,
                                         resolved: ResolvedPingTarget?,
-                                        update: (Int?, Long) -> Unit
+                                        update: (PingStreamEvent) -> Unit
                                     ): Job? {
                                         if (resolved == null) return null
                                         if (resolved.error != null) {
@@ -9618,14 +9775,14 @@ private fun RoamingToolPage(onBack: () -> Unit) {
                                                     intervalMs = pingInterval,
                                                     maxCount = 1_000_000
                                                 ) { event ->
-                                                    update(event.latencyMs, event.timeEpochMs)
+                                                    update(event)
                                                 }
                                                 if (!currentCoroutineContext().isActive) break
                                                 if (count == 0) {
                                                     appendNetworkEvent("${name}探测：系统高频 ping 不支持，降级为单次循环")
                                                     while (currentCoroutineContext().isActive) {
                                                         val result = icmpPingResolved(resolved.address, timeout, resolved.protocol)
-                                                        update(result.latencyMs, System.currentTimeMillis())
+                                                        update(PingStreamEvent(result.latencyMs, result.failure, System.currentTimeMillis()))
                                                         delay(max(pingInterval, 250L))
                                                     }
                                                 } else {
@@ -9636,13 +9793,11 @@ private fun RoamingToolPage(onBack: () -> Unit) {
                                         }
                                     }
 
-                                    val gatewayJob = startRoamingPingStream("网关", gatewayResolved) { latency, time ->
-                                        latestGatewayMs = latency
-                                        lastGatewayProbeAt = time
+                                    val gatewayJob = startRoamingPingStream("网关", gatewayResolved) { event ->
+                                        gatewayProbe.update(event.latencyMs, event.timeEpochMs)
                                     }
-                                    val externalJob = startRoamingPingStream("外网", externalResolved) { latency, time ->
-                                        latestExternalMs = latency
-                                        lastExternalProbeAt = time
+                                    val externalJob = startRoamingPingStream("外网", externalResolved) { event ->
+                                        externalProbe.update(event.latencyMs, event.timeEpochMs)
                                     }
 
                                     try {
@@ -9651,24 +9806,23 @@ private fun RoamingToolPage(onBack: () -> Unit) {
                                             val wifi = readWifiSnapshot(appContext)
                                             val band = wifiBandLabel(wifi.frequency)
                                             if (lastBssid != "未知" && wifi.bssid != "未知" && wifi.bssid != lastBssid) {
-                                                val bandText = roamingBandChangeText(lastBand, band)
-                                                appendNetworkEvent("AP切换：${lastBssid} → ${wifi.bssid}${bandText}")
+                                                val changeText = "${roamingBandChannelText(lastBand, lastFrequency)} → ${roamingBandChannelText(band, wifi.frequency)}"
+                                                appendNetworkEvent("AP切换：${lastBssid} → ${wifi.bssid} · ${changeText}")
                                             } else if (lastBand != "未知" && band != "未知" && band != lastBand) {
-                                                val oldFreq = lastFrequency?.let { "${it}MHz" }.orEmpty()
-                                                val newFreq = wifi.frequency?.let { "${it}MHz" }.orEmpty()
-                                                val freqText = listOf(oldFreq, newFreq).filter { it.isNotBlank() }.joinToString("→").let { if (it.isBlank()) "" else " · $it" }
-                                                appendNetworkEvent("频段切换：${lastBand} → ${band}${freqText}")
+                                                appendNetworkEvent("频段/信道切换：${roamingBandChannelText(lastBand, lastFrequency)} → ${roamingBandChannelText(band, wifi.frequency)}")
                                             }
                                             if (wifi.bssid != "未知") lastBssid = wifi.bssid
                                             if (band != "未知") lastBand = band
                                             if (wifi.frequency != null) lastFrequency = wifi.frequency
 
-                                            val gwMs = if (targetMode != RoamingTargetMode.EXTERNAL) {
-                                                if (lastGatewayProbeAt > 0L && now - lastGatewayProbeAt <= staleMs) latestGatewayMs else null
-                                            } else null
-                                            val extMs = if (targetMode != RoamingTargetMode.GATEWAY) {
-                                                if (lastExternalProbeAt > 0L && now - lastExternalProbeAt <= staleMs) latestExternalMs else null
-                                            } else null
+                                            val gatewayEnabled = targetMode != RoamingTargetMode.EXTERNAL
+                                            val externalEnabled = targetMode != RoamingTargetMode.GATEWAY
+                                            val gwReady = !gatewayEnabled || gatewayProbe.isReady(now)
+                                            val extReady = !externalEnabled || externalProbe.isReady(now)
+                                            val gwMs = if (gatewayEnabled) gatewayProbe.activeLatency(now, staleMs) else null
+                                            val extMs = if (externalEnabled) externalProbe.activeLatency(now, staleMs) else null
+                                            val gwLossNow = gatewayEnabled && gatewayProbe.activeLoss(now, staleMs)
+                                            val extLossNow = externalEnabled && externalProbe.activeLoss(now, staleMs)
                                             val sample = RoamingSample(
                                                 timeText = SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()).format(Date(now)),
                                                 epochMs = now,
@@ -9678,11 +9832,23 @@ private fun RoamingToolPage(onBack: () -> Unit) {
                                                 bssid = wifi.bssid,
                                                 gatewayMs = gwMs,
                                                 externalMs = extMs,
-                                                loss = (targetMode != RoamingTargetMode.EXTERNAL && gwMs == null) || (targetMode != RoamingTargetMode.GATEWAY && extMs == null),
+                                                loss = gwLossNow || extLossNow,
                                                 ssid = wifi.ssid,
                                                 candidateBssid = wifi.candidateBssid,
                                                 candidateRssi = wifi.candidateRssi,
-                                                frequency = wifi.frequency
+                                                frequency = wifi.frequency,
+                                                gatewayPingSent = gatewayProbe.sentCount,
+                                                gatewayPingSuccess = gatewayProbe.successCount,
+                                                gatewayPingLoss = gatewayProbe.lossCount,
+                                                gatewayWindowLossPercent = gatewayProbe.windowLossPercent(now),
+                                                gatewayPingReady = gwReady,
+                                                gatewayLastProbeAtMs = gatewayProbe.lastProbeAtMs,
+                                                externalPingSent = externalProbe.sentCount,
+                                                externalPingSuccess = externalProbe.successCount,
+                                                externalPingLoss = externalProbe.lossCount,
+                                                externalWindowLossPercent = externalProbe.windowLossPercent(now),
+                                                externalPingReady = extReady,
+                                                externalLastProbeAtMs = externalProbe.lastProbeAtMs
                                             )
                                             samples = (samples + sample).takeLast(maxSamples)
                                             delay(sampleInterval)
@@ -9728,8 +9894,8 @@ private fun RoamingLiveCard(
     onHistoryClick: () -> Unit
 ) {
     val latest = samples.lastOrNull()
-    val gatewayLoss = samples.count { targetMode != RoamingTargetMode.EXTERNAL && it.gatewayMs == null }
-    val externalLoss = samples.count { targetMode != RoamingTargetMode.GATEWAY && it.externalMs == null }
+    val gatewayLoss = latest?.gatewayPingLoss ?: 0
+    val externalLoss = latest?.externalPingLoss ?: 0
     val events = remember(samples) { buildRoamingEvents(samples) }
     val stickyEvents = remember(samples, stickyWeakRssi, stickyAdvantageDb, stickyDurationSec) {
         buildStickyApEvents(samples, stickyWeakRssi, stickyAdvantageDb, stickyDurationSec)
@@ -9750,11 +9916,12 @@ private fun RoamingLiveCard(
         ToolMonoLine("BSSID", latest?.bssid ?: "—")
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
             MiniMetric("网关", latest?.gatewayMs?.let { "${it}ms" } ?: "—", Blue, Modifier.weight(1f))
-            MiniMetric("内网丢包", roamingLossPercentText(samples.size, gatewayLoss), if (gatewayLoss > 0) ErrorRed else Muted, Modifier.weight(1f))
+            MiniMetric("内网丢包", roamingPingWindowLabel(targetMode != RoamingTargetMode.EXTERNAL, latest?.gatewayPingReady == true, latest?.gatewayWindowLossPercent), if (gatewayLoss > 0) ErrorRed else Muted, Modifier.weight(1f))
             MiniMetric("外网", latest?.externalMs?.let { "${it}ms" } ?: "—", Purple, Modifier.weight(1f))
-            MiniMetric("外网丢包", roamingLossPercentText(samples.size, externalLoss), if (externalLoss > 0) ErrorRed else Muted, Modifier.weight(1f))
+            MiniMetric("外网丢包", roamingPingWindowLabel(targetMode != RoamingTargetMode.GATEWAY, latest?.externalPingReady == true, latest?.externalWindowLossPercent), if (externalLoss > 0) ErrorRed else Muted, Modifier.weight(1f))
         }
         Text(quality.summary, color = quality.color, fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(roamingPingStatusText(latest, targetMode), color = Muted, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
         if (networkEvents.isNotEmpty()) {
             Text("网络事件 / 能力变化 / 链路变化", color = TextDark, fontWeight = FontWeight.Bold, fontSize = 12.sp)
             networkEvents.takeLast(3).forEach { e ->
@@ -9880,10 +10047,13 @@ private fun roamingEventForSwitchIndex(samples: List<RoamingSample>, switchIndex
         durationText = "${(after.epochMs - before.epochMs).coerceAtLeast(0L)}ms",
         beforeRssi = before.rssi,
         afterRssi = after.rssi,
-        lossCount = window.count { it.loss },
+        lossCount = roamingPingLossDelta(window),
         maxLatencyMs = window.flatMap { listOfNotNull(it.gatewayMs, it.externalMs) }.maxOrNull(),
         oldBand = wifiBandLabel(before.frequency),
-        newBand = wifiBandLabel(after.frequency)
+        newBand = wifiBandLabel(after.frequency),
+        oldFrequency = before.frequency,
+        newFrequency = after.frequency,
+        pingRecoveryMs = samples.drop(switchIndex).firstOrNull { it.epochMs >= after.epochMs && roamingSampleHasFreshPingAfter(it, after.epochMs) }?.let { (it.epochMs - after.epochMs).coerceAtLeast(0L) }
     )
 }
 
@@ -9898,11 +10068,11 @@ private fun RoamingSwitchPopup(event: RoamingEventInfo) {
     ) {
         Column(Modifier.padding(horizontal = 10.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("AP切换", color = Orange, fontWeight = FontWeight.ExtraBold, fontSize = 12.sp, modifier = Modifier.weight(1f))
+                Text("AP切换：${event.oldBssid} → ${event.newBssid}", color = TextDark, fontWeight = FontWeight.Bold, fontSize = 11.sp, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(event.timeText, color = Muted, fontSize = 10.sp)
             }
-            Text("${event.oldBssid}  →  ${event.newBssid}", color = TextDark, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text("RSSI ${event.beforeRssi ?: "—"}→${event.afterRssi ?: "—"}dBm${roamingBandChangeText(event.oldBand, event.newBand)} · 切换附近丢包${event.lossCount} · 最高延迟${event.maxLatencyMs?.let { "${it}ms" } ?: "—"}", color = Muted, fontSize = 11.sp)
+            Text(roamingEventBandSignalLine(event), color = Muted, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(roamingEventResultLine(event), color = Orange, fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
     }
 }
@@ -10156,11 +10326,11 @@ private fun RoamingEventMiniCard(event: RoamingEventInfo) {
         verticalArrangement = Arrangement.spacedBy(3.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("AP切换", color = Orange, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.weight(1f))
+            Text("AP切换：${event.oldBssid} → ${event.newBssid}", color = TextDark, fontWeight = FontWeight.Bold, fontSize = 11.sp, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(event.timeText, color = Muted, fontSize = 10.sp)
         }
-        Text("${event.oldBssid}  →  ${event.newBssid}", color = TextDark, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        Text("时长${event.durationText}${roamingBandChangeText(event.oldBand, event.newBand)} · RSSI ${event.beforeRssi ?: "—"}→${event.afterRssi ?: "—"}dBm · 切换附近丢包${event.lossCount} · 最高延迟${event.maxLatencyMs?.let { "${it}ms" } ?: "—"}", color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
+        Text(roamingEventBandSignalLine(event), color = Muted, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(roamingEventResultLine(event), color = Orange, fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -10205,11 +10375,13 @@ private fun RoamingSummaryCard(samples: List<RoamingSample>, events: List<Roamin
         Text("外网延迟：最小${external.minOrNull()?.let { "${it}ms" } ?: "—"} / 最大${external.maxOrNull()?.let { "${it}ms" } ?: "—"} / 平均${roamingAverage(external)?.let { "${it}ms" } ?: "—"}", color = TextDark, fontSize = 11.sp)
         Text("信号RSSI：最强${rssi.maxOrNull()?.let { "${it}dBm" } ?: "—"} / 最弱${rssi.minOrNull()?.let { "${it}dBm" } ?: "—"} / 平均${roamingAverage(rssi)?.let { "${it}dBm" } ?: "—"}", color = TextDark, fontSize = 11.sp)
         Text("协商速率：最高${speed.maxOrNull()?.let { "${it}Mbps" } ?: "—"} / 最低${speed.minOrNull()?.let { "${it}Mbps" } ?: "—"} / 平均${roamingAverage(speed)?.let { "${it}Mbps" } ?: "—"}", color = TextDark, fontSize = 11.sp)
-        val gwLoss = samples.count { targetMode != RoamingTargetMode.EXTERNAL && it.gatewayMs == null }
-        val extLoss = samples.count { targetMode != RoamingTargetMode.GATEWAY && it.externalMs == null }
+        val latest = samples.lastOrNull()
+        val gwLoss = latest?.gatewayPingLoss ?: 0
+        val extLoss = latest?.externalPingLoss ?: 0
         val quality = computeRoamingQuality(samples, events, stickyEvents, targetMode)
         Text("漫游质量：${quality.label} · ${quality.summary}", color = quality.color, fontWeight = FontWeight.Bold, fontSize = 11.sp, lineHeight = 15.sp)
-        Text("丢包：内网${roamingLossPercentText(samples.size, gwLoss)} / 外网${roamingLossPercentText(samples.size, extLoss)}", color = if (gwLoss + extLoss > 0) ErrorRed else Muted, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+        Text(roamingPingSummaryText("内网Ping", targetMode != RoamingTargetMode.EXTERNAL, latest?.gatewayPingSent ?: 0, latest?.gatewayPingSuccess ?: 0, gwLoss), color = if (gwLoss > 0) ErrorRed else Muted, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+        Text(roamingPingSummaryText("外网Ping", targetMode != RoamingTargetMode.GATEWAY, latest?.externalPingSent ?: 0, latest?.externalPingSuccess ?: 0, extLoss), color = if (extLoss > 0) ErrorRed else Muted, fontWeight = FontWeight.Bold, fontSize = 11.sp)
         Text("AP切换：${events.size}次 · 最长${events.map { it.durationText }.lastOrNull() ?: "—"} · 切换附近总丢包${events.sumOf { it.lossCount }}", color = if (events.isEmpty()) Muted else Orange, fontWeight = FontWeight.Bold, fontSize = 11.sp)
         Text("粘连AP：${if (stickyEvents.isEmpty()) "未发现明显粘连" else "疑似${stickyEvents.size}段 · 最长${stickyEvents.maxByOrNull { it.deltaDb }?.durationText ?: "—"}"}", color = if (stickyEvents.isEmpty()) Muted else Orange, fontWeight = FontWeight.Bold, fontSize = 11.sp)
     }
