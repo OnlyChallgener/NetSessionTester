@@ -40,6 +40,10 @@
 12. 长期停留 2.4G 且弱信号、低速率、Ping 抖动或丢包时，可提示“疑似粘连频段”；没有可靠扫描结果时不得写成附近一定有更优 AP。
 13. 页面说明应明确：未 root Android 普通 APP 无法读取驱动级 roam complete 事件，确认耗时只表示 Android 采样确认。
 14. 如设备不支持流式 ICMP Ping，应出现“回退单次 Ping”的网络事件提示；回退路径应串行执行，上一轮未完成时不新增任务，不能把 skipped/busy 计为丢包。
+15. 高频分离采样下，NotScheduled / BusySkipped / Unknown 不应计入内网或外网丢包率分子和分母。
+16. Ping 图红点只应代表明确 timeout/loss；NotScheduled / BusySkipped 不应画红点，也不应强制断开网关线或外网线。
+17. 内网丢包 0%、外网丢包 0% 时，Ping 图不应因为网关/外网采样间隔不同而持续断点。
+18. 漫游事件断流耗时应只基于连续明确 timeout/loss；采样缺口、未调度或 busy skipped 不应形成“断流约xxx”。
 
 ## 文档清理验证
 

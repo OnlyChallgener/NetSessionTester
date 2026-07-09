@@ -19,6 +19,9 @@
 - 网关和外网分开调度，断流耗时继续以网关业务探测为主，外网仅辅助观察公网链路波动。
 - 高频探测优先使用流式 ICMP Ping，避免反复创建 ping 进程；回退单次 Ping 时串行执行，上一轮未完成不会新增任务或计为丢包。
 - 高频采集与 UI 刷新分离，页面仍按节流批量提交，图表最多渲染抽稀后的 300 个点，降低重组和绘制压力。
+- 修复高频分离采样下 `null` 被误渲染成 Ping 图断点的问题：网关/外网分别记录 Success、Timeout、NotScheduled、BusySkipped、Canceled、Unknown 状态。
+- NotScheduled / BusySkipped / Unknown 不计入丢包率，也不会画红点或强制断线；Ping 图红点仅代表明确 timeout/loss。
+- 漫游事件断流耗时只基于连续明确 timeout/loss，不再由采样缺口、未调度或 busy skipped 形成断流。
 
 # V1.1.15 build145
 

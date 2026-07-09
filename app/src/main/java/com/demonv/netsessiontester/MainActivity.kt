@@ -8441,6 +8441,15 @@ private data class MtuResult(
     val checkLines: List<MtuCheckLine> = emptyList()
 )
 
+private enum class RoamingProbeState {
+    SUCCESS,
+    TIMEOUT,
+    NOT_SCHEDULED,
+    BUSY_SKIPPED,
+    CANCELED,
+    UNKNOWN
+}
+
 private data class RoamingSample(
     val timeText: String,
     val epochMs: Long,
@@ -8452,6 +8461,8 @@ private data class RoamingSample(
     val bssid: String,
     val gatewayMs: Int?,
     val externalMs: Int?,
+    val gatewayState: RoamingProbeState = RoamingProbeState.UNKNOWN,
+    val externalState: RoamingProbeState = RoamingProbeState.UNKNOWN,
     val gatewayTested: Boolean = true,
     val externalTested: Boolean = true,
     val loss: Boolean,
@@ -8913,6 +8924,14 @@ private fun roamingBandText(frequencyMhz: Int?): String = when (frequencyMhz ?: 
 
 private fun RoamingSample.hasStableWifi(): Boolean = bssid != "未知" && rssi != null
 
+private fun roamingStateForTarget(sample: RoamingSample, targetMode: RoamingTargetMode): RoamingProbeState =
+    if (targetMode == RoamingTargetMode.EXTERNAL) sample.externalState else sample.gatewayState
+
+private fun roamingIsLossState(state: RoamingProbeState): Boolean = state == RoamingProbeState.TIMEOUT
+
+private fun roamingIsEffectiveState(state: RoamingProbeState): Boolean =
+    state == RoamingProbeState.SUCCESS || state == RoamingProbeState.TIMEOUT
+
 private fun roamingSampleIntervalMs(samples: List<RoamingSample>): Long? {
     val intervals = samples.zipWithNext()
         .map { (a, b) -> b.elapsedRealtimeMs - a.elapsedRealtimeMs }
@@ -8921,18 +8940,18 @@ private fun roamingSampleIntervalMs(samples: List<RoamingSample>): Long? {
 }
 
 private fun roamingLossForTarget(sample: RoamingSample, targetMode: RoamingTargetMode): Boolean {
-    val gatewayLoss = sample.gatewayTested && targetMode != RoamingTargetMode.EXTERNAL && sample.gatewayMs == null
-    val externalLoss = sample.externalTested && targetMode != RoamingTargetMode.GATEWAY && sample.externalMs == null
+    val gatewayLoss = targetMode != RoamingTargetMode.EXTERNAL && roamingGatewayLoss(sample)
+    val externalLoss = targetMode != RoamingTargetMode.GATEWAY && roamingExternalLoss(sample)
     return if (targetMode == RoamingTargetMode.GATEWAY_AND_EXTERNAL) gatewayLoss else gatewayLoss || externalLoss
 }
 
-private fun roamingGatewayLoss(sample: RoamingSample): Boolean = sample.gatewayTested && sample.gatewayMs == null
+private fun roamingGatewayLoss(sample: RoamingSample): Boolean = roamingIsLossState(sample.gatewayState)
 
-private fun roamingExternalLoss(sample: RoamingSample): Boolean = sample.externalTested && sample.externalMs == null
+private fun roamingExternalLoss(sample: RoamingSample): Boolean = roamingIsLossState(sample.externalState)
 
-private fun roamingGatewayTotal(samples: List<RoamingSample>): Int = samples.count { it.gatewayTested }
+private fun roamingGatewayTotal(samples: List<RoamingSample>): Int = samples.count { roamingIsEffectiveState(it.gatewayState) }
 
-private fun roamingExternalTotal(samples: List<RoamingSample>): Int = samples.count { it.externalTested }
+private fun roamingExternalTotal(samples: List<RoamingSample>): Int = samples.count { roamingIsEffectiveState(it.externalState) }
 
 private fun roamingDisruptionForWindow(
     samples: List<RoamingSample>,
@@ -8941,10 +8960,8 @@ private fun roamingDisruptionForWindow(
     toMs: Long
 ): Pair<String, Int> {
     val window = samples.filter { sample ->
-        sample.elapsedRealtimeMs in fromMs..toMs && when (targetMode) {
-            RoamingTargetMode.EXTERNAL -> sample.externalTested
-            else -> sample.gatewayTested
-        }
+        sample.elapsedRealtimeMs in fromMs..toMs &&
+            roamingStateForTarget(sample, targetMode).let { it == RoamingProbeState.SUCCESS || it == RoamingProbeState.TIMEOUT }
     }
     if (window.isEmpty()) return "断流未检测到" to 0
     val intervalMs = roamingSampleIntervalMs(window) ?: roamingSampleIntervalMs(samples) ?: 1000L
@@ -8963,11 +8980,13 @@ private fun roamingDisruptionForWindow(
         runLossCount = 0
     }
     window.forEach { sample ->
-        if (roamingLossForTarget(sample, targetMode)) {
-            if (runStart == null) runStart = sample
-            runLossCount += 1
-        } else {
-            closeRun(sample)
+        when (roamingStateForTarget(sample, targetMode)) {
+            RoamingProbeState.TIMEOUT -> {
+                if (runStart == null) runStart = sample
+                runLossCount += 1
+            }
+            RoamingProbeState.SUCCESS -> closeRun(sample)
+            else -> Unit
         }
     }
     closeRun(null)
@@ -8996,7 +9015,7 @@ private fun roamingEventType(old: RoamingSample, new: RoamingSample, reconnected
 
 private fun roamingMarkerChanged(before: RoamingSample, after: RoamingSample): Boolean {
     if (!after.hasStableWifi()) return false
-    if (!before.hasStableWifi()) return true
+    if (!before.hasStableWifi()) return false
     return roamingEventType(before, after, reconnected = false).isNotBlank()
 }
 
@@ -9029,21 +9048,22 @@ private fun buildRoamingEvents(samples: List<RoamingSample>, targetMode: Roaming
     if (samples.size < 2) return emptyList()
     val events = mutableListOf<RoamingEventInfo>()
     var lastStableIndex: Int? = samples.indexOfFirst { it.hasStableWifi() }.takeIf { it >= 0 }
-    var unstableSinceLastStable = false
+    var unstableStartedAtMs: Long? = null
     for (i in 1 until samples.size) {
         val cur = samples[i]
         if (!cur.hasStableWifi()) {
-            if (lastStableIndex != null) unstableSinceLastStable = true
+            if (lastStableIndex != null && unstableStartedAtMs == null) unstableStartedAtMs = cur.elapsedRealtimeMs
             continue
         }
         val oldIndex = lastStableIndex
         if (oldIndex == null) {
             lastStableIndex = i
-            unstableSinceLastStable = false
+            unstableStartedAtMs = null
             continue
         }
         val oldStable = samples[oldIndex]
-        val eventType = roamingEventType(oldStable, cur, unstableSinceLastStable)
+        val reconnected = unstableStartedAtMs?.let { cur.elapsedRealtimeMs - it >= 1_500L } == true
+        val eventType = roamingEventType(oldStable, cur, reconnected)
         if (eventType.isNotBlank() && oldStable.elapsedRealtimeMs < cur.elapsedRealtimeMs) {
             val windowStartMs = oldStable.elapsedRealtimeMs - 5_000L
             val windowEndMs = cur.elapsedRealtimeMs + 5_000L
@@ -9072,7 +9092,7 @@ private fun buildRoamingEvents(samples: List<RoamingSample>, targetMode: Roaming
             )
         }
         lastStableIndex = i
-        unstableSinceLastStable = false
+        unstableStartedAtMs = null
     }
     return events
 }
@@ -9784,8 +9804,16 @@ private fun RoamingToolPage(onBack: () -> Unit) {
                                     var lastUiCommitMs = 0L
                                     val gatewaySampled = targetMode != RoamingTargetMode.EXTERNAL
                                     val externalSampled = targetMode != RoamingTargetMode.GATEWAY
-                                    fun makeSample(now: Long, elapsedNow: Long, gwMs: Int?, extMs: Int?, gatewayTested: Boolean, externalTested: Boolean): RoamingSample {
+                                    fun probeState(tested: Boolean, latencyMs: Int?, failure: String?): RoamingProbeState = when {
+                                        !tested -> RoamingProbeState.NOT_SCHEDULED
+                                        latencyMs != null -> RoamingProbeState.SUCCESS
+                                        failure == null || failure == "超时" || failure?.equals("timeout", ignoreCase = true) == true -> RoamingProbeState.TIMEOUT
+                                        else -> RoamingProbeState.UNKNOWN
+                                    }
+                                    fun makeSample(now: Long, elapsedNow: Long, gwMs: Int?, extMs: Int?, gatewayTested: Boolean, externalTested: Boolean, gwFailure: String? = null, extFailure: String? = null): RoamingSample {
                                         val wifi = readWifiSnapshot(context.applicationContext)
+                                        val gatewayState = probeState(gatewayTested, gwMs, gwFailure)
+                                        val externalState = probeState(externalTested, extMs, extFailure)
                                         return RoamingSample(
                                             timeText = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(now)),
                                             epochMs = now,
@@ -9797,9 +9825,11 @@ private fun RoamingToolPage(onBack: () -> Unit) {
                                             bssid = wifi.bssid,
                                             gatewayMs = gwMs,
                                             externalMs = extMs,
+                                            gatewayState = gatewayState,
+                                            externalState = externalState,
                                             gatewayTested = gatewayTested,
                                             externalTested = externalTested,
-                                            loss = (gatewayTested && gwMs == null) || (externalTested && extMs == null),
+                                            loss = roamingIsLossState(gatewayState) || roamingIsLossState(externalState),
                                             ssid = wifi.ssid,
                                             candidateBssid = wifi.candidateBssid,
                                             candidateRssi = wifi.candidateRssi
@@ -9823,7 +9853,7 @@ private fun RoamingToolPage(onBack: () -> Unit) {
                                             val elapsedNow = SystemClock.elapsedRealtime()
                                             // 回退路径串行执行，上一轮未结束时不叠加新任务，也不把 skipped 当丢包。
                                             val latency = pingForRoaming(target, timeout)
-                                            addSample(makeSample(now, elapsedNow, if (gatewayMode) latency else null, if (gatewayMode) null else latency, gatewayMode, !gatewayMode))
+                                            addSample(makeSample(now, elapsedNow, if (gatewayMode) latency else null, if (gatewayMode) null else latency, gatewayMode, !gatewayMode, if (gatewayMode && latency == null) "超时" else null, if (!gatewayMode && latency == null) "超时" else null))
                                             delay(intervalMs)
                                         }
                                     }
@@ -9839,7 +9869,7 @@ private fun RoamingToolPage(onBack: () -> Unit) {
                                                 if (!firstEvent.isCompleted) firstEvent.complete(Unit)
                                                 val gwMs = if (gatewayMode) event.latencyMs else null
                                                 val extMs = if (gatewayMode) null else event.latencyMs
-                                                addSample(makeSample(event.timeEpochMs, event.elapsedRealtimeMs, gwMs, extMs, gatewayMode, !gatewayMode))
+                                                addSample(makeSample(event.timeEpochMs, event.elapsedRealtimeMs, gwMs, extMs, gatewayMode, !gatewayMode, if (gatewayMode) event.failure else null, if (!gatewayMode) event.failure else null))
                                             }
                                         }
                                         val started = withTimeoutOrNull(1_500L) { firstEvent.await(); true } == true
@@ -9903,8 +9933,8 @@ private fun RoamingLiveCard(
     onHistoryClick: () -> Unit
 ) {
     val latest = samples.lastOrNull()
-    val latestGateway = samples.lastOrNull { it.gatewayTested }
-    val latestExternal = samples.lastOrNull { it.externalTested }
+    val latestGateway = samples.lastOrNull { it.gatewayState == RoamingProbeState.SUCCESS }
+    val latestExternal = samples.lastOrNull { it.externalState == RoamingProbeState.SUCCESS }
     val gatewayLoss = samples.count { targetMode != RoamingTargetMode.EXTERNAL && roamingGatewayLoss(it) }
     val externalLoss = samples.count { targetMode != RoamingTargetMode.GATEWAY && roamingExternalLoss(it) }
     val gatewayTotal = roamingGatewayTotal(samples)
@@ -10052,7 +10082,8 @@ private fun roamingEventForSwitchIndex(samples: List<RoamingSample>, switchIndex
     val oldIndex = samples.subList(0, switchIndex).indexOfLast { it.hasStableWifi() }
     if (oldIndex < 0) return null
     val oldStable = samples[oldIndex]
-    val reconnected = samples.subList((oldIndex + 1).coerceAtMost(switchIndex), switchIndex + 1).any { !it.hasStableWifi() }
+    val unstable = samples.subList((oldIndex + 1).coerceAtMost(switchIndex), switchIndex + 1).filter { !it.hasStableWifi() }
+    val reconnected = unstable.firstOrNull()?.let { newStable.elapsedRealtimeMs - it.elapsedRealtimeMs >= 1_500L } == true
     val eventType = roamingEventType(oldStable, newStable, reconnected)
     if (eventType.isBlank()) return null
     val windowStartMs = oldStable.elapsedRealtimeMs - 5_000L
@@ -10202,23 +10233,21 @@ private fun RoamingPingCanvas(plot: List<RoamingSample>, indexMap: List<Int>, on
         }
         fun x(i: Int) = left + (i / (plot.size - 1).coerceAtLeast(1).toFloat()) * w
         fun y(v: Int?) = bottom - ((v ?: 0).coerceIn(0, axisMax) / axisMax.toFloat()) * h
-        fun drawLatencyLine(valuesOf: (RoamingSample) -> Int?, color: Color) {
-            val path = Path()
-            var started = false
-            plot.forEachIndexed { i, sample ->
-                val v = valuesOf(sample)
-                if (v == null) {
-                    started = false
-                } else {
-                    if (!started) { path.moveTo(x(i), y(v)); started = true } else path.lineTo(x(i), y(v))
+        fun drawLatencyLine(valuesOf: (RoamingSample) -> Int?, stateOf: (RoamingSample) -> RoamingProbeState, color: Color) {
+            val successPoints = plot.mapIndexedNotNull { i, sample ->
+                valuesOf(sample)?.takeIf { stateOf(sample) == RoamingProbeState.SUCCESS }?.let { i to it }
+            }
+            successPoints.zipWithNext().forEach { (a, b) ->
+                val hasLossBetween = plot.subList(a.first + 1, b.first).any { roamingIsLossState(stateOf(it)) }
+                if (!hasLossBetween) {
+                    drawLine(color, Offset(x(a.first), y(a.second)), Offset(x(b.first), y(b.second)), strokeWidth = 3f, cap = StrokeCap.Round)
                 }
             }
-            drawPath(path, color, style = Stroke(width = 3f, cap = StrokeCap.Round))
         }
-        drawLatencyLine({ it.gatewayMs }, Blue)
-        drawLatencyLine({ it.externalMs }, Purple)
+        drawLatencyLine({ it.gatewayMs }, { it.gatewayState }, Blue)
+        drawLatencyLine({ it.externalMs }, { it.externalState }, Purple)
         plot.forEachIndexed { i, s ->
-            if (s.loss) drawCircle(ErrorRed, radius = 4f, center = Offset(x(i), bottom - 4f))
+            if (roamingGatewayLoss(s) || roamingExternalLoss(s)) drawCircle(ErrorRed, radius = 4f, center = Offset(x(i), bottom - 4f))
         }
     }
 }
@@ -10333,8 +10362,16 @@ private fun RoamingSignalCanvas(plot: List<RoamingSample>, indexMap: List<Int>, 
 
 @Composable
 private fun RoamingSampleDetailLine(sample: RoamingSample) {
+    fun probeText(latencyMs: Int?, state: RoamingProbeState): String = when (state) {
+        RoamingProbeState.SUCCESS -> latencyMs?.let { "${it}ms" } ?: "—"
+        RoamingProbeState.TIMEOUT -> "超时"
+        RoamingProbeState.NOT_SCHEDULED -> "未调度"
+        RoamingProbeState.BUSY_SKIPPED -> "忙跳过"
+        RoamingProbeState.CANCELED -> "已取消"
+        RoamingProbeState.UNKNOWN -> "—"
+    }
     Text(
-        "${sample.timeText} · 网关 ${sample.gatewayMs?.let { "${it}ms" } ?: "超时"} · 外网 ${sample.externalMs?.let { "${it}ms" } ?: "超时"} · ${roamingBandText(sample.frequencyMhz)} · RSSI ${sample.rssi?.let { "${it}dBm" } ?: "—"} · 速率 ${sample.linkSpeed?.let { "${it}Mbps" } ?: "—"}",
+        "${sample.timeText} · 网关 ${probeText(sample.gatewayMs, sample.gatewayState)} · 外网 ${probeText(sample.externalMs, sample.externalState)} · ${roamingBandText(sample.frequencyMhz)} · RSSI ${sample.rssi?.let { "${it}dBm" } ?: "—"} · 速率 ${sample.linkSpeed?.let { "${it}Mbps" } ?: "—"}",
         color = TextDark,
         fontSize = 11.sp,
         lineHeight = 15.sp,
