@@ -1,11 +1,11 @@
-# V1.1.15 build145 自测重点
+# V1.1.16 build146 自测重点
 
 ## 版本与发版文件
 
-1. APP 版本应显示 `versionName=V1.1.15`、`versionCode=145`。
+1. APP 版本应显示 `versionName=V1.1.16`、`versionCode=146`。
 2. 根目录只保留当前长期文档：`README.md`、`CHANGELOG.md`、`TEST_NOTES_current.md`。
 3. 历史 build 说明应在 `docs/BUILD_HISTORY.md` 中查看，后续发版模板应使用 `docs/RELEASE_TEMPLATE.md`。
-4. `update.json` 应指向 `v1.1.15-145` 与 build145 APK。
+4. `update.json` 应指向当前正式发布版本；本次未创建 release 时不要求更新。
 
 ## 路由追踪
 
@@ -23,6 +23,18 @@
 3. 漫游测试在 WiFi 权限拒绝、非 WiFi 网络、后台/锁屏时应给出提示或安全停止。
 4. 长时间测试后历史记录数量仍应受限，页面滚动和图表拖动不应明显卡顿。
 5. Android 10、Android 13、Android 15/16 设备上分别检查权限提示、通知权限和前台服务行为。
+
+## 漫游事件详情
+
+1. 漫游事件应区分 AP切换、频段切换、AP+频段切换、重新连接四类。
+2. 频段显示应按 frequency 映射为 2.4G、5G、6G、未知；事件详情应尽量显示 `oldBssid · oldBand → newBssid · newBand`。
+3. 事件详情应显示“确认x.xs / 断流未检测到或断流<采样间隔或断流约x.xs”，不再出现“时长约x秒”。
+4. 未发生 Ping timeout/loss 的漫游事件，应显示“断流未检测到”，即使 BSSID/频段确认耗时较长也不应误报真实断流。
+5. 发生网关 Ping 连续 timeout/loss 后恢复时，应优先按网关 Ping 计算断流；只测外网或未启用网关目标时，再按外网 Ping 辅助计算。
+6. 单个 timeout/loss 且采样间隔不足以支持精确毫秒时，应显示“断流<采样间隔”，不要显示伪精确的几十毫秒。
+7. 历史记录、实时详情卡、信号图点击弹窗中的漫游事件文案应保持一致，并包含前后 5 秒 RSSI、网关延迟、速率变化的简短结论。
+8. 长期停留 2.4G 且弱信号、低速率、Ping 抖动或丢包时，可提示“疑似粘连频段”；没有可靠扫描结果时不得写成附近一定有更优 AP。
+9. 页面说明应明确：未 root Android 普通 APP 无法读取真实 802.11r/k/v 驱动级 roam complete 事件，确认耗时不是真实无线层漫游耗时。
 
 ## 文档清理验证
 
