@@ -315,6 +315,9 @@ private const val TEST_UI_REFRESH_MS = 500L
 private const val PING_LOG_SAVE_DEBOUNCE_MS = 400L
 private const val MAX_RENDER_PING_POINTS = 300
 private const val MAX_RENDER_SESSION_POINTS = 180
+private const val ROAMING_CHART_WINDOW_MS = 60_000L
+private const val ROAMING_SIGNAL_BUCKET_MS = 500L
+private const val ROAMING_EVENT_CONFIRM_SAMPLES = 2
 
 private fun <T> downsampleForRender(items: List<T>, maxPoints: Int): List<T> {
     if (items.size <= maxPoints) return items
@@ -8862,39 +8865,39 @@ private fun normalizeWifiSsid(raw: String?): String {
     return value.removePrefix("\"").removeSuffix("\"").ifBlank { "未知" }
 }
 
-private fun normalizedWifiBssid(raw: String?): String? {
-    val value = raw.orEmpty().trim()
-    if (value.isBlank()) return null
-    val lower = value.lowercase(Locale.US)
-    if (lower == "unknown" || lower == "<unknown>" || lower == "02:00:00:00:00:00" || lower == "00:00:00:00:00:00") return null
-    return value.uppercase(Locale.US)
+private fun normalizeWifiBssid(raw: String?): String {
+    val value = raw.orEmpty().trim().lowercase(Locale.getDefault())
+    return value.takeIf { it.isNotBlank() && it != "02:00:00:00:00:00" && it != "00:00:00:00:00:00" } ?: "未知"
 }
 
-private fun readActiveWifiInfo(context: Context): WifiInfo? = runCatching {
-    val cm = context.getSystemService(ConnectivityManager::class.java) ?: return@runCatching null
-    val network = cm.activeNetwork ?: return@runCatching null
-    val caps = cm.getNetworkCapabilities(network) ?: return@runCatching null
-    if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) return@runCatching null
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) caps.transportInfo as? WifiInfo else null
-}.getOrNull()
+private fun currentWifiInfo(context: Context): WifiInfo? {
+    val cm = context.getSystemService(ConnectivityManager::class.java)
+    val network = cm?.activeNetwork
+    val capsInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        network?.let { cm.getNetworkCapabilities(it)?.transportInfo as? WifiInfo }
+    } else {
+        null
+    }
+    if (capsInfo != null) return capsInfo
+    val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+    return wifi.connectionInfo
+}
 
 private fun readWifiSnapshot(context: Context): WifiSnapshot {
     return runCatching {
         val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-        val activeInfo = readActiveWifiInfo(context)
-        val legacyInfo = runCatching { wifi.connectionInfo }.getOrNull()
-        val info = activeInfo ?: legacyInfo
-        val rssi = listOf(activeInfo?.rssi, legacyInfo?.rssi).firstOrNull { it != null && it in -120..0 }
-        val speed = listOf(activeInfo?.linkSpeed, legacyInfo?.linkSpeed).firstOrNull { it != null && it > 0 }
-        val frequency = listOf(activeInfo?.frequency, legacyInfo?.frequency).firstOrNull { it != null && it > 0 }
-        val bssid = normalizedWifiBssid(activeInfo?.bssid) ?: normalizedWifiBssid(legacyInfo?.bssid) ?: "未知"
-        val ssid = normalizeWifiSsid(activeInfo?.ssid ?: legacyInfo?.ssid)
-        val supplicantState = legacyInfo?.supplicantState?.name ?: if (info != null) "CONNECTED" else "UNKNOWN"
+        val info = currentWifiInfo(context)
+        val rssi = info?.rssi?.takeIf { it in -120..0 }
+        val speed = info?.linkSpeed?.takeIf { it > 0 }
+        val frequency = info?.frequency?.takeIf { it > 0 }
+        val bssid = normalizeWifiBssid(info?.bssid)
+        val ssid = normalizeWifiSsid(info?.ssid)
+        val supplicantState = info?.supplicantState?.name ?: "UNKNOWN"
         val candidate = runCatching {
             wifi.scanResults
                 .asSequence()
                 .filter { normalizeWifiSsid(it.SSID) == ssid && ssid != "未知" }
-                .filter { normalizedWifiBssid(it.BSSID)?.let { candidateBssid -> candidateBssid != bssid } == true }
+                .filter { normalizeWifiBssid(it.BSSID) != "未知" && normalizeWifiBssid(it.BSSID) != bssid }
                 .filter { it.level in -120..0 }
                 .maxByOrNull { it.level }
         }.getOrNull()
@@ -8905,23 +8908,22 @@ private fun readWifiSnapshot(context: Context): WifiSnapshot {
             bssid = bssid,
             ssid = ssid,
             supplicantState = supplicantState,
-            candidateBssid = normalizedWifiBssid(candidate?.BSSID),
+            candidateBssid = candidate?.BSSID?.let { normalizeWifiBssid(it) }?.takeIf { it != "未知" },
             candidateRssi = candidate?.level
         )
     }.getOrDefault(WifiSnapshot(null, null, null, "未知", "未知", "UNKNOWN", null, null))
 }
 
 private fun readGatewayAddress(context: Context): String {
-    fun cleanAddress(address: InetAddress?): String? = address?.hostAddress?.substringBefore('%')?.takeIf { it.isNotBlank() }
-    val linkGateway = runCatching {
+    val fromLinkProperties = runCatching {
         val cm = context.getSystemService(ConnectivityManager::class.java) ?: return@runCatching null
         val network = cm.activeNetwork ?: return@runCatching null
         val lp = cm.getLinkProperties(network) ?: return@runCatching null
-        val ipv4Default = lp.routes.firstOrNull { route -> route.isDefaultRoute && route.gateway is Inet4Address }?.gateway
-        val anyDefault = lp.routes.firstOrNull { route -> route.isDefaultRoute && route.gateway != null }?.gateway
-        cleanAddress(ipv4Default ?: anyDefault)
+        lp.routes.firstOrNull { route -> route.isDefaultRoute && route.gateway is Inet4Address }
+            ?.gateway
+            ?.hostAddress
     }.getOrNull()
-    if (!linkGateway.isNullOrBlank()) return linkGateway
+    if (!fromLinkProperties.isNullOrBlank()) return fromLinkProperties
     return runCatching {
         val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
         val gateway = wifi.dhcpInfo?.gateway ?: 0
@@ -8929,14 +8931,11 @@ private fun readGatewayAddress(context: Context): String {
     }.getOrDefault("192.168.1.1")
 }
 
-private suspend fun pingForRoamingResult(target: String, timeoutMs: Int): PingCommandResult {
+private suspend fun pingForRoaming(target: String, timeoutMs: Int): Int? {
     val resolved = resolvePingTarget(target, PingProtocolMode.AUTO)
-    if (resolved.error != null) return PingCommandResult(null, resolved.error)
-    return icmpPingResolved(resolved.address, timeoutMs, resolved.protocol)
+    if (resolved.error != null) return null
+    return icmpPingResolved(resolved.address, timeoutMs, resolved.protocol).latencyMs
 }
-
-private suspend fun pingForRoaming(target: String, timeoutMs: Int): Int? =
-    pingForRoamingResult(target, timeoutMs).latencyMs
 
 private fun roamingMaxSamples(mode: RoamingSampleMode): Int = when (mode) {
     RoamingSampleMode.ROAMING -> 2_400
@@ -9152,6 +9151,7 @@ private fun buildRoamingEvents(samples: List<RoamingSample>, targetMode: Roaming
     if (timeline.size < 2) return emptyList()
     data class Candidate(
         val oldStable: RoamingSample,
+        val previousBeforeFirstSeen: RoamingSample,
         val firstSeen: RoamingSample,
         val confirmed: RoamingSample,
         val eventType: String
@@ -9195,7 +9195,7 @@ private fun buildRoamingEvents(samples: List<RoamingSample>, targetMode: Roaming
         }
 
         val firstSeen = firstSeenNewIndex?.let { timeline.getOrNull(it) } ?: cur
-        if (pendingSeenCount >= 2 && oldStable.elapsedRealtimeNs < cur.elapsedRealtimeNs) {
+        if (pendingSeenCount >= ROAMING_EVENT_CONFIRM_SAMPLES && oldStable.elapsedRealtimeNs < cur.elapsedRealtimeNs) {
             val reconnected = unstableStartedAtMs?.let { cur.elapsedRealtimeMs - it >= 1_500L } == true
             val eventType = roamingEventType(oldStable, cur, reconnected)
             if (eventType.isBlank()) {
@@ -9206,7 +9206,8 @@ private fun buildRoamingEvents(samples: List<RoamingSample>, targetMode: Roaming
                 pendingSeenCount = 0
                 continue
             }
-            candidates += Candidate(oldStable, firstSeen, cur, eventType)
+            val previousBeforeFirstSeen = firstSeenNewIndex?.let { timeline.getOrNull((it - 1).coerceAtLeast(0)) } ?: oldStable
+            candidates += Candidate(oldStable, previousBeforeFirstSeen, firstSeen, cur, eventType)
             lastStableIndex = i
             unstableStartedAtMs = null
             firstSeenNewIndex = null
@@ -9227,11 +9228,16 @@ private fun buildRoamingEvents(samples: List<RoamingSample>, targetMode: Roaming
         val afterWindow = samples.filter { it.elapsedRealtimeMs in confirmed.elapsedRealtimeMs..(confirmed.elapsedRealtimeMs + 5_000L) }
         val maxLatency = metricWindow.mapNotNull { it.gatewayMs }.maxOrNull()
             ?: metricWindow.mapNotNull { it.externalMs }.maxOrNull()
-        val detectionMs = ((candidate.firstSeen.elapsedRealtimeNs - oldStable.elapsedRealtimeNs) / 1_000_000L).coerceAtLeast(0L)
-        val confirmationMs = ((confirmed.elapsedRealtimeNs - oldStable.elapsedRealtimeNs) / 1_000_000L).coerceAtLeast(0L)
+        // AP 发现/确认只按原始 Wi-Fi 快照间隔计算，避免把信号衰减窗口或 BSSID 空窗误写成“切换耗时”。
+        val detectionMs = ((candidate.firstSeen.elapsedRealtimeNs - candidate.previousBeforeFirstSeen.elapsedRealtimeNs) / 1_000_000L).coerceAtLeast(0L)
+        val confirmationMs = ((confirmed.elapsedRealtimeNs - candidate.firstSeen.elapsedRealtimeNs) / 1_000_000L).coerceAtLeast(0L)
+        val observableGapMs = ((candidate.firstSeen.elapsedRealtimeNs - oldStable.elapsedRealtimeNs) / 1_000_000L).coerceAtLeast(0L)
         val disruption = roamingDisruptionForWindow(samples, RoamingTargetMode.GATEWAY, metricWindowStartMs, metricWindowEndMs)
+        val gapText = observableGapMs.takeIf { it > detectionMs + 500L }
+            ?.let { "观测空窗约${roamingShortDurationText(it)}，不计入AP发现/确认。" }
         val analysisText = listOfNotNull(
             roamingWindowAnalysis(beforeWindow, afterWindow),
+            gapText,
             roamingSamplingWarning(samples, metricWindowStartMs, metricWindowEndMs)
         ).joinToString(" ")
         RoamingEventInfo(
@@ -9242,9 +9248,9 @@ private fun buildRoamingEvents(samples: List<RoamingSample>, targetMode: Roaming
             oldBand = roamingBandText(oldStable.frequencyMhz),
             newBand = roamingBandText(confirmed.frequencyMhz),
             detectionMs = detectionMs,
-            detectionText = "AP检测约${roamingShortDurationText(detectionMs)}",
+            detectionText = "AP发现≤${roamingShortDurationText(detectionMs)}",
             confirmationMs = confirmationMs,
-            confirmationText = "AP确认窗口约${roamingShortDurationText(confirmationMs)}",
+            confirmationText = "AP确认${roamingShortDurationText(confirmationMs)}",
             disruptionText = disruption.text,
             beforeRssi = oldStable.rssi,
             afterRssi = confirmed.rssi,
@@ -9956,9 +9962,7 @@ private fun RoamingToolPage(onBack: () -> Unit) {
                                 val wifiSnapshotInterval = sampleMode.wifiSnapshotMs.toLong()
                                 val gatewayInterval = sampleMode.gatewayProbeMs.toLong()
                                 val externalInterval = sampleMode.externalProbeMs.toLong()
-                                val requestedTimeout = timeoutMs.safeInt(sampleMode.recommendedTimeoutMs, 300, 10000)
-                                val minProbeInterval = min(gatewayInterval, externalInterval)
-                                val timeout = max(requestedTimeout, max((minProbeInterval * 2).toInt(), 500)).coerceIn(500, 10000)
+                                val timeout = timeoutMs.safeInt(1000, 300, 10000)
                                 val maxSamples = roamingMaxSamples(sampleMode)
                                 job = scope.launch {
                                     val roamingScope = this
@@ -9969,8 +9973,7 @@ private fun RoamingToolPage(onBack: () -> Unit) {
                                     fun probeState(tested: Boolean, latencyMs: Int?, failure: String?): RoamingProbeState = when {
                                         !tested -> RoamingProbeState.NOT_SCHEDULED
                                         latencyMs != null -> RoamingProbeState.SUCCESS
-                                        failure?.equals("超时", ignoreCase = true) == true || failure?.equals("timeout", ignoreCase = true) == true -> RoamingProbeState.TIMEOUT
-                                        failure?.contains("100% packet loss", ignoreCase = true) == true -> RoamingProbeState.TIMEOUT
+                                        failure == null || failure == "超时" || failure?.equals("timeout", ignoreCase = true) == true -> RoamingProbeState.TIMEOUT
                                         else -> RoamingProbeState.UNKNOWN
                                     }
                                     fun makeSample(
@@ -10062,10 +10065,9 @@ private fun RoamingToolPage(onBack: () -> Unit) {
                                             val sendNs = SystemClock.elapsedRealtimeNanos()
                                             val elapsedNow = SystemClock.elapsedRealtime()
                                             // 回退路径串行执行，上一轮未结束时不叠加新任务，也不把 skipped 当丢包。
-                                            val result = pingForRoamingResult(target, timeout)
-                                            val latency = result.latencyMs
+                                            val latency = pingForRoaming(target, timeout)
                                             val recvNs = SystemClock.elapsedRealtimeNanos()
-                                            addSample(makeSample(now, elapsedNow, recvNs, if (gatewayMode) latency else null, if (gatewayMode) null else latency, gatewayMode, !gatewayMode, if (gatewayMode) result.failure else null, if (!gatewayMode) result.failure else null, pingSendNs = sendNs, pingRecvNs = if (latency != null) recvNs else null, pingSeq = seq, pingTarget = target, pingTargetIntervalMs = intervalMs))
+                                            addSample(makeSample(now, elapsedNow, recvNs, if (gatewayMode) latency else null, if (gatewayMode) null else latency, gatewayMode, !gatewayMode, if (gatewayMode && latency == null) "超时" else null, if (!gatewayMode && latency == null) "超时" else null, pingSendNs = sendNs, pingRecvNs = if (latency != null) recvNs else null, pingSeq = seq, pingTarget = target, pingTargetIntervalMs = intervalMs))
                                             delay(intervalMs)
                                         }
                                     }
@@ -10171,9 +10173,6 @@ private fun RoamingLiveCard(
             MiniMetric("质量", quality.label, quality.color, Modifier.weight(1f))
         }
         ToolMonoLine("BSSID", latest?.let { "${it.bssid} · ${roamingBandText(it.frequencyMhz)}" } ?: "—")
-        if (latest?.bssid == "未知") {
-            Text("无法读取 BSSID：AP 切换记录会暂停。请确认定位权限、附近设备权限和系统定位开关已开启。", color = Orange, fontSize = 11.sp, lineHeight = 15.sp)
-        }
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
             MiniMetric("网关", latestGateway?.gatewayMs?.let { "${it}ms" } ?: "—", Blue, Modifier.weight(1f))
             MiniMetric("内网丢包", roamingLossPercentText(gatewayTotal, gatewayLoss), if (gatewayLoss > 0) ErrorRed else Muted, Modifier.weight(1f))
@@ -10200,7 +10199,7 @@ private fun RoamingLiveCard(
         if (!running && samples.isNotEmpty()) {
             RoamingSummaryCard(samples, events, stickyEvents, targetMode)
         }
-        Text("说明：普通 APP 无法读取驱动级 roam complete；AP确认窗口是 Android Wi-Fi 快照采样确认，断流耗时按网关 Ping timeout/loss 估算。", color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
+        Text("说明：普通 APP 无法读取驱动级 roam complete；AP发现/确认是 Android Wi-Fi 快照采样确认，断流耗时按网关 Ping timeout/loss 估算。", color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
     }
 }
 
@@ -10317,8 +10316,14 @@ private fun roamingEventForSwitchIndex(samples: List<RoamingSample>, switchIndex
     val beforeWindow = samples.filter { it.elapsedRealtimeMs in (oldStable.elapsedRealtimeMs - 5_000L)..oldStable.elapsedRealtimeMs }
     val afterWindow = samples.filter { it.elapsedRealtimeMs in newStable.elapsedRealtimeMs..(newStable.elapsedRealtimeMs + 5_000L) }
     val disruption = roamingDisruptionForWindow(samples, RoamingTargetMode.GATEWAY, metricWindowStartMs, metricWindowEndMs)
+    val previousBeforeNew = timeline.getOrNull((timelineIndex - 1).coerceAtLeast(0)) ?: oldStable
+    val detectionMs = ((newStable.elapsedRealtimeNs - previousBeforeNew.elapsedRealtimeNs) / 1_000_000L).coerceAtLeast(0L)
+    val observableGapMs = ((newStable.elapsedRealtimeNs - oldStable.elapsedRealtimeNs) / 1_000_000L).coerceAtLeast(0L)
+    val gapText = observableGapMs.takeIf { it > detectionMs + 500L }
+        ?.let { "观测空窗约${roamingShortDurationText(it)}，不计入AP发现。" }
     val analysisText = listOfNotNull(
         roamingWindowAnalysis(beforeWindow, afterWindow),
+        gapText,
         roamingSamplingWarning(samples, metricWindowStartMs, metricWindowEndMs)
     ).joinToString(" ")
     return RoamingEventInfo(
@@ -10328,10 +10333,10 @@ private fun roamingEventForSwitchIndex(samples: List<RoamingSample>, switchIndex
         newBssid = newStable.bssid,
         oldBand = roamingBandText(oldStable.frequencyMhz),
         newBand = roamingBandText(newStable.frequencyMhz),
-        detectionMs = (newStable.elapsedRealtimeMs - oldStable.elapsedRealtimeMs).coerceAtLeast(0L),
-        detectionText = "AP检测约${roamingShortDurationText(newStable.elapsedRealtimeMs - oldStable.elapsedRealtimeMs)}",
-        confirmationMs = ((newStable.elapsedRealtimeNs - oldStable.elapsedRealtimeNs) / 1_000_000L).coerceAtLeast(0L),
-        confirmationText = "AP确认窗口约${roamingShortDurationText((newStable.elapsedRealtimeNs - oldStable.elapsedRealtimeNs) / 1_000_000L)}",
+        detectionMs = detectionMs,
+        detectionText = "AP发现≤${roamingShortDurationText(detectionMs)}",
+        confirmationMs = 0L,
+        confirmationText = "AP确认—",
         disruptionText = disruption.text,
         beforeRssi = oldStable.rssi,
         afterRssi = newStable.rssi,
@@ -10340,6 +10345,80 @@ private fun roamingEventForSwitchIndex(samples: List<RoamingSample>, switchIndex
             ?: metricWindow.mapNotNull { it.externalMs }.maxOrNull(),
         analysisText = analysisText
     )
+}
+
+
+private fun roamingChartBoundsNs(plot: List<RoamingSample>, windowMs: Long = ROAMING_CHART_WINDOW_MS): Pair<Long, Long> {
+    val endNs = plot.maxOfOrNull { it.elapsedRealtimeNs } ?: return 0L to 1L
+    val startNs = (endNs - windowMs * 1_000_000L).coerceAtMost(endNs)
+    return startNs to endNs.coerceAtLeast(startNs + 1L)
+}
+
+private fun compactRoamingPingSamplesForRender(samples: List<RoamingSample>): List<Pair<Int, RoamingSample>> {
+    val latestNs = samples.maxOfOrNull { it.elapsedRealtimeNs } ?: return emptyList()
+    val startNs = latestNs - ROAMING_CHART_WINDOW_MS * 1_000_000L
+    val filtered = samples.mapIndexed { index, sample -> index to sample }
+        .asSequence()
+        .filter { (_, sample) -> sample.elapsedRealtimeNs >= startNs }
+        .filter { (_, sample) -> roamingIsEffectiveState(sample.gatewayState) || roamingIsEffectiveState(sample.externalState) }
+        .sortedBy { it.second.elapsedRealtimeNs }
+        .toList()
+    return downsampleForRender(filtered, 520)
+}
+
+private fun compactRoamingSignalSamplesForRender(samples: List<RoamingSample>): List<Pair<Int, RoamingSample>> {
+    val latestNs = samples.maxOfOrNull { it.elapsedRealtimeNs } ?: return emptyList()
+    val startNs = latestNs - ROAMING_CHART_WINDOW_MS * 1_000_000L
+    val bucketNs = ROAMING_SIGNAL_BUCKET_MS * 1_000_000L
+    val buckets = linkedMapOf<Long, Pair<Int, RoamingSample>>()
+    samples.mapIndexed { index, sample -> index to sample }
+        .asSequence()
+        .filter { (_, sample) -> sample.wifiTimeline && sample.rssi != null && sample.elapsedRealtimeNs >= startNs }
+        .sortedBy { it.second.elapsedRealtimeNs }
+        .forEach { pair ->
+            val bucket = ((pair.second.elapsedRealtimeNs - startNs).coerceAtLeast(0L)) / bucketNs
+            buckets[bucket] = pair
+        }
+    return downsampleForRender(buckets.values.toList(), 240)
+}
+
+private fun roamingTimeTicksNs(startNs: Long, endNs: Long): List<Long> {
+    val span = (endNs - startNs).coerceAtLeast(1L)
+    return (0..4).map { idx -> startNs + span * idx / 4L }
+}
+
+private fun roamingNearestTimeLabel(plot: List<RoamingSample>, tickNs: Long): String {
+    val nearest = plot.minByOrNull { abs(((it.elapsedRealtimeNs - tickNs) / 1_000_000L).toInt()) }
+    return roamingTimeLabel(nearest?.elapsedSec ?: 0)
+}
+
+private fun roamingRssiAxis(values: List<Int>): Pair<Int, Int> {
+    val clean = values.filter { it in -120..0 }.sorted()
+    if (clean.isEmpty()) return -90 to -30
+    val lowIdx = ((clean.size - 1) * 0.05f).roundToInt().coerceIn(0, clean.lastIndex)
+    val highIdx = ((clean.size - 1) * 0.95f).roundToInt().coerceIn(0, clean.lastIndex)
+    val low = clean[lowIdx]
+    val high = clean[highIdx].coerceAtLeast(low + 1)
+    val rawSpan = (high - low).coerceAtLeast(1)
+    var bottom = low - 6
+    var top = high + 6
+    if (top - bottom < 20) {
+        val center = (top + bottom) / 2f
+        bottom = (center - 10f).roundToInt()
+        top = (center + 10f).roundToInt()
+    }
+    if (top - bottom > 45) {
+        val center = (top + bottom) / 2f
+        bottom = (center - 22.5f).roundToInt()
+        top = (center + 22.5f).roundToInt()
+    }
+    bottom = bottom.coerceAtLeast(-95)
+    top = top.coerceAtMost(-10)
+    bottom = kotlin.math.floor(bottom / 5.0).toInt() * 5
+    top = kotlin.math.ceil(top / 5.0).toInt() * 5
+    if (top - bottom < 20) top = (bottom + 20).coerceAtMost(-10)
+    if (top <= bottom) return -90 to -30
+    return bottom to top
 }
 
 @Composable
@@ -10366,10 +10445,7 @@ private fun RoamingSwitchPopup(event: RoamingEventInfo) {
 @Composable
 private fun RoamingPingChartCard(samples: List<RoamingSample>) {
     var selectedIndex by remember { mutableStateOf<Int?>(null) }
-    val window = samples.mapIndexed { index, sample -> index to sample }
-        .sortedBy { it.second.elapsedRealtimeNs }
-        .takeLast(900)
-    val indexedPlot = downsampleForRender(window, 300)
+    val indexedPlot = compactRoamingPingSamplesForRender(samples)
     val plot = indexedPlot.map { it.second }
     val selectedSafeIndex = selectedIndex?.takeIf { samples.isNotEmpty() }?.coerceIn(0, samples.lastIndex)
     val selected = selectedSafeIndex?.let { samples.getOrNull(it) }
@@ -10393,11 +10469,7 @@ private fun RoamingPingChartCard(samples: List<RoamingSample>) {
 @Composable
 private fun RoamingSignalChartCard(samples: List<RoamingSample>, targetMode: RoamingTargetMode) {
     var selectedIndex by remember { mutableStateOf<Int?>(null) }
-    val window = samples.mapIndexed { index, sample -> index to sample }
-        .filter { it.second.wifiTimeline }
-        .sortedBy { it.second.elapsedRealtimeNs }
-        .takeLast(900)
-    val indexedPlot = downsampleForRender(window, 300)
+    val indexedPlot = compactRoamingSignalSamplesForRender(samples)
     val plot = indexedPlot.map { it.second }
     val selectedSafeIndex = selectedIndex?.takeIf { samples.isNotEmpty() }?.coerceIn(0, samples.lastIndex)
     val selected = selectedSafeIndex?.let { samples.getOrNull(it) }
@@ -10447,6 +10519,10 @@ private fun RoamingPingCanvas(plot: List<RoamingSample>, indexMap: List<Int>, on
         val w = (right - left).coerceAtLeast(1f)
         val h = (bottom - top).coerceAtLeast(1f)
         val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = AndroidColor.rgb(107, 114, 128); textSize = 27f }
+        val (startNs, endNs) = roamingChartBoundsNs(plot)
+        val spanNs = (endNs - startNs).coerceAtLeast(1L)
+        fun xOfNs(ns: Long): Float = left + ((ns - startNs).toDouble() / spanNs.toDouble()).toFloat().coerceIn(0f, 1f) * w
+        fun x(i: Int) = xOfNs(plot[i].elapsedRealtimeNs)
         val values = plot.flatMap { listOfNotNull(it.gatewayMs, it.externalMs) }
         val axisMax = roamingPingAxisMax(values)
         val yTicks = listOf(0, axisMax / 4, axisMax / 2, axisMax * 3 / 4, axisMax).distinct()
@@ -10457,19 +10533,14 @@ private fun RoamingPingCanvas(plot: List<RoamingSample>, indexMap: List<Int>, on
             drawContext.canvas.nativeCanvas.drawText(tick.toString(), left - 10f, yy + 9f, textPaint)
             textPaint.textAlign = Paint.Align.LEFT
         }
-        val xTicks = roamingXTicks(plot.size)
-        xTicks.forEach { idx ->
-            val xx = left + (idx / (plot.size - 1).coerceAtLeast(1).toFloat()) * w
+        roamingTimeTicksNs(startNs, endNs).forEach { tickNs ->
+            val xx = xOfNs(tickNs)
             drawLine(Border.copy(alpha = 0.45f), Offset(xx, top), Offset(xx, bottom), strokeWidth = 1f)
-            val label = roamingTimeLabel(plot[idx].elapsedSec)
+            val label = roamingNearestTimeLabel(plot, tickNs)
             val labelWidth = textPaint.measureText(label)
             val tx = (xx - labelWidth / 2f).coerceIn(left, right - labelWidth)
             drawContext.canvas.nativeCanvas.drawText(label, tx, size.height - 18f, textPaint)
         }
-        val firstNs = plot.first().elapsedRealtimeNs
-        val lastNs = plot.last().elapsedRealtimeNs
-        val spanNs = (lastNs - firstNs).coerceAtLeast(1L)
-        fun x(i: Int): Float = left + ((plot[i].elapsedRealtimeNs - firstNs).toFloat() / spanNs.toFloat()) * w
         fun y(v: Int?) = bottom - ((v ?: 0).coerceIn(0, axisMax) / axisMax.toFloat()) * h
         fun drawLatencyLine(valuesOf: (RoamingSample) -> Int?, stateOf: (RoamingSample) -> RoamingProbeState, color: Color) {
             val successPoints = plot.mapIndexedNotNull { i, sample ->
@@ -10477,19 +10548,19 @@ private fun RoamingPingCanvas(plot: List<RoamingSample>, indexMap: List<Int>, on
             }
             successPoints.zipWithNext().forEach { (a, b) ->
                 val hasLossBetween = plot.subList(a.first + 1, b.first).any { roamingIsLossState(stateOf(it)) }
-                val segmentPath = Path().apply {
-                    moveTo(x(a.first), y(a.second))
-                    lineTo(x(b.first), y(b.second))
-                }
-                drawPath(
-                    segmentPath,
-                    color = if (hasLossBetween) Orange else color,
-                    style = Stroke(
-                        width = if (hasLossBetween) 2.5f else 3f,
-                        cap = StrokeCap.Round,
-                        pathEffect = if (hasLossBetween) PathEffect.dashPathEffect(floatArrayOf(8f, 8f), 0f) else null
+                if (hasLossBetween) {
+                    val gap = Path().apply {
+                        moveTo(x(a.first), y(a.second))
+                        lineTo(x(b.first), y(b.second))
+                    }
+                    drawPath(
+                        gap,
+                        color = Orange.copy(alpha = 0.72f),
+                        style = Stroke(width = 2.3f, cap = StrokeCap.Round, pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 8f), 0f))
                     )
-                )
+                } else {
+                    drawLine(color, Offset(x(a.first), y(a.second)), Offset(x(b.first), y(b.second)), strokeWidth = 3f, cap = StrokeCap.Round)
+                }
             }
         }
         drawLatencyLine({ it.gatewayMs }, { it.gatewayState }, Blue)
@@ -10497,7 +10568,7 @@ private fun RoamingPingCanvas(plot: List<RoamingSample>, indexMap: List<Int>, on
         plot.forEachIndexed { i, s ->
             if (roamingGatewayLoss(s) || roamingExternalLoss(s)) {
                 val xx = x(i)
-                drawLine(ErrorRed, Offset(xx, bottom), Offset(xx, bottom - 14f), strokeWidth = 2.4f, cap = StrokeCap.Round)
+                drawLine(ErrorRed, Offset(xx, bottom), Offset(xx, bottom - 16f), strokeWidth = 3f, cap = StrokeCap.Round)
             }
         }
     }
@@ -10530,22 +10601,16 @@ private fun RoamingSignalCanvas(plot: List<RoamingSample>, indexMap: List<Int>, 
         val w = (right - left).coerceAtLeast(1f)
         val h = (bottom - top).coerceAtLeast(1f)
         val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = AndroidColor.rgb(107, 114, 128); textSize = 27f }
+        val (startNs, endNs) = roamingChartBoundsNs(plot)
+        val spanNs = (endNs - startNs).coerceAtLeast(1L)
+        fun xOfNs(ns: Long): Float = left + ((ns - startNs).toDouble() / spanNs.toDouble()).toFloat().coerceIn(0f, 1f) * w
+        fun x(i: Int) = xOfNs(plot[i].elapsedRealtimeNs)
         val rssiValues = plot.mapNotNull { it.rssi }.filter { it in -120..0 }
-        val minRssi = rssiValues.minOrNull() ?: -70
-        val maxRssi = rssiValues.maxOrNull() ?: -50
-        val centerRssi = (minRssi + maxRssi) / 2f
-        val spanRssi = (maxRssi - minRssi).coerceAtLeast(1)
-        val halfRange = max(8f, spanRssi * 0.8f)
-        var axisTop = (centerRssi + halfRange).coerceAtMost(-10f)
-        var axisBottom = (centerRssi - halfRange).coerceAtLeast(-95f)
-        if (axisTop - axisBottom < 16f) {
-            val mid = (axisTop + axisBottom) / 2f
-            axisTop = (mid + 8f).coerceAtMost(-10f)
-            axisBottom = (mid - 8f).coerceAtLeast(-95f)
-        }
-        if (axisTop <= axisBottom) { axisTop = -30f; axisBottom = -90f }
+        val (axisBottomInt, axisTopInt) = roamingRssiAxis(rssiValues)
+        val axisBottom = axisBottomInt.toFloat()
+        val axisTop = axisTopInt.toFloat()
         fun yRssi(v: Int?): Float {
-            val value = (v ?: axisBottom.toInt()).coerceIn(axisBottom.roundToInt(), axisTop.roundToInt())
+            val value = (v ?: axisBottomInt).coerceIn(axisBottomInt, axisTopInt)
             return bottom - ((value - axisBottom) / (axisTop - axisBottom).coerceAtLeast(1f)) * h
         }
         val yTicks = (0..4).map { idx -> (axisBottom + (axisTop - axisBottom) * idx / 4f).roundToInt() }.distinct()
@@ -10556,19 +10621,14 @@ private fun RoamingSignalCanvas(plot: List<RoamingSample>, indexMap: List<Int>, 
             drawContext.canvas.nativeCanvas.drawText(tick.toString(), left - 10f, yy + 9f, textPaint)
             textPaint.textAlign = Paint.Align.LEFT
         }
-        val xTicks = roamingXTicks(plot.size)
-        xTicks.forEach { idx ->
-            val xx = left + (idx / (plot.size - 1).coerceAtLeast(1).toFloat()) * w
+        roamingTimeTicksNs(startNs, endNs).forEach { tickNs ->
+            val xx = xOfNs(tickNs)
             drawLine(Border.copy(alpha = 0.45f), Offset(xx, top), Offset(xx, bottom), strokeWidth = 1f)
-            val label = roamingTimeLabel(plot[idx].elapsedSec)
+            val label = roamingNearestTimeLabel(plot, tickNs)
             val labelWidth = textPaint.measureText(label)
             val tx = (xx - labelWidth / 2f).coerceIn(left, right - labelWidth)
             drawContext.canvas.nativeCanvas.drawText(label, tx, size.height - 18f, textPaint)
         }
-        val firstNs = plot.first().elapsedRealtimeNs
-        val lastNs = plot.last().elapsedRealtimeNs
-        val spanNs = (lastNs - firstNs).coerceAtLeast(1L)
-        fun x(i: Int): Float = left + ((plot[i].elapsedRealtimeNs - firstNs).toFloat() / spanNs.toFloat()) * w
         val path = Path()
         var signalStarted = false
         plot.forEachIndexed { i, s ->
@@ -10592,7 +10652,7 @@ private fun RoamingSignalCanvas(plot: List<RoamingSample>, indexMap: List<Int>, 
                 }
                 drawPath(
                     marker,
-                    color = Orange.copy(alpha = 0.26f),
+                    color = Orange.copy(alpha = 0.30f),
                     style = Stroke(
                         width = 1.5f,
                         cap = StrokeCap.Round,
@@ -10608,7 +10668,7 @@ private fun RoamingSignalCanvas(plot: List<RoamingSample>, indexMap: List<Int>, 
             if (afterRssi != null && roamingChanged) {
                 val xx = x(i + 1)
                 val endY = yRssi(afterRssi)
-                drawCircle(Orange.copy(alpha = 0.68f), radius = 3f, center = Offset(xx, endY))
+                drawCircle(Orange.copy(alpha = 0.72f), radius = 3f, center = Offset(xx, endY))
             }
         }
     }
@@ -10708,7 +10768,7 @@ private fun RoamingSummaryCard(samples: List<RoamingSample>, events: List<Roamin
         val quality = computeRoamingQuality(samples, events, stickyEvents, targetMode)
         Text("漫游质量：${quality.label} · ${quality.summary}", color = quality.color, fontWeight = FontWeight.Bold, fontSize = 11.sp, lineHeight = 15.sp)
         Text("丢包：内网${roamingLossPercentText(gwTotal, gwLoss)} / 外网${roamingLossPercentText(extTotal, extLoss)}", color = if (gwLoss + extLoss > 0) ErrorRed else Muted, fontWeight = FontWeight.Bold, fontSize = 11.sp)
-        Text("漫游事件：${events.size}次 · 最长AP确认${events.maxByOrNull { it.confirmationMs }?.confirmationText?.removePrefix("AP确认窗口约") ?: "—"} · 断流连丢${events.sumOf { it.lossCount }}", color = if (events.isEmpty()) Muted else Orange, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+        Text("漫游事件：${events.size}次 · 最长AP确认${events.maxByOrNull { it.confirmationMs }?.confirmationText?.removePrefix("AP确认") ?: "—"} · 断流连丢${events.sumOf { it.lossCount }}", color = if (events.isEmpty()) Muted else Orange, fontWeight = FontWeight.Bold, fontSize = 11.sp)
         Text("粘连AP/频段：${if (stickyEvents.isEmpty()) "未发现明显粘连" else "疑似${stickyEvents.size}段 · 最长${stickyEvents.maxByOrNull { it.durationText.removeSuffix("s").toDoubleOrNull() ?: 0.0 }?.durationText ?: "—"}"}", color = if (stickyEvents.isEmpty()) Muted else Orange, fontWeight = FontWeight.Bold, fontSize = 11.sp)
     }
 }
