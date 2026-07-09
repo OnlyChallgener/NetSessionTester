@@ -9617,8 +9617,8 @@ private fun RoamingToolPage(onBack: () -> Unit) {
                                                     protocol = resolved.protocol,
                                                     intervalMs = pingInterval,
                                                     maxCount = 1_000_000
-                                                ) { latency, _ ->
-                                                    update(latency, System.currentTimeMillis())
+                                                ) { event ->
+                                                    update(event.latencyMs, event.timeEpochMs)
                                                 }
                                                 if (!currentCoroutineContext().isActive) break
                                                 if (count == 0) {
