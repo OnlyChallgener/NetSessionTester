@@ -9969,7 +9969,7 @@ private fun RoamingToolPage(onBack: () -> Unit) {
                             } else {
                                 requestWifiInfoPermission(startAfterGrant = true)
                             }
-                        }                        },
+                        },
                         modifier = Modifier.weight(1.45f).height(46.dp),
                         shape = RoundedCornerShape(18.dp)
                     ) { Text(if (running) "停止测试" else "开始测试", fontWeight = FontWeight.ExtraBold) }
