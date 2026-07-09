@@ -30,9 +30,9 @@
 2. 频段显示应按 frequency 映射为 2.4G、5G、6G、未知；事件详情应尽量显示 `oldBssid · oldBand → newBssid · newBand`。
 3. 模式名称应显示稳定、标准、极速；说明文案应分别为“长时间观察，结果更稳”“日常推荐，兼顾精度和稳定”“高频捕捉切换断流，短时测试”。
 4. 模式卡片/超时区域仍显示自动匹配的 Ping 超时时间：稳定 1000ms、标准 700ms、极速 500ms，不显示底层网关/外网探测间隔。
-5. Wi-Fi 快照间隔应为稳定 100ms、标准 50ms、极速 25ms；网关 Ping 间隔应为稳定 500ms、标准 300ms、极速 200ms；外网辅助 Ping 间隔应为稳定 1000ms、标准 1000ms、极速 500ms。
+5. Wi-Fi 快照间隔应为稳定 200ms、标准 100ms、极速 25ms；网关 Ping 间隔应为稳定 500ms、标准 300ms、极速 200ms；外网辅助 Ping 间隔应为稳定 1000ms、标准 1000ms、极速 500ms。
 6. 极速 25ms 仅表示 Wi-Fi 快照目标调度间隔，实际精度会受 Android 调度、WiFiInfo 缓存和设备负载影响，不应承诺真实 25ms 级确认精度。
-7. 高频采样下 UI 应保持节流刷新，不应随 25/50/100ms Wi-Fi 快照或 200/300/500ms 网关 Ping 全页面高频刷新；图表最多绘制抽稀后的 300 个点，不应明显卡顿。
+7. 高频采样下 UI 应保持节流刷新，不应随 25/100/200ms Wi-Fi 快照或 200/300/500ms 网关 Ping 全页面高频刷新；图表最多绘制抽稀后的 300 个点，不应明显卡顿。
 8. 事件详情应显示“AP确认窗口约xms / 断流未检测到或断流<Ping采样间隔或断流约x.xs”，不再出现“时长约x秒”，也不得写成真实无线层漫游耗时。
 9. 极速模式下单个网关 timeout/loss 可显示 `断流<200ms`；连续多个 timeout/loss 可显示 `断流约400ms`、`断流约600ms` 等估算值。
 10. 未发生 Ping timeout/loss 的漫游事件，应显示“断流未检测到”，即使 AP确认窗口较长也不应误报真实断流。
@@ -49,6 +49,11 @@
 21. `断流约600ms` 时，“连丢”数量应与当前网关 Ping 间隔大致匹配，例如极速 200ms 下约 3 个左右；不应再出现 `断流约503ms · 丢包11` 这类口径冲突。
 22. 多次 AP 往返切换时，后一条事件不应重复吃到上一条事件的 timeout run；从弱信号切回好信号且无连续网关 timeout 时，不应显示 6s 级断流。
 23. 流式 ICMP Ping 退出或被系统调度打断时，不应把剩余未输出的 maxCount 样本回填为超时；只有真实 seq 跳变才可推断丢包。
+24. Wi-Fi 原始样本需包含 BSSID、SSID、RSSI、frequency、linkSpeed、supplicantState、elapsedRealtimeNs；AP检测和 AP确认窗口必须来自这些 Wi-Fi 快照时间戳，不得由 Ping timeout 反推。
+25. Ping 原始样本需包含 sendNs、recvNs、seq、target、rtt/result；只有 TIMEOUT 计入丢包，ERROR、SKIPPED_BUSY、NOT_SCHEDULED、Unknown 不计入丢包率，也不画红点。
+26. 业务断流应使用事件前 1500ms 到后 3000ms 内包含 TIMEOUT 的最大 OK→OK 间隔；连续快速 AP 切换时，相邻事件窗口不得重复统计同一段 timeout。
+27. 延迟趋势基线应使用最近 10 个 OK 网关 Ping 的中位数；如果 Wi-Fi 或 Ping 实际最大采样间隔超过目标 3 倍，应显示采样抖动偏大的可信度提示。
+28. Ping 图、RSSI 图必须按 elapsedRealtimeNs 升序绘制；图表虚线连接、抽稀、平滑和动态 Y 轴不得反向影响事件、断流、丢包或评分统计。
 
 
 ## 文档清理验证

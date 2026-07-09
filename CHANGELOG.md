@@ -14,9 +14,13 @@
 - 粘连判断增加频段维度：长期停留 2.4G 且弱信号、低速率、Ping 抖动或丢包时提示“疑似粘连频段”；无可靠扫描结果时不强行判断附近一定有更优 AP。
 - 说明准确性边界：未 root Android 普通 APP 无法读取驱动级 roam complete 事件，AP确认窗口只表示 Android Wi-Fi 快照采样确认。
 - 漫游测试三种模式调整为“稳定 / 标准 / 极速”：稳定适合长时间观察，标准日常推荐，极速用于短时高频捕捉切换断流。
-- 底层采样调度拆分为 Wi-Fi 快照与 Ping：Wi-Fi 快照稳定 100ms / 标准 50ms / 极速 25ms，用于 AP确认窗口；网关 Ping 稳定 500ms / 标准 300ms / 极速 200ms，用于业务断流、内网丢包、最高延迟和抖动；外网辅助 Ping 稳定 1000ms / 标准 1000ms / 极速 500ms。
+- 底层采样调度拆分为 Wi-Fi 快照与 Ping：Wi-Fi 快照稳定 200ms / 标准 100ms / 极速 25ms，用于 AP检测与 AP确认窗口；网关 Ping 稳定 500ms / 标准 300ms / 极速 200ms，用于业务断流、内网丢包、最高延迟和抖动；外网辅助 Ping 稳定 1000ms / 标准 1000ms / 极速 500ms。
 - 三种模式自动 Ping 超时调整为稳定 1000ms / 标准 700ms / 极速 500ms；自动/自定义超时和恢复自动逻辑保持不变。
 - 网关和外网分开调度，AP确认窗口只基于 Wi-Fi 快照时间线；断流耗时继续以网关业务探测为主，外网仅辅助观察公网链路波动。
+- Wi-Fi 快照与 Ping 样本统一使用 elapsedRealtime 原始时间戳：Wi-Fi 样本记录 BSSID、SSID、RSSI、frequency、linkSpeed、supplicantState 与 elapsedRealtimeNs；Ping 样本记录 sendNs、recvNs、seq、target、rtt/result，图表聚合和平滑不参与算法判定。
+- AP 切换判定改为基于 Wi-Fi 快照状态机：首次发现新 BSSID/频段输出 AP检测时间，连续读到新 BSSID/频段后输出 AP确认窗口；确认前回到旧 BSSID 会取消疑似事件，不使用 Ping timeout 反推 AP 切换时间。
+- 业务断流改为基于网关 Ping OK/TIMEOUT 原始序列：事件前 1500ms 到后 3000ms 内取包含 TIMEOUT 的最大 OK→OK 间隔，连续 TIMEOUT 计为连丢；相邻 AP 事件会裁剪窗口，避免同一段 timeout 被重复统计。
+- 延迟基线使用最近 10 个 OK 网关 Ping 的中位数；记录 Wi-Fi/Ping 实际采样间隔，若最大间隔超过目标 3 倍，会提示“采样抖动偏大，切换时间可能偏大”。
 - 高频探测优先使用流式 ICMP Ping，避免反复创建 ping 进程；回退单次 Ping 时串行执行，上一轮未完成不会新增任务或计为丢包。
 - 高频采集与 UI 刷新分离，页面仍按节流批量提交，图表最多渲染抽稀后的 300 个点，降低重组和绘制压力。
 - 修复高频分离采样下 `null` 被误渲染成 Ping 图断点的问题：网关/外网分别记录 Success、Timeout、NotScheduled、BusySkipped、Canceled、Unknown 状态。
