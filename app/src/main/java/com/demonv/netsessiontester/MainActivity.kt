@@ -256,6 +256,12 @@ private enum class ChartMode(val label: String) {
     PEAK("峰值/最高值")
 }
 
+private enum class SessionProtocolView(val label: String) {
+    IPV4("IPv4"),
+    IPV6("IPv6"),
+    COMPARE("对比")
+}
+
 private enum class FinishReason(val label: String, val saveHistory: Boolean) {
     Completed("测试完成", true),
     FailureLimit("失败上限", true),
@@ -5352,15 +5358,14 @@ private fun TestPage(
         isAdding -> "● 运行中"
         else -> status
     }
-    val defaultCards = listOf("control", "release", "ping", "ipv4", "ipv6", "diagnosis", "logs")
-    var testCardOrder by remember { mutableStateOf(loadCardOrder(context.applicationContext, "test_card_order_v2", defaultCards)) }
+    val defaultCards = listOf("control", "release", "ping", "sessions", "diagnosis", "logs")
+    var testCardOrder by remember { mutableStateOf(loadCardOrder(context.applicationContext, "test_card_order_v3", defaultCards)) }
     val visibleIds = remember(releaseUi.visible, releaseBusy, showIpv4, showIpv6) {
         buildList {
             add("control")
             if (releaseUi.visible || releaseBusy) add("release")
             add("ping")
-            if (showIpv4) add("ipv4")
-            if (showIpv6) add("ipv6")
+            if (showIpv4 || showIpv6) add("sessions")
             add("diagnosis")
             add("logs")
         }
@@ -5373,7 +5378,7 @@ private fun TestPage(
     fun updateTestOrder(nextVisible: List<String>) {
         val merged = (nextVisible + testCardOrder.filterNot { it in nextVisible } + defaultCards.filterNot { it in nextVisible || it in testCardOrder }).distinct()
         testCardOrder = merged
-        saveCardOrder(context.applicationContext, "test_card_order_v2", merged)
+        saveCardOrder(context.applicationContext, "test_card_order_v3", merged)
     }
 
     LazyColumn(
@@ -5436,8 +5441,17 @@ private fun TestPage(
                         onClear = onClearPing,
                         onLog = onShowPingLog
                     )
-                    "ipv4" -> SessionStatsCard("IPv4 会话", ipv4Stats, maskPrivacy, ipv4ChartPoints, chartMode, onChartModeChange)
-                    "ipv6" -> SessionStatsCard("IPv6 会话", ipv6Stats, maskPrivacy, ipv6ChartPoints, chartMode, onChartModeChange)
+                    "sessions" -> CombinedSessionStatsCard(
+                        ipv4Stats = ipv4Stats,
+                        ipv6Stats = ipv6Stats,
+                        maskPrivacy = maskPrivacy,
+                        ipv4Points = ipv4ChartPoints,
+                        ipv6Points = ipv6ChartPoints,
+                        showIpv4 = showIpv4,
+                        showIpv6 = showIpv6,
+                        chartMode = chartMode,
+                        onChartModeChange = onChartModeChange
+                    )
                     "diagnosis" -> DiagnosisAdviceInlineCard(mode, ipv4Stats, ipv6Stats)
                     "logs" -> RecentLogCard(logs, maskPrivacy, onMoreLogs)
                 }
@@ -6771,6 +6785,517 @@ private fun ModeSelector(mode: TestMode, onModeChange: (TestMode) -> Unit) {
                 Text(item.label, color = if (selected) Blue else Muted, fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium, fontSize = 13.sp)
             }
         }
+    }
+}
+
+
+private data class SessionChartSeries(
+    val label: String,
+    val color: Color,
+    val points: List<ChartPoint>
+)
+
+private enum class SessionChartStage(val label: String) {
+    GROWTH("增长"),
+    CONFIRM("平台确认"),
+    RESULT("结果")
+}
+
+private data class SessionStageRange(
+    val startSec: Int,
+    val endSec: Int,
+    val stage: SessionChartStage
+)
+
+private fun sessionStageForPhase(phase: String): SessionChartStage = when {
+    phase.contains("确认") || phase.contains("无增长") -> SessionChartStage.CONFIRM
+    phase.contains("完成") ||
+        phase.contains("上限") ||
+        phase.contains("失败") ||
+        phase.contains("停止") ||
+        phase.contains("释放") ||
+        phase.contains("中断") -> SessionChartStage.RESULT
+    else -> SessionChartStage.GROWTH
+}
+
+private fun buildSessionStageRanges(points: List<ChartPoint>, minX: Int, maxX: Int): List<SessionStageRange> {
+    if (points.isEmpty() || maxX <= minX) return emptyList()
+    val ordered = points.sortedBy { it.elapsedSec }
+    val result = mutableListOf<SessionStageRange>()
+    var currentStage = sessionStageForPhase(ordered.first().phase)
+    var rangeStart = minX
+    ordered.drop(1).forEach { point ->
+        val nextStage = sessionStageForPhase(point.phase)
+        if (nextStage != currentStage) {
+            result += SessionStageRange(rangeStart, point.elapsedSec.coerceAtLeast(rangeStart), currentStage)
+            currentStage = nextStage
+            rangeStart = point.elapsedSec
+        }
+    }
+    result += SessionStageRange(rangeStart, maxX, currentStage)
+    return result
+}
+
+private fun normalizeSessionPoints(points: List<ChartPoint>): List<ChartPoint> {
+    val sorted = points.sortedBy { it.elapsedSec }
+    val first = sorted.firstOrNull()?.elapsedSec ?: return emptyList()
+    return sorted.map { it.copy(elapsedSec = (it.elapsedSec - first).coerceAtLeast(0)) }
+}
+
+private fun sessionPeakValue(stats: ProtocolStats, points: List<ChartPoint>): Int =
+    listOf(
+        stats.activeSessions,
+        stats.maxStableSessions,
+        stats.totalSuccess,
+        points.maxOfOrNull { it.active } ?: 0
+    ).maxOrNull() ?: 0
+
+private fun sessionStableValue(stats: ProtocolStats, points: List<ChartPoint>): Int {
+    val positive = points.sortedBy { it.elapsedSec }.filter { it.active > 0 }
+    if (positive.isEmpty()) return stats.activeSessions.coerceAtLeast(0)
+    val peakIndex = positive.indices.maxByOrNull { positive[it].active } ?: positive.lastIndex
+    val afterPeak = positive.drop(peakIndex)
+    val tailWindow = afterPeak.takeLast(10).ifEmpty { positive.takeLast(10) }
+    return tailWindow.minOfOrNull { it.active } ?: positive.last().active
+}
+
+private fun sessionRetentionPercent(stats: ProtocolStats, points: List<ChartPoint>): Float {
+    val peak = sessionPeakValue(stats, points)
+    if (peak <= 0) return 0f
+    return (sessionStableValue(stats, points).toFloat() * 100f / peak.toFloat()).coerceIn(0f, 100f)
+}
+
+@Composable
+private fun SessionProtocolSelector(
+    selected: SessionProtocolView,
+    available: List<SessionProtocolView>,
+    onSelected: (SessionProtocolView) -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(ShapeM)
+            .background(Color(0xFFF8FAFC), ShapeM)
+            .padding(3.dp),
+        horizontalArrangement = Arrangement.spacedBy(3.dp)
+    ) {
+        available.forEach { item ->
+            val isSelected = selected == item
+            val interactionSource = remember(item) { MutableInteractionSource() }
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .clip(ShapeM)
+                    .background(if (isSelected) Color.White else Color.Transparent, ShapeM)
+                    .clickable(
+                        interactionSource = interactionSource,
+                        indication = null,
+                        onClick = { onSelected(item) }
+                    )
+                    .padding(vertical = 9.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    item.label,
+                    color = when {
+                        !isSelected -> Muted
+                        item == SessionProtocolView.IPV6 -> Purple
+                        else -> Blue
+                    },
+                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                    fontSize = 12.sp
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun CombinedSessionStatsCard(
+    ipv4Stats: ProtocolStats,
+    ipv6Stats: ProtocolStats,
+    maskPrivacy: Boolean,
+    ipv4Points: List<ChartPoint>,
+    ipv6Points: List<ChartPoint>,
+    showIpv4: Boolean,
+    showIpv6: Boolean,
+    chartMode: ChartMode,
+    onChartModeChange: (ChartMode) -> Unit
+) {
+    val availableViews = remember(showIpv4, showIpv6) {
+        buildList {
+            if (showIpv4) add(SessionProtocolView.IPV4)
+            if (showIpv6) add(SessionProtocolView.IPV6)
+            if (showIpv4 && showIpv6) add(SessionProtocolView.COMPARE)
+        }
+    }
+    var selectedView by rememberSaveable(showIpv4, showIpv6) {
+        mutableStateOf(
+            when {
+                showIpv4 -> SessionProtocolView.IPV4
+                showIpv6 -> SessionProtocolView.IPV6
+                else -> SessionProtocolView.IPV4
+            }
+        )
+    }
+    LaunchedEffect(availableViews) {
+        if (selectedView !in availableViews && availableViews.isNotEmpty()) selectedView = availableViews.first()
+    }
+
+    val selectedStats = if (selectedView == SessionProtocolView.IPV6) ipv6Stats else ipv4Stats
+    val selectedRawPoints = if (selectedView == SessionProtocolView.IPV6) ipv6Points else ipv4Points
+    val selectedPoints = remember(selectedRawPoints, selectedView) { normalizeSessionPoints(selectedRawPoints) }
+    val compareSeries = remember(ipv4Points, ipv6Points) {
+        buildList {
+            if (ipv4Points.isNotEmpty()) add(SessionChartSeries("IPv4", Blue, ipv4Points.sortedBy { it.elapsedSec }))
+            if (ipv6Points.isNotEmpty()) add(SessionChartSeries("IPv6", Purple, ipv6Points.sortedBy { it.elapsedSec }))
+        }
+    }
+
+    SoftCard {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            SectionTitle("connection_tree", "IPv4 / IPv6 会话", Blue)
+            Spacer(Modifier.weight(1f))
+            val phaseText = when (selectedView) {
+                SessionProtocolView.IPV4 -> ipv4Stats.phase
+                SessionProtocolView.IPV6 -> ipv6Stats.phase
+                SessionProtocolView.COMPARE -> when {
+                    ipv6Stats.totalAttempts > 0 -> ipv6Stats.phase
+                    else -> ipv4Stats.phase
+                }
+            }
+            Text(phaseText, color = Blue, fontWeight = FontWeight.Bold, maxLines = 1, fontSize = 12.sp)
+        }
+
+        if (availableViews.size > 1) {
+            SessionProtocolSelector(selectedView, availableViews, onSelected = { selectedView = it })
+        }
+
+        if (selectedView == SessionProtocolView.COMPARE) {
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                MetricTile("IPv4活动", ipv4Stats.activeSessions.toString(), Blue, Modifier.weight(1f))
+                MetricTile("IPv4失败", ipv4Stats.totalFailure.toString(), ErrorRed, Modifier.weight(1f))
+                MetricTile("IPv6活动", ipv6Stats.activeSessions.toString(), Purple, Modifier.weight(1f))
+                MetricTile("IPv6失败", ipv6Stats.totalFailure.toString(), ErrorRed, Modifier.weight(1f))
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                MetricTile("总尝试", (ipv4Stats.totalAttempts + ipv6Stats.totalAttempts).toString(), Navy, Modifier.weight(1f))
+                MetricTile("目标CPS", "${maxOf(ipv4Stats.lastAdded, ipv6Stats.lastAdded)}/s", Blue, Modifier.weight(1f))
+                MetricTile(
+                    "实际CPS",
+                    "${if (ipv6Stats.totalAttempts > 0) ipv6Stats.cps else ipv4Stats.cps}/s",
+                    Blue,
+                    Modifier.weight(1f)
+                )
+                MetricTile(
+                    "最高峰值",
+                    maxOf(sessionPeakValue(ipv4Stats, ipv4Points), sessionPeakValue(ipv6Stats, ipv6Points)).toString(),
+                    Green,
+                    Modifier.weight(1f)
+                )
+            }
+            val addressText = buildList {
+                if (ipv4Stats.resolvedAddresses.isNotEmpty()) add("IPv4 ${displayIpList(ipv4Stats.resolvedAddresses, maskPrivacy)}")
+                if (ipv6Stats.resolvedAddresses.isNotEmpty()) add("IPv6 ${displayIpList(ipv6Stats.resolvedAddresses, maskPrivacy)}")
+            }.joinToString("  ")
+            if (addressText.isNotBlank()) {
+                Text("地址：$addressText", maxLines = 1, overflow = TextOverflow.Ellipsis, color = Muted, fontSize = 11.sp)
+            }
+        } else {
+            val peak = sessionPeakValue(selectedStats, selectedRawPoints)
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                MetricTile("活动", selectedStats.activeSessions.toString(), Blue, Modifier.weight(1f))
+                MetricTile("峰值", if (peak > 0) peak.toString() else "—", Green, Modifier.weight(1f))
+                MetricTile("失败", selectedStats.totalFailure.toString(), ErrorRed, Modifier.weight(1f))
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                MetricTile("总计", selectedStats.totalAttempts.toString(), Navy, Modifier.weight(1f))
+                MetricTile("目标CPS", "${selectedStats.lastAdded}/s", Blue, Modifier.weight(1f))
+                MetricTile(
+                    if (selectedStats.activeSessions == 0 && selectedStats.totalAttempts > 0) "平均CPS" else "实际CPS",
+                    "${selectedStats.cps}/s",
+                    Blue,
+                    Modifier.weight(1f)
+                )
+            }
+            if (selectedStats.resolvedAddresses.isNotEmpty()) {
+                Text(
+                    "地址：${displayIpList(selectedStats.resolvedAddresses, maskPrivacy)}",
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    color = Muted,
+                    fontSize = 11.sp
+                )
+            }
+        }
+
+        ChartModeSelector(chartMode, onChartModeChange)
+
+        val hasPoints = if (selectedView == SessionProtocolView.COMPARE) compareSeries.any { it.points.isNotEmpty() } else selectedPoints.isNotEmpty()
+        if (!hasPoints) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(92.dp)
+                    .background(Color(0xFFF8FAFC), ShapeM),
+                contentAlignment = Alignment.Center
+            ) {
+                Text("开始测试后显示本次曲线", color = Muted, fontSize = 12.sp)
+            }
+        } else if (chartMode == ChartMode.GROWTH) {
+            val series = when (selectedView) {
+                SessionProtocolView.IPV4 -> listOf(SessionChartSeries("IPv4", Blue, selectedPoints))
+                SessionProtocolView.IPV6 -> listOf(SessionChartSeries("IPv6", Purple, selectedPoints))
+                SessionProtocolView.COMPARE -> compareSeries
+            }
+            CombinedSessionGrowthChart(series)
+            if (selectedView == SessionProtocolView.COMPARE) {
+                SessionCompareStabilitySummary(ipv4Stats, ipv4Points, ipv6Stats, ipv6Points)
+            } else {
+                SessionStabilitySummary(selectedStats, selectedRawPoints)
+            }
+        } else {
+            if (selectedView == SessionProtocolView.COMPARE) {
+                CombinedSessionPeakChart(ipv4Stats, ipv4Points, ipv6Stats, ipv6Points)
+                SessionCompareStabilitySummary(ipv4Stats, ipv4Points, ipv6Stats, ipv6Points)
+            } else {
+                SessionPeakChart(selectedStats, selectedRawPoints)
+                SessionStabilitySummary(selectedStats, selectedRawPoints)
+            }
+        }
+    }
+}
+
+@Composable
+private fun SessionStabilitySummary(stats: ProtocolStats, points: List<ChartPoint>) {
+    val peak = sessionPeakValue(stats, points)
+    val stable = sessionStableValue(stats, points)
+    val retention = sessionRetentionPercent(stats, points)
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color(0xFFF8FAFC), ShapeM)
+            .border(1.dp, Border.copy(alpha = 0.75f), ShapeM)
+            .padding(vertical = 8.dp),
+        horizontalArrangement = Arrangement.SpaceEvenly
+    ) {
+        CompactSummaryValue("峰值", if (peak > 0) peak.toString() else "—", Blue)
+        CompactSummaryValue("稳定", if (stable > 0) stable.toString() else "—", Green)
+        CompactSummaryValue("保持率", if (peak > 0) String.format(Locale.US, "%.1f%%", retention) else "—", Purple)
+    }
+}
+
+@Composable
+private fun SessionCompareStabilitySummary(
+    ipv4Stats: ProtocolStats,
+    ipv4Points: List<ChartPoint>,
+    ipv6Stats: ProtocolStats,
+    ipv6Points: List<ChartPoint>
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color(0xFFF8FAFC), ShapeM)
+            .border(1.dp, Border.copy(alpha = 0.75f), ShapeM)
+            .padding(horizontal = 9.dp, vertical = 7.dp),
+        verticalArrangement = Arrangement.spacedBy(5.dp)
+    ) {
+        SessionCompareSummaryRow("IPv4", Blue, ipv4Stats, ipv4Points)
+        SessionCompareSummaryRow("IPv6", Purple, ipv6Stats, ipv6Points)
+    }
+}
+
+@Composable
+private fun SessionCompareSummaryRow(
+    label: String,
+    color: Color,
+    stats: ProtocolStats,
+    points: List<ChartPoint>
+) {
+    val peak = sessionPeakValue(stats, points)
+    val stable = sessionStableValue(stats, points)
+    val retention = sessionRetentionPercent(stats, points)
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(label, color = color, fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(42.dp))
+        Text("峰值 ${if (peak > 0) peak else "—"}", color = TextDark, fontSize = 10.sp, modifier = Modifier.weight(1f))
+        Text("稳定 ${if (stable > 0) stable else "—"}", color = TextDark, fontSize = 10.sp, modifier = Modifier.weight(1f))
+        Text(
+            "保持率 ${if (peak > 0) String.format(Locale.US, "%.1f%%", retention) else "—"}",
+            color = Muted,
+            fontSize = 10.sp
+        )
+    }
+}
+
+@Composable
+private fun CompactSummaryValue(label: String, value: String, color: Color) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(label, color = Muted, fontSize = 9.sp)
+        Text(value, color = color, fontSize = 13.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+    }
+}
+
+@Composable
+private fun CombinedSessionGrowthChart(series: List<SessionChartSeries>) {
+    val renderedSeries = remember(series) {
+        series.map { item ->
+            item.copy(points = downsampleForRender(item.points.sortedBy { it.elapsedSec }, MAX_RENDER_SESSION_POINTS))
+        }.filter { it.points.isNotEmpty() }
+    }
+    val allPoints = remember(renderedSeries) { renderedSeries.flatMap { it.points }.sortedBy { it.elapsedSec } }
+    val minX = 0
+    val maxXRaw = allPoints.maxOfOrNull { it.elapsedSec } ?: 1
+    val maxX = maxOf(1, maxXRaw)
+    val maxSessionY = remember(allPoints) { sessionYAxisMax(allPoints.maxOfOrNull { it.active } ?: 0) }
+    val step = chartXAxisStep(maxX - minX)
+    val yLabels = remember(maxSessionY) { axisLabels(maxSessionY) }
+    val xLabels = remember(minX, maxX, step) { timeLabels(minX, maxX, step) }
+    val stageRanges = remember(allPoints, minX, maxX) { buildSessionStageRanges(allPoints, minX, maxX) }
+    val failSummary = remember(allPoints) { failureIntervalSummary(allPoints) }
+    val latest = allPoints.lastOrNull()
+
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("会话数", color = Muted, fontSize = 10.sp)
+            renderedSeries.forEach { item ->
+                Spacer(Modifier.width(8.dp))
+                Text("● ${item.label}", color = item.color, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+            }
+            Spacer(Modifier.weight(1f))
+            Text(
+                latest?.let { "${it.elapsedSec}s 活动 ${it.active}｜失败 ${it.failure}" } ?: "",
+                color = Muted,
+                fontSize = 10.sp,
+                maxLines = 1
+            )
+        }
+
+        Row(horizontalArrangement = Arrangement.spacedBy(9.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("■ 增长", color = Blue.copy(alpha = 0.78f), fontSize = 9.sp)
+            Text("■ 平台确认", color = Orange.copy(alpha = 0.85f), fontSize = 9.sp)
+            Text("■ 结果", color = Green.copy(alpha = 0.82f), fontSize = 9.sp)
+            Spacer(Modifier.weight(1f))
+            Text("红条=本周期失败", color = ErrorRed, fontSize = 9.sp)
+        }
+
+        Row(modifier = Modifier.fillMaxWidth().height(176.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(modifier = Modifier.width(36.dp).height(163.dp), verticalArrangement = Arrangement.SpaceBetween) {
+                yLabels.forEach { Text(it.toString(), color = Muted, fontSize = 9.sp, maxLines = 1) }
+            }
+            Canvas(
+                modifier = Modifier
+                    .weight(1f)
+                    .height(163.dp)
+                    .background(Color(0xFFF8FAFC), ShapeS)
+                    .padding(6.dp)
+            ) {
+                val w = size.width
+                val h = size.height
+                fun xOfSec(sec: Int): Float = w * ((sec - minX).toFloat() / (maxX - minX).toFloat()).coerceIn(0f, 1f)
+                fun ySession(value: Int): Float = h - h * (value.coerceIn(0, maxSessionY).toFloat() / maxSessionY.toFloat())
+
+                stageRanges.forEach { range ->
+                    val color = when (range.stage) {
+                        SessionChartStage.GROWTH -> Blue.copy(alpha = 0.055f)
+                        SessionChartStage.CONFIRM -> Orange.copy(alpha = 0.09f)
+                        SessionChartStage.RESULT -> Green.copy(alpha = 0.075f)
+                    }
+                    val left = xOfSec(range.startSec)
+                    val right = xOfSec(range.endSec).coerceAtLeast(left + 1f)
+                    drawRect(color = color, topLeft = Offset(left, 0f), size = androidx.compose.ui.geometry.Size(right - left, h))
+                }
+
+                repeat(4) { idx ->
+                    val y = h * (idx + 1) / 5f
+                    drawLine(Border.copy(alpha = 0.55f), Offset(0f, y), Offset(w, y), strokeWidth = 1f)
+                }
+
+                renderedSeries.forEach { item ->
+                    val ordered = item.points.sortedBy { it.elapsedSec }
+                    if (ordered.size > 1) {
+                        val path = Path()
+                        ordered.forEachIndexed { index, point ->
+                            val x = xOfSec(point.elapsedSec)
+                            val y = ySession(point.active)
+                            if (index == 0) path.moveTo(x, y) else path.lineTo(x, y)
+                        }
+                        drawPath(path, color = item.color, style = Stroke(width = 3.5f, cap = StrokeCap.Round))
+                    }
+                    ordered.forEach { point ->
+                        drawCircle(item.color, radius = 2.2f, center = Offset(xOfSec(point.elapsedSec), ySession(point.active)))
+                    }
+                }
+
+                val maxFailureDelta = renderedSeries.maxOfOrNull { item ->
+                    val ordered = item.points.sortedBy { it.elapsedSec }
+                    var previous = ordered.firstOrNull()?.failure ?: 0
+                    var maxDelta = 0
+                    ordered.drop(1).forEach { point ->
+                        maxDelta = maxOf(maxDelta, (point.failure - previous).coerceAtLeast(0))
+                        previous = point.failure
+                    }
+                    maxDelta
+                }?.coerceAtLeast(1) ?: 1
+
+                renderedSeries.forEachIndexed { seriesIndex, item ->
+                    val ordered = item.points.sortedBy { it.elapsedSec }
+                    var previousFailure = ordered.firstOrNull()?.failure ?: 0
+                    ordered.drop(1).forEach { point ->
+                        val delta = (point.failure - previousFailure).coerceAtLeast(0)
+                        if (delta > 0) {
+                            val xOffset = if (renderedSeries.size > 1) (seriesIndex * 3f - 1.5f) else 0f
+                            val barHeight = (6f + 20f * delta.toFloat() / maxFailureDelta.toFloat()).coerceIn(7f, 26f)
+                            val x = xOfSec(point.elapsedSec) + xOffset
+                            drawLine(
+                                color = ErrorRed.copy(alpha = if (seriesIndex == 0) 0.92f else 0.65f),
+                                start = Offset(x, h),
+                                end = Offset(x, h - barHeight),
+                                strokeWidth = 2.6f,
+                                cap = StrokeCap.Round
+                            )
+                        }
+                        previousFailure = point.failure
+                    }
+                }
+            }
+        }
+
+        Row(modifier = Modifier.fillMaxWidth().padding(start = 36.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+            xLabels.forEach { Text("${it}s", color = Muted, fontSize = 10.sp) }
+        }
+        if (failSummary.isNotBlank()) {
+            Text(failSummary, color = ErrorRed, fontSize = 10.sp, lineHeight = 13.sp, fontWeight = FontWeight.Bold)
+        }
+        Text(
+            "说明：折线为活动会话；阶段背景来自实际运行状态；红条表示相邻采样间新增失败。",
+            color = Muted,
+            fontSize = 10.sp,
+            lineHeight = 13.sp
+        )
+    }
+}
+
+@Composable
+private fun CombinedSessionPeakChart(
+    ipv4Stats: ProtocolStats,
+    ipv4Points: List<ChartPoint>,
+    ipv6Stats: ProtocolStats,
+    ipv6Points: List<ChartPoint>
+) {
+    val v4Peak = sessionPeakValue(ipv4Stats, ipv4Points)
+    val v6Peak = sessionPeakValue(ipv6Stats, ipv6Points)
+    val maxValue = sessionYAxisMax(
+        listOf(v4Peak, v6Peak, ipv4Stats.totalFailure, ipv6Stats.totalFailure, 1).maxOrNull() ?: 1
+    )
+    Column(
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+        modifier = Modifier.background(Color(0xFFF8FAFC), ShapeM).padding(10.dp)
+    ) {
+        HistoryBarRow("IPv4峰值", v4Peak, maxValue, Blue)
+        HistoryBarRow("IPv6峰值", v6Peak, maxValue, Purple)
+        HistoryBarRow("IPv4失败", ipv4Stats.totalFailure, maxValue, ErrorRed)
+        HistoryBarRow("IPv6失败", ipv6Stats.totalFailure, maxValue, ErrorRed.copy(alpha = 0.72f))
+        Text("对比模式显示两种协议的峰值和失败；增长过程请切换到折线趋势。", color = Muted, fontSize = 10.sp)
     }
 }
 
