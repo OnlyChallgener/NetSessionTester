@@ -8490,8 +8490,8 @@ private data class RoamingSample(
     val externalWindowLossPercent: Int? = null,
     val externalPingReady: Boolean = false,
     val externalLastProbeAtMs: Long = 0L,
-    val gatewayPingStatus: String = "预热",
-    val externalPingStatus: String = "预热"
+    val gatewayPingStatus: String = "等待",
+    val externalPingStatus: String = "等待"
 )
 
 private data class RoamingEventInfo(
@@ -8908,9 +8908,9 @@ private fun roamingEventResultLine(event: RoamingEventInfo): String {
 private data class RoamingPingWindowEntry(val epochMs: Long, val loss: Boolean)
 
 private class RoamingPingProbeState(
-    private val warmupMs: Long = 1_000L,
+    private val warmupMs: Long = 0L,
     private val windowMs: Long = 5_000L,
-    private val firstLossGraceMs: Long = 2_000L
+    private val firstLossGraceMs: Long = 0L
 ) {
     var latestMs: Int? = null
         private set
@@ -8924,7 +8924,7 @@ private class RoamingPingProbeState(
         private set
     var lossCount: Int = 0
         private set
-    var status: String = "预热"
+    var status: String = "等待"
         private set
 
     private var firstProbeAtMs: Long? = null
@@ -8985,7 +8985,7 @@ private class RoamingPingProbeState(
 
 private fun roamingPingWindowLabel(enabled: Boolean, ready: Boolean, percent: Int?): String = when {
     !enabled -> "—"
-    !ready -> "预热"
+    !ready -> "等待"
     percent != null -> "${percent}%"
     else -> "0%"
 }
@@ -8995,14 +8995,14 @@ private fun roamingPingStatusText(sample: RoamingSample?, targetMode: RoamingTar
     val parts = mutableListOf<String>()
     if (targetMode != RoamingTargetMode.EXTERNAL) {
         val status = when (sample.gatewayPingStatus) {
-            "正常" -> if (sample.gatewayPingReady) "内网${sample.gatewayPingSent}次" else "内网预热"
+            "正常" -> if (sample.gatewayPingReady) "内网${sample.gatewayPingSent}次" else "内网等待"
             else -> "内网${sample.gatewayPingStatus}"
         }
         parts += status
     }
     if (targetMode != RoamingTargetMode.GATEWAY) {
         val status = when (sample.externalPingStatus) {
-            "正常" -> if (sample.externalPingReady) "外网${sample.externalPingSent}次" else "外网预热"
+            "正常" -> if (sample.externalPingReady) "外网${sample.externalPingSent}次" else "外网等待"
             else -> "外网${sample.externalPingStatus}"
         }
         parts += status
@@ -10128,7 +10128,7 @@ private fun RoamingToolPage(onBack: () -> Unit) {
                 }
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        "${sampleMode.desc} · Ping ${sampleMode.pingMs}ms · Wi-Fi ${sampleMode.rssiMs}ms · 推荐超时 ${sampleMode.recommendedTimeoutMs}ms · 候选AP扫描 ${sampleMode.candidateApText}",
+                        "${sampleMode.desc} · Ping ${sampleMode.pingMs}ms · Wi-Fi ${sampleMode.rssiMs}ms · 推荐超时 ${sampleMode.recommendedTimeoutMs}ms · 候选AP ${sampleMode.candidateApText}",
                         color = Muted,
                         fontSize = 11.sp,
                         lineHeight = 15.sp,
@@ -10226,9 +10226,9 @@ private fun RoamingLiveCard(
         ToolMonoLine("BSSID", latest?.bssid ?: "—")
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
             MiniMetric("网关", latest?.gatewayMs?.let { "${it}ms" } ?: "—", Blue, Modifier.weight(1f))
-            MiniMetric("内网丢包", roamingPingStatusLabel(targetMode != RoamingTargetMode.EXTERNAL, latest?.gatewayPingStatus ?: "预热", latest?.gatewayPingReady == true, latest?.gatewayWindowLossPercent), if (gatewayLoss > 0) ErrorRed else Muted, Modifier.weight(1f))
+            MiniMetric("内网丢包", roamingPingStatusLabel(targetMode != RoamingTargetMode.EXTERNAL, latest?.gatewayPingStatus ?: "等待", latest?.gatewayPingReady == true, latest?.gatewayWindowLossPercent), if (gatewayLoss > 0) ErrorRed else Muted, Modifier.weight(1f))
             MiniMetric("外网", latest?.externalMs?.let { "${it}ms" } ?: "—", Purple, Modifier.weight(1f))
-            MiniMetric("外网丢包", roamingPingStatusLabel(targetMode != RoamingTargetMode.GATEWAY, latest?.externalPingStatus ?: "预热", latest?.externalPingReady == true, latest?.externalWindowLossPercent), if (externalLoss > 0) ErrorRed else Muted, Modifier.weight(1f))
+            MiniMetric("外网丢包", roamingPingStatusLabel(targetMode != RoamingTargetMode.GATEWAY, latest?.externalPingStatus ?: "等待", latest?.externalPingReady == true, latest?.externalWindowLossPercent), if (externalLoss > 0) ErrorRed else Muted, Modifier.weight(1f))
         }
         Text(quality.summary, color = quality.color, fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
         Text(roamingPingStatusText(latest, targetMode), color = Muted, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -10404,7 +10404,7 @@ private fun RoamingPingChartCard(samples: List<RoamingSample>, running: Boolean,
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("Ping表", color = TextDark, fontWeight = FontWeight.Bold, fontSize = 13.sp, modifier = Modifier.weight(1f))
-            Text("成功=折线 · 丢包=红竖条 · 切换=竖线", color = Muted, fontSize = 11.sp)
+            Text("折线=真实Ping · 红条=丢包 · 短线=切换", color = Muted, fontSize = 11.sp)
         }
         RoamingPingCanvas(plot = plot, originalIndices = plotData.originalIndices, onSelect = { selectedIndex = it })
         selected?.let { RoamingSampleDetailLine(it) }
@@ -10485,31 +10485,59 @@ private fun RoamingPingCanvas(plot: List<RoamingSample>, originalIndices: List<I
         }
         fun x(i: Int) = left + (i / (plot.size - 1).coerceAtLeast(1).toFloat()) * w
         fun y(v: Int?) = bottom - ((v ?: 0).coerceIn(0, axisMax) / axisMax.toFloat()) * h
-        fun drawLatencyLine(valuesOf: (RoamingSample) -> Int?, color: Color) {
-            val path = Path()
-            var started = false
+        fun drawLatencyLine(
+            valuesOf: (RoamingSample) -> Int?,
+            probeTimeOf: (RoamingSample) -> Long,
+            color: Color
+        ) {
+            val freshPoints = mutableListOf<Pair<Int, Int>>()
+            var lastProbeAt = 0L
             plot.forEachIndexed { i, sample ->
+                val probeAt = probeTimeOf(sample)
                 val v = valuesOf(sample)
-                if (v == null) {
-                    started = false
-                } else {
-                    if (!started) { path.moveTo(x(i), y(v)); started = true } else path.lineTo(x(i), y(v))
+                if (v != null && probeAt > 0L && probeAt != lastProbeAt) {
+                    freshPoints += i to v
+                    lastProbeAt = probeAt
                 }
+            }
+            if (freshPoints.isEmpty()) return
+            freshPoints.forEach { (i, v) ->
+                drawCircle(color.copy(alpha = 0.75f), radius = 2.2f, center = Offset(x(i), y(v)))
+            }
+            if (freshPoints.size < 2) return
+            val path = Path()
+            freshPoints.forEachIndexed { idx, (i, v) ->
+                if (idx == 0) path.moveTo(x(i), y(v)) else path.lineTo(x(i), y(v))
             }
             drawPath(path, color, style = Stroke(width = 3f, cap = StrokeCap.Round))
         }
-        drawLatencyLine({ it.gatewayMs }, Blue)
-        drawLatencyLine({ it.externalMs }, Purple)
-        plot.zipWithNext().forEachIndexed { i, pair ->
-            if (pair.first.bssid != pair.second.bssid && isUsableWifiBssid(pair.first.bssid) && isUsableWifiBssid(pair.second.bssid)) {
-                val xx = x(i + 1)
-                drawLine(Orange.copy(alpha = 0.42f), Offset(xx, top), Offset(xx, bottom), strokeWidth = 1.5f)
-            }
+        fun switchMarkerEndY(index: Int): Float {
+            val after = plot.getOrNull(index)
+            val before = plot.getOrNull(index - 1)
+            val v = after?.externalMs ?: after?.gatewayMs ?: before?.externalMs ?: before?.gatewayMs
+            return if (v != null) y(v) else bottom - 20f
         }
+        drawLatencyLine({ it.gatewayMs }, { it.gatewayLastProbeAtMs }, Blue)
+        drawLatencyLine({ it.externalMs }, { it.externalLastProbeAtMs }, Purple)
         plot.forEachIndexed { i, s ->
             if (s.loss) {
                 val xx = x(i)
                 drawLine(ErrorRed.copy(alpha = 0.78f), Offset(xx, bottom), Offset(xx, bottom - 16f), strokeWidth = 2.5f)
+            }
+        }
+        plot.zipWithNext().forEachIndexed { i, pair ->
+            if (pair.first.bssid != pair.second.bssid && isUsableWifiBssid(pair.first.bssid) && isUsableWifiBssid(pair.second.bssid)) {
+                val markerIndex = i + 1
+                val xx = x(markerIndex)
+                val endY = switchMarkerEndY(markerIndex)
+                drawLine(
+                    Orange.copy(alpha = 0.76f),
+                    Offset(xx, bottom),
+                    Offset(xx, endY),
+                    strokeWidth = 2.0f,
+                    pathEffect = PathEffect.dashPathEffect(floatArrayOf(6f, 6f), 0f)
+                )
+                drawCircle(Orange.copy(alpha = 0.78f), radius = 3f, center = Offset(xx, endY))
             }
         }
     }
