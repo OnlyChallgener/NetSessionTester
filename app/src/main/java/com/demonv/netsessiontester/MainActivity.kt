@@ -8526,7 +8526,8 @@ private enum class RoamingTargetMode(val label: String) {
 private const val ROAMING_WIFI_SAMPLE_INTERVAL_MS = 50L
 private const val ROAMING_LIVE_WINDOW_MS = 10_000L
 private const val ROAMING_NETWORK_LOST_GRACE_MS = 8_000L
-private val RoamingPingIntervalPresets = listOf(200, 500, 1000)
+private val RoamingPingIntervalPresets = listOf(100, 200, 500, 1000)
+private val RoamingPingTimeoutPresets = listOf(800, 1000, 2000, 5000)
 
 private suspend fun resolveMtuAddress(hostInput: String, policy: ToolIpPolicy): Pair<InetAddress?, String?> = withContext(Dispatchers.IO) {
     val host = cleanToolHost(hostInput)
@@ -9093,7 +9094,7 @@ private fun buildRoamingHistoryRecord(
     val speed = wifiSamples.mapNotNull { it.linkSpeed }
     val targetText = if (targetMode == RoamingTargetMode.GATEWAY) targetMode.label else "${targetMode.label} · ${externalTarget.ifBlank { "223.5.5.5" }}"
     val eventLines = events.map { e ->
-        "AP切换：${e.oldBssid} → ${e.newBssid}\n频段/信号：${roamingRadioText(e.oldBand, e.oldChannel, e.oldRssi)} → ${roamingRadioText(e.newBand, e.newChannel, e.newRssi)}\n结果：切换${e.observationMs}ms · Ping恢复${e.pingRecoveryMs?.let { "${it}ms" } ?: "—"} · 漫游丢包${e.roamingLossCount}"
+        "AP切换：${e.oldBssid} → ${e.newBssid}\n频段/信道：${roamingRadioText(e.oldBand, e.oldChannel, e.oldRssi)} → ${roamingRadioText(e.newBand, e.newChannel, e.newRssi)}\n结果：切换${e.observationMs}ms · Ping恢复${e.pingRecoveryMs?.let { "${it}ms" } ?: "—"} · 漫游丢包${e.roamingLossCount}"
     }
     val networkLines = networkEvents.map { "${it.timeText}  ${it.label}" }
     val trueLossCount = pingSamples.count { it.attempted && it.latencyMs == null }
@@ -9312,12 +9313,9 @@ private fun RoamingToolPage(onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
     var targetMode by remember { mutableStateOf(RoamingTargetMode.GATEWAY_AND_EXTERNAL) }
     var externalTarget by remember { mutableStateOf("223.5.5.5") }
-    var gatewayIntervalMs by remember { mutableStateOf("500") }
-    var externalIntervalMs by remember { mutableStateOf("500") }
-    var gatewayTimeoutMs by remember { mutableStateOf("1000") }
-    var externalTimeoutMs by remember { mutableStateOf("1000") }
-    var customGatewayTimeout by remember { mutableStateOf(false) }
-    var customExternalTimeout by remember { mutableStateOf(false) }
+    var pingIntervalMs by remember { mutableStateOf("500") }
+    var pingTimeoutMs by remember { mutableStateOf("1000") }
+    var customPingTimeout by remember { mutableStateOf(false) }
     var networkLostAtMs by remember { mutableStateOf<Long?>(null) }
     var running by remember { mutableStateOf(false) }
     var job by remember { mutableStateOf<Job?>(null) }
@@ -9486,35 +9484,30 @@ private fun RoamingToolPage(onBack: () -> Unit) {
                 }
                 ConfigLongRow("外网") { CleanField(externalTarget, { externalTarget = it }, "223.5.5.5", leadingMark = "host") }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                    ConfigColumn("内网 Ping 间隔", Modifier.weight(1f)) {
-                        RoamingIntervalField(gatewayIntervalMs) { value ->
-                            gatewayIntervalMs = value.onlyDigits().take(4)
-                            if (!customGatewayTimeout) gatewayTimeoutMs = recommendedRoamingTimeoutMs(gatewayIntervalMs.safeInt(500, 50, 2000)).toString()
+                    ConfigColumn("Ping间隔", Modifier.weight(1f)) {
+                        RoamingIntervalField(pingIntervalMs) { value ->
+                            pingIntervalMs = value.onlyDigits().take(5)
+                            if (!customPingTimeout) pingTimeoutMs = recommendedRoamingTimeoutMs(pingIntervalMs.safeInt(500, 100, 10_000)).toString()
                         }
                     }
-                    ConfigColumn(if (customGatewayTimeout) "内网超时·自定义" else "内网超时·自动", Modifier.weight(1f)) {
-                        CleanField(gatewayTimeoutMs, { gatewayTimeoutMs = it.onlyDigits().take(4); customGatewayTimeout = true }, "1000", keyboardType = KeyboardType.Number, leadingMark = "hourglass")
-                    }
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                    ConfigColumn("外网 Ping 间隔", Modifier.weight(1f)) {
-                        RoamingIntervalField(externalIntervalMs) { value ->
-                            externalIntervalMs = value.onlyDigits().take(4)
-                            if (!customExternalTimeout) externalTimeoutMs = recommendedRoamingTimeoutMs(externalIntervalMs.safeInt(500, 50, 2000)).toString()
-                        }
-                    }
-                    ConfigColumn(if (customExternalTimeout) "外网超时·自定义" else "外网超时·自动", Modifier.weight(1f)) {
-                        CleanField(externalTimeoutMs, { externalTimeoutMs = it.onlyDigits().take(4); customExternalTimeout = true }, "1000", keyboardType = KeyboardType.Number, leadingMark = "hourglass")
+                    ConfigColumn(if (customPingTimeout) "Ping超时·自定义" else "Ping超时·自动", Modifier.weight(1f)) {
+                        RoamingTimeoutField(
+                            value = pingTimeoutMs,
+                            custom = customPingTimeout,
+                            onValueChange = { value -> pingTimeoutMs = value.onlyDigits().take(5); customPingTimeout = true },
+                            onAuto = {
+                                customPingTimeout = false
+                                pingTimeoutMs = recommendedRoamingTimeoutMs(pingIntervalMs.safeInt(500, 100, 10_000)).toString()
+                            }
+                        )
                     }
                 }
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("范围 50–2000ms · 自动超时=max(800ms, 间隔×2)，上限5000ms · Wi-Fi 信息每50ms观测", color = Muted, fontSize = 11.sp, lineHeight = 15.sp, modifier = Modifier.weight(1f))
-                    if (customGatewayTimeout || customExternalTimeout) {
+                    Text("Ping间隔 100–10000ms · 内外网共用 · 自动超时=max(800ms, 间隔×2)，上限5000ms", color = Muted, fontSize = 11.sp, lineHeight = 15.sp, modifier = Modifier.weight(1f))
+                    if (customPingTimeout) {
                         TextButton(onClick = {
-                            customGatewayTimeout = false
-                            customExternalTimeout = false
-                            gatewayTimeoutMs = recommendedRoamingTimeoutMs(gatewayIntervalMs.safeInt(500, 50, 2000)).toString()
-                            externalTimeoutMs = recommendedRoamingTimeoutMs(externalIntervalMs.safeInt(500, 50, 2000)).toString()
+                            customPingTimeout = false
+                            pingTimeoutMs = recommendedRoamingTimeoutMs(pingIntervalMs.safeInt(500, 100, 10_000)).toString()
                         }) { Text("恢复自动", fontSize = 11.sp, fontWeight = FontWeight.Bold) }
                     }
                 }
@@ -9572,16 +9565,12 @@ private fun RoamingToolPage(onBack: () -> Unit) {
                                 savedRunId = null
                                 running = true
                                 appendNetworkEvent("开始监听网络事件")
-                                val gatewayInterval = gatewayIntervalMs.safeInt(500, 50, 2000)
-                                val externalInterval = externalIntervalMs.safeInt(500, 50, 2000)
-                                val gatewayTimeout = if (customGatewayTimeout) gatewayTimeoutMs.safeInt(1000, 200, 5000) else recommendedRoamingTimeoutMs(gatewayInterval)
-                                val externalTimeout = if (customExternalTimeout) externalTimeoutMs.safeInt(1000, 200, 5000) else recommendedRoamingTimeoutMs(externalInterval)
-                                gatewayIntervalMs = gatewayInterval.toString()
-                                externalIntervalMs = externalInterval.toString()
-                                gatewayTimeoutMs = gatewayTimeout.toString()
-                                externalTimeoutMs = externalTimeout.toString()
+                                val interval = pingIntervalMs.safeInt(500, 100, 10_000)
+                                val timeout = if (customPingTimeout) pingTimeoutMs.safeInt(1000, 100, 10_000) else recommendedRoamingTimeoutMs(interval)
+                                pingIntervalMs = interval.toString()
+                                pingTimeoutMs = timeout.toString()
                                 appendNetworkEvent("Wi-Fi 当前连接信息 50ms 观测 · 不主动扫描")
-                                appendNetworkEvent("Ping配置：内网 ${gatewayInterval}ms/${gatewayTimeout}ms · 外网 ${externalInterval}ms/${externalTimeout}ms")
+                                appendNetworkEvent("Ping配置：内外网共用 · 间隔 ${interval}ms · 超时 ${timeout}ms")
                                 val activeMode = targetMode
                                 val activeExternalTarget = externalTarget.trim().ifBlank { "223.5.5.5" }
                                 job = scope.launch {
@@ -9600,7 +9589,7 @@ private fun RoamingToolPage(onBack: () -> Unit) {
                                             val tickAt = (tickClock - startElapsedMs).coerceAtLeast(0L)
                                             val gateway = if (isWifiNetworkReady(context.applicationContext, requireValidated = false)) readGatewayAddress(context.applicationContext) else null
                                             if (!gateway.isNullOrBlank()) {
-                                                val result = pingForRoaming(gateway, gatewayTimeout)
+                                                val result = pingForRoaming(gateway, timeout)
                                                 pingSamples.add(RoamingPingSample(
                                                     timeText = SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()).format(Date()),
                                                     target = RoamingPingTarget.GATEWAY,
@@ -9612,7 +9601,7 @@ private fun RoamingToolPage(onBack: () -> Unit) {
                                                 ))
                                                 if (pingSamples.size > 10_000) pingSamples.removeAt(0)
                                             }
-                                            delay((gatewayInterval - (SystemClock.elapsedRealtime() - tickClock)).coerceAtLeast(1L))
+                                            delay((interval - (SystemClock.elapsedRealtime() - tickClock)).coerceAtLeast(1L))
                                         }
                                     }
                                     if (activeMode != RoamingTargetMode.GATEWAY) launch {
@@ -9620,7 +9609,7 @@ private fun RoamingToolPage(onBack: () -> Unit) {
                                             val tickClock = SystemClock.elapsedRealtime()
                                             val tickAt = (tickClock - startElapsedMs).coerceAtLeast(0L)
                                             if (isWifiNetworkReady(context.applicationContext, requireValidated = true)) {
-                                                val result = pingForRoaming(activeExternalTarget, externalTimeout)
+                                                val result = pingForRoaming(activeExternalTarget, timeout)
                                                 pingSamples.add(RoamingPingSample(
                                                     timeText = SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()).format(Date()),
                                                     target = RoamingPingTarget.EXTERNAL,
@@ -9632,7 +9621,7 @@ private fun RoamingToolPage(onBack: () -> Unit) {
                                                 ))
                                                 if (pingSamples.size > 10_000) pingSamples.removeAt(0)
                                             }
-                                            delay((externalInterval - (SystemClock.elapsedRealtime() - tickClock)).coerceAtLeast(1L))
+                                            delay((interval - (SystemClock.elapsedRealtime() - tickClock)).coerceAtLeast(1L))
                                         }
                                     }
                                 }
@@ -9689,7 +9678,7 @@ private fun RoamingLiveCard(
             MiniMetric("质量", quality.label, quality.color, Modifier.weight(1f))
         }
         ToolMonoLine("BSSID", latestWifi?.bssid ?: latestWifi?.unavailableReason ?: "—")
-        ToolMonoLine("频段/信道", latestWifi?.let { "${wifiBandOf(it.frequencyMhz)} · ${it.channel?.let { channel -> "CH.$channel" } ?: "CH.—"} · ${it.frequencyMhz?.let { mhz -> "${mhz}MHz" } ?: "—"}" } ?: "—")
+        RoamingBandChannelLine(latestWifi?.let { "${wifiBandOf(it.frequencyMhz)} · ${it.channel?.let { channel -> "CH.$channel" } ?: "CH.—"} · ${it.frequencyMhz?.let { mhz -> "${mhz}MHz" } ?: "—"}" } ?: "—")
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
             MiniMetric("网关", latestGateway?.latencyMs?.let { "${it}ms" } ?: if (latestGateway?.attempted == true) "丢包" else "—", Blue, Modifier.weight(1f))
             MiniMetric("内网丢包", roamingLossPercentText(gatewaySamples.size, gatewayLoss), if (gatewayLoss > 0) ErrorRed else Muted, Modifier.weight(1f))
@@ -9703,9 +9692,10 @@ private fun RoamingLiveCard(
                 Text("${e.timeText} · ${e.label}", color = Muted, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
         }
-        val durationMs = max(wifiSamples.lastOrNull()?.elapsedMs ?: 0L, pingSamples.maxOfOrNull { it.completedElapsedMs } ?: 0L)
-        RoamingPingChartCard(pingSamples, durationMs, running)
-        RoamingSignalChartCard(wifiSamples, events, durationMs, running)
+        val pingDurationMs = pingSamples.maxOfOrNull { it.startedElapsedMs } ?: 0L
+        val signalDurationMs = wifiSamples.lastOrNull()?.elapsedMs ?: 0L
+        RoamingPingChartCard(pingSamples, pingDurationMs, running)
+        RoamingSignalChartCard(wifiSamples, events, signalDurationMs, running)
         if (events.isNotEmpty()) {
             Text("AP切换详情", color = TextDark, fontWeight = FontWeight.Bold, fontSize = 13.sp)
             events.takeLast(4).forEach { RoamingEventMiniCard(it) }
@@ -9809,7 +9799,7 @@ private fun RoamingSwitchPopup(event: RoamingSwitchEvent) {
                 Text(event.timeText, color = Muted, fontSize = 10.sp)
             }
             Text("AP切换：${event.oldBssid} → ${event.newBssid}", color = TextDark, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text("频段/信号：${roamingRadioText(event.oldBand, event.oldChannel, event.oldRssi)} → ${roamingRadioText(event.newBand, event.newChannel, event.newRssi)}", color = Muted, fontSize = 11.sp)
+            Text("频段/信道：${roamingRadioText(event.oldBand, event.oldChannel, event.oldRssi)} → ${roamingRadioText(event.newBand, event.newChannel, event.newRssi)}", color = Muted, fontSize = 11.sp)
             Text("结果：切换${event.observationMs}ms · Ping恢复${event.pingRecoveryMs?.let { "${it}ms" } ?: "—"} · 漫游丢包${event.roamingLossCount}", color = Muted, fontSize = 11.sp)
         }
     }
@@ -9838,12 +9828,39 @@ private fun RoamingPingChartCard(samples: List<RoamingPingSample>, durationMs: L
     }
 }
 
+private fun downsampleRoamingSignalForDisplay(
+    samples: List<RoamingWifiSample>,
+    bucketMs: Long = 500L
+): List<RoamingWifiSample> {
+    if (samples.size <= 2) return samples
+    val keep = mutableSetOf(0, samples.lastIndex)
+    samples.withIndex()
+        .groupBy { it.value.elapsedMs / bucketMs }
+        .values
+        .forEach { bucket -> keep += bucket.last().index }
+
+    var lastValidIndex: Int? = null
+    samples.forEachIndexed { index, sample ->
+        val bssid = sample.bssid ?: return@forEachIndexed
+        lastValidIndex?.let { previousIndex ->
+            val previousBssid = samples[previousIndex].bssid
+            if (previousBssid != null && !previousBssid.equals(bssid, ignoreCase = true)) {
+                keep += previousIndex
+                keep += index
+            }
+        }
+        lastValidIndex = index
+    }
+    return keep.sorted().map(samples::get)
+}
+
 @Composable
 private fun RoamingSignalChartCard(samples: List<RoamingWifiSample>, events: List<RoamingSwitchEvent>, durationMs: Long, running: Boolean) {
     var selected by remember { mutableStateOf<RoamingWifiSample?>(null) }
     val viewEndMs = durationMs.coerceAtLeast(1L)
     val viewStartMs = if (running) (viewEndMs - ROAMING_LIVE_WINDOW_MS).coerceAtLeast(0L) else 0L
-    val plot = samples.filter { it.elapsedMs in viewStartMs..viewEndMs }
+    val rawPlot = samples.filter { it.elapsedMs in viewStartMs..viewEndMs }
+    val plot = downsampleRoamingSignalForDisplay(rawPlot)
     val selectedSwitch = selected?.let { sample -> events.minByOrNull { abs(it.observedElapsedMs - sample.elapsedMs) }?.takeIf { abs(it.observedElapsedMs - sample.elapsedMs) <= 500L } }
     Column(
         modifier = Modifier
@@ -10068,7 +10085,7 @@ private fun RoamingEventMiniCard(event: RoamingSwitchEvent) {
             Text(event.timeText, color = Muted, fontSize = 10.sp)
         }
         Text("AP切换：${event.oldBssid} → ${event.newBssid}", color = TextDark, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        Text("频段/信号：${roamingRadioText(event.oldBand, event.oldChannel, event.oldRssi)} → ${roamingRadioText(event.newBand, event.newChannel, event.newRssi)}", color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
+        Text("频段/信道：${roamingRadioText(event.oldBand, event.oldChannel, event.oldRssi)} → ${roamingRadioText(event.newBand, event.newChannel, event.newRssi)}", color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
         Text("结果：切换${event.observationMs}ms · Ping恢复${event.pingRecoveryMs?.let { "${it}ms" } ?: "—"} · 漫游丢包${event.roamingLossCount}", color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
     }
 }
@@ -10105,6 +10122,31 @@ private fun RoamingSummaryCard(wifiSamples: List<RoamingWifiSample>, pingSamples
 }
 
 @Composable
+private fun RoamingBandChannelLine(value: String) {
+    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            "频段/信道：",
+            color = Muted,
+            fontSize = 10.sp,
+            maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Clip,
+            modifier = Modifier.width(72.dp)
+        )
+        Text(
+            value,
+            color = TextDark,
+            fontSize = 11.sp,
+            fontFamily = FontFamily.Monospace,
+            maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
+        )
+    }
+}
+
+@Composable
 private fun RoamingIntervalField(value: String, onValueChange: (String) -> Unit) {
     var expanded by remember { mutableStateOf(false) }
     Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -10115,6 +10157,36 @@ private fun RoamingIntervalField(value: String, onValueChange: (String) -> Unit)
             TextButton(onClick = { expanded = true }) { Text("预设", fontSize = 11.sp) }
             DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
                 RoamingPingIntervalPresets.forEach { preset ->
+                    DropdownMenuItem(
+                        text = { Text("${preset}ms", fontSize = 12.sp) },
+                        onClick = { onValueChange(preset.toString()); expanded = false }
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RoamingTimeoutField(
+    value: String,
+    custom: Boolean,
+    onValueChange: (String) -> Unit,
+    onAuto: () -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+        Box(Modifier.weight(1f)) {
+            CleanField(value, onValueChange, "1000", keyboardType = KeyboardType.Number, leadingMark = "hourglass")
+        }
+        Box {
+            TextButton(onClick = { expanded = true }) { Text(if (custom) "预设" else "自动", fontSize = 11.sp) }
+            DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                DropdownMenuItem(
+                    text = { Text("自动", fontSize = 12.sp) },
+                    onClick = { onAuto(); expanded = false }
+                )
+                RoamingPingTimeoutPresets.forEach { preset ->
                     DropdownMenuItem(
                         text = { Text("${preset}ms", fontSize = 12.sp) },
                         onClick = { onValueChange(preset.toString()); expanded = false }
