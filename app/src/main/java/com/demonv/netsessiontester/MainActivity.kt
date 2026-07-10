@@ -8449,7 +8449,9 @@ private data class RoamingWifiSample(
     val channel: Int?,
     val linkSpeed: Int?,
     val ssid: String = "未知",
-    val unavailableReason: String? = null
+    val unavailableReason: String? = null,
+    val candidateBssid: String? = null,
+    val candidateRssi: Int? = null
 )
 
 private data class RoamingPingSample(
@@ -8478,6 +8480,24 @@ private data class RoamingSwitchEvent(
     val roamingLossCount: Int
 )
 
+private data class StickyApEvent(
+    val startTimeText: String,
+    val durationMs: Long,
+    val durationText: String,
+    val currentBssid: String,
+    val currentRssi: Int,
+    val candidateBssid: String,
+    val candidateRssi: Int,
+    val deltaDb: Int,
+    val reason: String = "弱信号+候选更强"
+)
+
+private data class RoamingBssidSegment(
+    val startIndex: Int,
+    val endIndexExclusive: Int,
+    val bssid: String
+)
+
 private data class RoamingQuality(
     val label: String,
     val score: Int,
@@ -8491,7 +8511,17 @@ private data class WifiSnapshot(
     val bssid: String?,
     val ssid: String,
     val frequencyMhz: Int?,
-    val unavailableReason: String?
+    val unavailableReason: String?,
+    val candidateBssid: String? = null,
+    val candidateRssi: Int? = null
+)
+
+private data class RoamingCandidateCache(
+    val updatedElapsedMs: Long = 0L,
+    val ssid: String = "",
+    val currentBssid: String? = null,
+    val candidateBssid: String? = null,
+    val candidateRssi: Int? = null
 )
 
 
@@ -8526,6 +8556,11 @@ private enum class RoamingTargetMode(val label: String) {
 private const val ROAMING_WIFI_SAMPLE_INTERVAL_MS = 50L
 private const val ROAMING_LIVE_WINDOW_MS = 10_000L
 private const val ROAMING_NETWORK_LOST_GRACE_MS = 8_000L
+private const val ROAMING_CANDIDATE_REFRESH_MS = 500L
+private const val ROAMING_STICKY_WEAK_RSSI = -75
+private const val ROAMING_STICKY_ADVANTAGE_DB = 8
+private const val ROAMING_STICKY_DURATION_MS = 5_000L
+private var roamingCandidateCache = RoamingCandidateCache()
 private val RoamingPingIntervalPresets = listOf(100, 200, 500, 1000)
 private val RoamingPingTimeoutPresets = listOf(800, 1000, 2000, 5000)
 
@@ -8861,6 +8896,39 @@ private fun roamingWifiUnavailableReason(context: Context): String = when {
     else -> "系统限制：当前设备未提供 BSSID"
 }
 
+private fun readCachedRoamingCandidate(
+    wifi: WifiManager,
+    ssid: String,
+    currentBssid: String?
+): Pair<String?, Int?> {
+    if (ssid == "未知" || currentBssid == null) return null to null
+    val now = SystemClock.elapsedRealtime()
+    val cached = roamingCandidateCache
+    if (
+        cached.ssid == ssid &&
+        cached.currentBssid.equals(currentBssid, ignoreCase = true) &&
+        now - cached.updatedElapsedMs < ROAMING_CANDIDATE_REFRESH_MS
+    ) {
+        return cached.candidateBssid to cached.candidateRssi
+    }
+    val candidate = runCatching {
+        wifi.scanResults
+            .asSequence()
+            .filter { normalizeWifiSsid(it.SSID) == ssid }
+            .filter { isUsableWifiBssid(it.BSSID) && !it.BSSID.equals(currentBssid, ignoreCase = true) }
+            .filter { it.level in -120..0 }
+            .maxByOrNull { it.level }
+    }.getOrNull()
+    roamingCandidateCache = RoamingCandidateCache(
+        updatedElapsedMs = now,
+        ssid = ssid,
+        currentBssid = currentBssid,
+        candidateBssid = candidate?.BSSID,
+        candidateRssi = candidate?.level
+    )
+    return candidate?.BSSID to candidate?.level
+}
+
 private fun readWifiSnapshot(context: Context): WifiSnapshot {
     return runCatching {
         val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
@@ -8871,6 +8939,7 @@ private fun readWifiSnapshot(context: Context): WifiSnapshot {
         val bssid = rawBssid?.trim()?.takeIf(::isUsableWifiBssid)
         val ssid = normalizeWifiSsid(info?.ssid)
         val frequency = info?.frequency?.takeIf { it in 2400..7125 }
+        val (candidateBssid, candidateRssi) = readCachedRoamingCandidate(wifi, ssid, bssid)
         WifiSnapshot(
             rssi = rssi,
             linkSpeed = speed,
@@ -8880,7 +8949,9 @@ private fun readWifiSnapshot(context: Context): WifiSnapshot {
             unavailableReason = if (bssid == null) {
                 if (rawBssid.equals("00:00:00:00:00:00", ignoreCase = true)) "Wi-Fi切换中：BSSID暂不可用"
                 else roamingWifiUnavailableReason(context)
-            } else null
+            } else null,
+            candidateBssid = candidateBssid,
+            candidateRssi = candidateRssi
         )
     }.getOrElse { WifiSnapshot(null, null, null, "未知", null, "系统限制：无法读取当前 Wi-Fi 信息") }
 }
@@ -8898,7 +8969,9 @@ private fun readRoamingWifiSample(context: Context, runStartNanos: Long): Roamin
         channel = wifiChannelOf(snapshot.frequencyMhz),
         linkSpeed = snapshot.linkSpeed,
         ssid = snapshot.ssid,
-        unavailableReason = snapshot.unavailableReason
+        unavailableReason = snapshot.unavailableReason,
+        candidateBssid = snapshot.candidateBssid,
+        candidateRssi = snapshot.candidateRssi
     )
 }
 
@@ -8945,33 +9018,151 @@ private fun isCurrentNetworkWifi(context: Context): Boolean {
 private fun buildRoamingSwitchEvents(
     wifiSamples: List<RoamingWifiSample>,
     pingSamples: List<RoamingPingSample>
-): List<RoamingSwitchEvent> = wifiSamples.filter { isUsableWifiBssid(it.bssid) }.zipWithNext().mapNotNull { (before, after) ->
-    val oldBssid = before.bssid ?: return@mapNotNull null
-    val newBssid = after.bssid ?: return@mapNotNull null
-    if (oldBssid.equals(newBssid, ignoreCase = true)) return@mapNotNull null
-    val observationMs = ((after.elapsedRealtimeNanos - before.elapsedRealtimeNanos) / 1_000_000L).coerceAtLeast(0L)
-    val lossWindowEnd = after.elapsedMs + 3_000L
-    val trueLosses = pingSamples.count {
-        it.attempted && it.latencyMs == null && it.startedElapsedMs in before.elapsedMs..lossWindowEnd
+): List<RoamingSwitchEvent> {
+    val validSamples = wifiSamples.filter { isUsableWifiBssid(it.bssid) }
+    if (validSamples.size < 2) return emptyList()
+
+    val segments = mutableListOf<RoamingBssidSegment>()
+    var segmentStart = 0
+    var currentBssid = validSamples.first().bssid ?: return emptyList()
+    for (index in 1 until validSamples.size) {
+        val bssid = validSamples[index].bssid ?: continue
+        if (!bssid.equals(currentBssid, ignoreCase = true)) {
+            segments += RoamingBssidSegment(segmentStart, index, currentBssid)
+            segmentStart = index
+            currentBssid = bssid
+        }
     }
-    val recoveryMs = pingSamples.asSequence()
-        .filter { it.attempted && it.latencyMs != null && it.completedElapsedMs >= after.elapsedMs }
-        .minOfOrNull { (it.completedElapsedMs - after.elapsedMs).coerceAtLeast(0L) }
-    RoamingSwitchEvent(
-        timeText = after.timeText,
-        observedElapsedMs = after.elapsedMs,
-        oldBssid = oldBssid,
-        newBssid = newBssid,
-        oldBand = wifiBandOf(before.frequencyMhz),
-        newBand = wifiBandOf(after.frequencyMhz),
-        oldChannel = before.channel,
-        newChannel = after.channel,
-        oldRssi = before.rssi,
-        newRssi = after.rssi,
-        observationMs = observationMs,
-        pingRecoveryMs = recoveryMs,
-        roamingLossCount = trueLosses
-    )
+    segments += RoamingBssidSegment(segmentStart, validSamples.size, currentBssid)
+    if (segments.size < 2) return emptyList()
+
+    fun firstRssi(segment: RoamingBssidSegment): Int? {
+        for (index in segment.startIndex until segment.endIndexExclusive) {
+            validSamples[index].rssi?.let { return it }
+        }
+        return null
+    }
+
+    fun lastRssi(segment: RoamingBssidSegment): Int? {
+        for (index in segment.endIndexExclusive - 1 downTo segment.startIndex) {
+            validSamples[index].rssi?.let { return it }
+        }
+        return null
+    }
+
+    fun firstRadio(segment: RoamingBssidSegment): RoamingWifiSample {
+        for (index in segment.startIndex until segment.endIndexExclusive) {
+            val sample = validSamples[index]
+            if (sample.frequencyMhz != null || sample.channel != null) return sample
+        }
+        return validSamples[segment.startIndex]
+    }
+
+    fun lastRadio(segment: RoamingBssidSegment): RoamingWifiSample {
+        for (index in segment.endIndexExclusive - 1 downTo segment.startIndex) {
+            val sample = validSamples[index]
+            if (sample.frequencyMhz != null || sample.channel != null) return sample
+        }
+        return validSamples[segment.endIndexExclusive - 1]
+    }
+
+    return segments.zipWithNext().map { (oldSegment, newSegment) ->
+        val before = validSamples[oldSegment.endIndexExclusive - 1]
+        val after = validSamples[newSegment.startIndex]
+        val oldRadio = lastRadio(oldSegment)
+        val newRadio = firstRadio(newSegment)
+        val observationMs = ((after.elapsedRealtimeNanos - before.elapsedRealtimeNanos) / 1_000_000L).coerceAtLeast(0L)
+        val lossWindowEnd = after.elapsedMs + 3_000L
+        val trueLosses = pingSamples.count {
+            it.attempted && it.latencyMs == null && it.startedElapsedMs in before.elapsedMs..lossWindowEnd
+        }
+        val recoveryMs = pingSamples.asSequence()
+            .filter { it.attempted && it.latencyMs != null && it.completedElapsedMs >= after.elapsedMs }
+            .minOfOrNull { (it.completedElapsedMs - after.elapsedMs).coerceAtLeast(0L) }
+
+        RoamingSwitchEvent(
+            timeText = after.timeText,
+            observedElapsedMs = after.elapsedMs,
+            oldBssid = oldSegment.bssid,
+            newBssid = newSegment.bssid,
+            oldBand = wifiBandOf(oldRadio.frequencyMhz),
+            newBand = wifiBandOf(newRadio.frequencyMhz),
+            oldChannel = oldRadio.channel,
+            newChannel = newRadio.channel,
+            oldRssi = lastRssi(oldSegment),
+            newRssi = firstRssi(newSegment),
+            observationMs = observationMs,
+            pingRecoveryMs = recoveryMs,
+            roamingLossCount = trueLosses
+        )
+    }
+}
+
+private fun buildStickyApEvents(
+    wifiSamples: List<RoamingWifiSample>,
+    weakThreshold: Int = ROAMING_STICKY_WEAK_RSSI,
+    advantageDb: Int = ROAMING_STICKY_ADVANTAGE_DB,
+    durationMs: Long = ROAMING_STICKY_DURATION_MS
+): List<StickyApEvent> {
+    val samples = wifiSamples.filter { isUsableWifiBssid(it.bssid) }
+    if (samples.isEmpty()) return emptyList()
+    val events = mutableListOf<StickyApEvent>()
+    var start: RoamingWifiSample? = null
+    var last: RoamingWifiSample? = null
+
+    fun qualifies(sample: RoamingWifiSample): Boolean {
+        val currentBssid = sample.bssid ?: return false
+        val currentRssi = sample.rssi ?: return false
+        val candidateBssid = sample.candidateBssid?.takeIf(::isUsableWifiBssid) ?: return false
+        val candidateRssi = sample.candidateRssi ?: return false
+        return !candidateBssid.equals(currentBssid, ignoreCase = true) &&
+            currentRssi <= weakThreshold &&
+            candidateRssi - currentRssi >= advantageDb
+    }
+
+    fun flush() {
+        val first = start ?: return
+        val end = last ?: first
+        val actualDurationMs = (end.elapsedMs - first.elapsedMs).coerceAtLeast(0L)
+        if (actualDurationMs >= durationMs) {
+            val currentBssid = end.bssid ?: first.bssid ?: return
+            val currentRssi = end.rssi ?: first.rssi ?: return
+            val candidateBssid = end.candidateBssid ?: first.candidateBssid ?: return
+            val candidateRssi = end.candidateRssi ?: first.candidateRssi ?: return
+            events += StickyApEvent(
+                startTimeText = first.timeText,
+                durationMs = actualDurationMs,
+                durationText = if (actualDurationMs < 1_000L) "<1s" else String.format(Locale.getDefault(), "%.1fs", actualDurationMs / 1000.0),
+                currentBssid = currentBssid,
+                currentRssi = currentRssi,
+                candidateBssid = candidateBssid,
+                candidateRssi = candidateRssi,
+                deltaDb = candidateRssi - currentRssi
+            )
+        }
+        start = null
+        last = null
+    }
+
+    samples.forEach { sample ->
+        if (qualifies(sample)) {
+            val existingStart = start
+            if (existingStart == null) {
+                start = sample
+                last = sample
+            } else if (existingStart.bssid.equals(sample.bssid, ignoreCase = true)) {
+                last = sample
+            } else {
+                flush()
+                start = sample
+                last = sample
+            }
+        } else {
+            flush()
+        }
+    }
+    flush()
+    return events
 }
 
 private fun roamingAverage(values: List<Int>): Int? = values.takeIf { it.isNotEmpty() }?.average()?.roundToInt()
@@ -9678,6 +9869,7 @@ private fun RoamingLiveCard(
     val latestGateway = gatewaySamples.lastOrNull()
     val latestExternal = externalSamples.lastOrNull()
     val events = remember(wifiSamples.size, pingSamples.size) { buildRoamingSwitchEvents(wifiSamples, pingSamples) }
+    val stickyEvents = remember(wifiSamples.size / 10, running) { buildStickyApEvents(wifiSamples.toList()) }
     SoftCompactToolCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("实时结果", color = TextDark, fontWeight = FontWeight.ExtraBold, fontSize = 14.sp, modifier = Modifier.weight(1f))
@@ -9714,8 +9906,12 @@ private fun RoamingLiveCard(
             Text("AP切换详情", color = TextDark, fontWeight = FontWeight.Bold, fontSize = 13.sp)
             events.takeLast(4).forEach { RoamingEventMiniCard(it) }
         }
+        if (stickyEvents.isNotEmpty()) {
+            Text("疑似粘连 AP", color = TextDark, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+            stickyEvents.takeLast(3).forEach { StickyApMiniCard(it) }
+        }
         if (!running && (wifiSamples.isNotEmpty() || pingSamples.isNotEmpty())) {
-            RoamingSummaryCard(wifiSamples, pingSamples, events, targetMode)
+            RoamingSummaryCard(wifiSamples, pingSamples, events, stickyEvents, targetMode)
         }
         Text("说明：BSSID切换仅由当前 Wi-Fi 连接信息观测；Ping 只统计真实发起的业务探测，未执行的探测不计丢包。", color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
     }
@@ -10105,7 +10301,33 @@ private fun RoamingEventMiniCard(event: RoamingSwitchEvent) {
 }
 
 @Composable
-private fun RoamingSummaryCard(wifiSamples: List<RoamingWifiSample>, pingSamples: List<RoamingPingSample>, events: List<RoamingSwitchEvent>, targetMode: RoamingTargetMode) {
+private fun StickyApMiniCard(event: StickyApEvent) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(ShapeM)
+            .background(Color(0xFFFFF7ED), ShapeM)
+            .border(1.dp, Orange.copy(alpha = 0.24f), ShapeM)
+            .padding(9.dp),
+        verticalArrangement = Arrangement.spacedBy(3.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("疑似粘连", color = Orange, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.weight(1f))
+            Text(event.startTimeText, color = Muted, fontSize = 10.sp)
+        }
+        Text("当前 ${event.currentBssid}  ${event.currentRssi}dBm", color = TextDark, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text("候选 ${event.candidateBssid}  ${event.candidateRssi}dBm · 优势 ${event.deltaDb}dB · 持续 ${event.durationText}", color = Muted, fontSize = 11.sp, lineHeight = 15.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+@Composable
+private fun RoamingSummaryCard(
+    wifiSamples: List<RoamingWifiSample>,
+    pingSamples: List<RoamingPingSample>,
+    events: List<RoamingSwitchEvent>,
+    stickyEvents: List<StickyApEvent>,
+    targetMode: RoamingTargetMode
+) {
     val gatewaySamples = pingSamples.filter { it.target == RoamingPingTarget.GATEWAY && it.attempted }
     val externalSamples = pingSamples.filter { it.target == RoamingPingTarget.EXTERNAL && it.attempted }
     val gateway = gatewaySamples.mapNotNull { it.latencyMs }
@@ -10132,6 +10354,12 @@ private fun RoamingSummaryCard(wifiSamples: List<RoamingWifiSample>, pingSamples
         Text("漫游质量：${quality.label} · ${quality.summary}", color = quality.color, fontWeight = FontWeight.Bold, fontSize = 11.sp, lineHeight = 15.sp)
         Text("丢包：内网${roamingLossPercentText(gatewaySamples.size, gwLoss)} / 外网${roamingLossPercentText(externalSamples.size, extLoss)}", color = if (gwLoss + extLoss > 0) ErrorRed else Muted, fontWeight = FontWeight.Bold, fontSize = 11.sp)
         Text("AP切换：${events.size}次 · 最长观测${events.maxOfOrNull { it.observationMs }?.let { "${it}ms" } ?: "—"} · 漫游窗口真实丢包${events.sumOf { it.roamingLossCount }}", color = if (events.isEmpty()) Muted else Orange, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+        Text(
+            "粘连AP：${if (stickyEvents.isEmpty()) "未发现明显粘连" else "疑似${stickyEvents.size}段 · 最长${stickyEvents.maxOfOrNull { it.durationMs }?.let { String.format(Locale.getDefault(), "%.1fs", it / 1000.0) } ?: "—"}"}",
+            color = if (stickyEvents.isEmpty()) Muted else Orange,
+            fontWeight = FontWeight.Bold,
+            fontSize = 11.sp
+        )
     }
 }
 
