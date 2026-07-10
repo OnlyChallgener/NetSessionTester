@@ -10404,7 +10404,7 @@ private fun RoamingPingChartCard(samples: List<RoamingSample>, running: Boolean,
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("Ping表", color = TextDark, fontWeight = FontWeight.Bold, fontSize = 13.sp, modifier = Modifier.weight(1f))
-            Text("折线=真实Ping · 红条=丢包 · 短线=切换", color = Muted, fontSize = 11.sp)
+            Text("折线=Ping · 红条=丢包", color = Muted, fontSize = 11.sp)
         }
         RoamingPingCanvas(plot = plot, originalIndices = plotData.originalIndices, onSelect = { selectedIndex = it })
         selected?.let { RoamingSampleDetailLine(it) }
@@ -10429,7 +10429,7 @@ private fun RoamingSignalChartCard(samples: List<RoamingSample>, running: Boolea
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("信号表", color = TextDark, fontWeight = FontWeight.Bold, fontSize = 13.sp, modifier = Modifier.weight(1f))
-            Text("RSSI · 阶梯/波形 · 竖线=AP切换", color = Muted, fontSize = 11.sp)
+            Text("RSSI · 实线=同AP · 虚线=AP切换", color = Muted, fontSize = 11.sp)
         }
         RoamingSignalCanvas(plot = plot, originalIndices = plotData.originalIndices, onSelect = { selectedIndex = it })
         selectedSwitch?.let { RoamingSwitchPopup(it) }
@@ -10506,16 +10506,15 @@ private fun RoamingPingCanvas(plot: List<RoamingSample>, originalIndices: List<I
             }
             if (freshPoints.size < 2) return
             val path = Path()
-            freshPoints.forEachIndexed { idx, (i, v) ->
-                if (idx == 0) path.moveTo(x(i), y(v)) else path.lineTo(x(i), y(v))
+            freshPoints.forEachIndexed { pointIndex, pair ->
+                val (i, v) = pair
+                if (pointIndex == 0) {
+                    path.moveTo(x(i), y(v))
+                } else {
+                    path.lineTo(x(i), y(v))
+                }
             }
             drawPath(path, color, style = Stroke(width = 3f, cap = StrokeCap.Round))
-        }
-        fun switchMarkerEndY(index: Int): Float {
-            val after = plot.getOrNull(index)
-            val before = plot.getOrNull(index - 1)
-            val v = after?.externalMs ?: after?.gatewayMs ?: before?.externalMs ?: before?.gatewayMs
-            return if (v != null) y(v) else bottom - 20f
         }
         drawLatencyLine({ it.gatewayMs }, { it.gatewayLastProbeAtMs }, Blue)
         drawLatencyLine({ it.externalMs }, { it.externalLastProbeAtMs }, Purple)
@@ -10523,21 +10522,6 @@ private fun RoamingPingCanvas(plot: List<RoamingSample>, originalIndices: List<I
             if (s.loss) {
                 val xx = x(i)
                 drawLine(ErrorRed.copy(alpha = 0.78f), Offset(xx, bottom), Offset(xx, bottom - 16f), strokeWidth = 2.5f)
-            }
-        }
-        plot.zipWithNext().forEachIndexed { i, pair ->
-            if (pair.first.bssid != pair.second.bssid && isUsableWifiBssid(pair.first.bssid) && isUsableWifiBssid(pair.second.bssid)) {
-                val markerIndex = i + 1
-                val xx = x(markerIndex)
-                val endY = switchMarkerEndY(markerIndex)
-                drawLine(
-                    Orange.copy(alpha = 0.76f),
-                    Offset(xx, bottom),
-                    Offset(xx, endY),
-                    strokeWidth = 2.0f,
-                    pathEffect = PathEffect.dashPathEffect(floatArrayOf(6f, 6f), 0f)
-                )
-                drawCircle(Orange.copy(alpha = 0.78f), radius = 3f, center = Offset(xx, endY))
             }
         }
     }
@@ -10606,38 +10590,60 @@ private fun RoamingSignalCanvas(plot: List<RoamingSample>, originalIndices: List
             drawContext.canvas.nativeCanvas.drawText(label, tx, size.height - 18f, textPaint)
         }
         fun x(i: Int) = left + (i / (plot.size - 1).coerceAtLeast(1).toFloat()) * w
-        val path = Path()
+        fun isSwitchPair(before: RoamingSample, after: RoamingSample): Boolean =
+            before.bssid != after.bssid && isUsableWifiBssid(before.bssid) && isUsableWifiBssid(after.bssid)
+
+        var signalPath = Path()
         var signalStarted = false
-        plot.forEachIndexed { i, s ->
-            val rssi = s.rssi
+        fun flushSignalPath() {
+            if (signalStarted) drawPath(signalPath, Green, style = Stroke(width = 3f, cap = StrokeCap.Round))
+        }
+        plot.forEachIndexed { i, sample ->
+            val rssi = sample.rssi
+            val previous = plot.getOrNull(i - 1)
+            val breakForSwitch = previous != null && isSwitchPair(previous, sample)
             if (rssi == null) {
+                flushSignalPath()
+                signalPath = Path()
                 signalStarted = false
             } else {
                 val yy = yRssi(rssi)
-                if (!signalStarted) { path.moveTo(x(i), yy); signalStarted = true } else path.lineTo(x(i), yy)
+                if (breakForSwitch) {
+                    flushSignalPath()
+                    signalPath = Path()
+                    signalStarted = false
+                }
+                if (!signalStarted) {
+                    signalPath.moveTo(x(i), yy)
+                    signalStarted = true
+                } else {
+                    signalPath.lineTo(x(i), yy)
+                }
             }
         }
+        flushSignalPath()
+
         plot.zipWithNext().forEachIndexed { i, pair ->
+            val beforeRssi = pair.first.rssi
             val afterRssi = pair.second.rssi
-            if (afterRssi != null && pair.first.bssid != pair.second.bssid && isUsableWifiBssid(pair.first.bssid) && isUsableWifiBssid(pair.second.bssid)) {
-                val xx = x(i + 1)
-                val endY = yRssi(afterRssi)
-                val marker = Path().apply {
-                    moveTo(xx, bottom)
-                    lineTo(xx, endY)
+            if (beforeRssi != null && afterRssi != null && isSwitchPair(pair.first, pair.second)) {
+                val connector = Path().apply {
+                    moveTo(x(i), yRssi(beforeRssi))
+                    lineTo(x(i + 1), yRssi(afterRssi))
                 }
                 drawPath(
-                    marker,
-                    color = Orange.copy(alpha = 0.26f),
+                    connector,
+                    color = Orange.copy(alpha = 0.58f),
                     style = Stroke(
-                        width = 1.5f,
+                        width = 2.2f,
                         cap = StrokeCap.Round,
-                        pathEffect = PathEffect.dashPathEffect(floatArrayOf(6f, 7f), 0f)
+                        pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 7f), 0f)
                     )
                 )
+                drawCircle(Orange.copy(alpha = 0.72f), radius = 2.8f, center = Offset(x(i), yRssi(beforeRssi)))
+                drawCircle(Orange.copy(alpha = 0.72f), radius = 2.8f, center = Offset(x(i + 1), yRssi(afterRssi)))
             }
         }
-        drawPath(path, Green, style = Stroke(width = 3f, cap = StrokeCap.Round))
         plot.zipWithNext().forEachIndexed { i, pair ->
             val afterRssi = pair.second.rssi
             if (afterRssi != null && pair.first.bssid != pair.second.bssid && isUsableWifiBssid(pair.first.bssid) && isUsableWifiBssid(pair.second.bssid)) {
