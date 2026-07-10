@@ -8812,6 +8812,17 @@ private fun normalizeWifiSsid(raw: String?): String {
     return value.removePrefix("\"").removeSuffix("\"").ifBlank { "未知" }
 }
 
+private val WifiBssidPattern = Regex("^(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$")
+
+private fun isUsableWifiBssid(raw: String?): Boolean {
+    val value = raw?.trim().orEmpty()
+    if (!WifiBssidPattern.matches(value)) return false
+    if (value.equals("00:00:00:00:00:00", ignoreCase = true)) return false
+    if (value.equals("02:00:00:00:00:00", ignoreCase = true)) return false
+    if (value.equals("ff:ff:ff:ff:ff:ff", ignoreCase = true)) return false
+    return (value.substring(0, 2).toIntOrNull(16)?.and(1) ?: 1) == 0
+}
+
 private fun wifiBandOf(frequencyMhz: Int?): String = when (frequencyMhz) {
     in 2400..2500 -> "2.4G"
     in 4900..5900 -> "5G"
@@ -8856,7 +8867,8 @@ private fun readWifiSnapshot(context: Context): WifiSnapshot {
         val info = wifi.connectionInfo
         val rssi = info?.rssi?.takeIf { it in -120..0 }
         val speed = info?.linkSpeed?.takeIf { it > 0 }
-        val bssid = info?.bssid?.takeIf { it.isNotBlank() && it != "02:00:00:00:00:00" }
+        val rawBssid = info?.bssid
+        val bssid = rawBssid?.trim()?.takeIf(::isUsableWifiBssid)
         val ssid = normalizeWifiSsid(info?.ssid)
         val frequency = info?.frequency?.takeIf { it in 2400..7125 }
         WifiSnapshot(
@@ -8865,7 +8877,10 @@ private fun readWifiSnapshot(context: Context): WifiSnapshot {
             bssid = bssid,
             ssid = ssid,
             frequencyMhz = frequency,
-            unavailableReason = if (bssid == null) roamingWifiUnavailableReason(context) else null
+            unavailableReason = if (bssid == null) {
+                if (rawBssid.equals("00:00:00:00:00:00", ignoreCase = true)) "Wi-Fi切换中：BSSID暂不可用"
+                else roamingWifiUnavailableReason(context)
+            } else null
         )
     }.getOrElse { WifiSnapshot(null, null, null, "未知", null, "系统限制：无法读取当前 Wi-Fi 信息") }
 }
@@ -8923,15 +8938,14 @@ private fun isCurrentNetworkWifi(context: Context): Boolean {
     return runCatching {
         val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
         val info = wifi.connectionInfo ?: return@runCatching false
-        val bssid = info.bssid.orEmpty()
-        info.networkId != -1 || (bssid.isNotBlank() && bssid != "02:00:00:00:00:00")
+        info.networkId != -1 || isUsableWifiBssid(info.bssid)
     }.getOrDefault(false)
 }
 
 private fun buildRoamingSwitchEvents(
     wifiSamples: List<RoamingWifiSample>,
     pingSamples: List<RoamingPingSample>
-): List<RoamingSwitchEvent> = wifiSamples.filter { it.bssid != null }.zipWithNext().mapNotNull { (before, after) ->
+): List<RoamingSwitchEvent> = wifiSamples.filter { isUsableWifiBssid(it.bssid) }.zipWithNext().mapNotNull { (before, after) ->
     val oldBssid = before.bssid ?: return@mapNotNull null
     val newBssid = after.bssid ?: return@mapNotNull null
     if (oldBssid.equals(newBssid, ignoreCase = true)) return@mapNotNull null
@@ -9841,10 +9855,10 @@ private fun downsampleRoamingSignalForDisplay(
 
     var lastValidIndex: Int? = null
     samples.forEachIndexed { index, sample ->
-        val bssid = sample.bssid ?: return@forEachIndexed
+        val bssid = sample.bssid?.takeIf(::isUsableWifiBssid) ?: return@forEachIndexed
         lastValidIndex?.let { previousIndex ->
             val previousBssid = samples[previousIndex].bssid
-            if (previousBssid != null && !previousBssid.equals(bssid, ignoreCase = true)) {
+            if (isUsableWifiBssid(previousBssid) && previousBssid?.equals(bssid, ignoreCase = true) == false) {
                 keep += previousIndex
                 keep += index
             }
@@ -10021,7 +10035,7 @@ private fun RoamingSignalCanvas(
             val tx = (xx - labelWidth / 2f).coerceIn(left, right - labelWidth)
             drawContext.canvas.nativeCanvas.drawText(label, tx, size.height - 18f, textPaint)
         }
-        val signalPoints = plot.filter { it.rssi != null && it.bssid != null }
+        val signalPoints = plot.filter { it.rssi != null && isUsableWifiBssid(it.bssid) }
         signalPoints.zipWithNext().forEach { (before, after) ->
             val beforeRssi = before.rssi ?: return@forEach
             val afterRssi = after.rssi ?: return@forEach
