@@ -38,6 +38,7 @@ object CsvExporter {
         sb.appendLine("$section,total,${stats.totalAttempts}")
         sb.appendLine("$section,added,${stats.lastAdded}")
         sb.appendLine("$section,cps,${stats.cps}")
+        sb.appendLine("$section,average_connect_latency_ms,${stats.averageConnectLatencyMs}")
         stats.errorSummary.forEach { (key, value) ->
             sb.appendLine("$section,error_${csv(key)},$value")
         }

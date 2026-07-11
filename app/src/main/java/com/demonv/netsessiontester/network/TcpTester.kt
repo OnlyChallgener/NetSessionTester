@@ -130,6 +130,8 @@ class TcpTester {
 
         var totalSuccess = 0
         var totalFailure = 0
+        var totalConnectLatencyMs = 0L
+        var connectLatencySamples = 0
         var launchedAttempts = 0
         var maxStable = 0
         var lastTotalSuccess = 0
@@ -167,7 +169,13 @@ class TcpTester {
                     if (error is CancellationException) OpenResult(discarded = true) else OpenResult(error = classifyError(error))
                 }
                 if (result.discarded) continue
-                result.socket?.let { sockets += it }
+                result.socket?.let { socket ->
+                    sockets += socket
+                    result.connectLatencyMs?.let { latency ->
+                        totalConnectLatencyMs += latency.toLong().coerceAtLeast(0L)
+                        connectLatencySamples++
+                    }
+                }
                 result.error?.let { errors[it] = (errors[it] ?: 0) + 1 }
             }
             if (sockets.isNotEmpty()) {
@@ -255,6 +263,7 @@ class TcpTester {
                         lastAdded = targetCps,
                         cps = lastCps,
                         maxStableSessions = maxStable,
+                        averageConnectLatencyMs = if (connectLatencySamples > 0) (totalConnectLatencyMs / connectLatencySamples).toInt() else 0,
                         errorSummary = errors.toMap()
                     )
                     onStats(stats)
@@ -297,6 +306,7 @@ class TcpTester {
             cps = averageCps,
             totalSuccess = totalSuccess,
             maxStableSessions = finalPeak,
+            averageConnectLatencyMs = if (connectLatencySamples > 0) (totalConnectLatencyMs / connectLatencySamples).toInt() else 0,
             errorSummary = errors.toMap()
         )
         onStats(finalStats)
@@ -350,12 +360,14 @@ class TcpTester {
             val socket = Socket()
             socket.keepAlive = true
             socket.tcpNoDelay = true
+            val connectStartedAt = System.nanoTime()
             socket.connect(InetSocketAddress(address, port), timeoutMs)
+            val connectLatencyMs = ((System.nanoTime() - connectStartedAt) / 1_000_000L).toInt().coerceAtLeast(1)
             if (releaseEpoch.get() != expectedEpoch) {
                 fastClose(socket)
                 OpenResult(discarded = true)
             } else {
-                OpenResult(socket = socket)
+                OpenResult(socket = socket, connectLatencyMs = connectLatencyMs)
             }
         } catch (e: CancellationException) {
             throw e
@@ -457,5 +469,10 @@ class TcpTester {
         }
     }
 
-    private data class OpenResult(val socket: Socket? = null, val error: String? = null, val discarded: Boolean = false)
+    private data class OpenResult(
+        val socket: Socket? = null,
+        val error: String? = null,
+        val discarded: Boolean = false,
+        val connectLatencyMs: Int? = null
+    )
 }

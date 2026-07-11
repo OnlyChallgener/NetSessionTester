@@ -193,6 +193,7 @@ class HistoryStore(private val context: Context) {
         .put("cps", cps)
         .put("success", totalSuccess)
         .put("stable", maxStableSessions)
+        .put("avgConnectLatencyMs", averageConnectLatencyMs)
         .put("errors", JSONObject(errorSummary))
 
     private fun JSONObject.toSummary(): SessionSummary {
@@ -228,6 +229,7 @@ class HistoryStore(private val context: Context) {
             cps = optInt("cps"),
             totalSuccess = optInt("success"),
             maxStableSessions = optInt("stable"),
+            averageConnectLatencyMs = optInt("avgConnectLatencyMs"),
             errorSummary = errors
         )
     }

@@ -105,6 +105,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Article
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Assessment
 import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.DeleteOutline
@@ -2001,15 +2002,9 @@ private fun manualRfc5780Probe(endpoint: StunEndpoint, progress: (String) -> Uni
                 )
             }
         }
-        val natType = when {
-            mapping.behavior != "端口保持" -> "NAT4 / 对称型"
-            filtering.behavior == "开放" && filtering.strictFullCone -> "NAT1 / 全锥形"
-            filtering.behavior == "地址受限" -> "NAT2 / 地址受限型"
-            else -> "NAT3 / 端口受限型"
-        }
         ManualNatResult(
             success = true,
-            natType = natType,
+            natType = "RFC5780 行为检测完成",
             mappingBehavior = mapping.behavior,
             filteringBehavior = filtering.behavior,
             localAddress = localIpv4Addresses().firstOrNull()?.let { "$it:${mapping.base.mappedPort}" } ?: "本地端口:${mapping.base.mappedPort}",
@@ -2030,14 +2025,9 @@ private fun manualRfc8489Result(
     val mainAddress = InetSocketAddress(resolveFirstIpv4(endpoint.host), endpoint.port)
     val again = sendAndReceiveStun(socket, mainAddress, buildStunBindingRequest(), 900)
     val mapping = if (again != null && again.mappedIp == base.mappedIp && again.mappedPort == base.mappedPort) "端口保持" else if (again != null) "端口变化" else "公网映射"
-    val natType = when (mapping) {
-        "端口变化" -> "NAT4 / 对称型"
-        "端口保持" -> "端口保持型"
-        else -> "基础 STUN 可用"
-    }
     return ManualNatResult(
         success = true,
-        natType = natType,
+        natType = "RFC8489 基础行为结果",
         mappingBehavior = mapping,
         filteringBehavior = "未验证",
         localAddress = localIpv4Addresses().firstOrNull()?.let { "$it:${socket.localPort}" } ?: "本地:${socket.localPort}",
@@ -2548,7 +2538,10 @@ private fun NetSessionTesterApp() {
     var selectedTab by rememberSaveable { mutableStateOf(MainTab.SETTINGS) }
     var appToolPage by rememberSaveable { mutableStateOf(AppToolPage.NONE) }
     val settingsListState = rememberSaveable(saver = LazyListState.Saver) { LazyListState() }
-    var networkInfoExpanded by rememberSaveable { mutableStateOf(true) }
+    val testListState = rememberSaveable(saver = LazyListState.Saver) { LazyListState() }
+    var testPingFocusRequest by remember { mutableStateOf(0) }
+    var sessionCardExpanded by remember { mutableStateOf(false) }
+    var networkInfoExpanded by rememberSaveable { mutableStateOf(false) }
     var runningJob by remember { mutableStateOf<Job?>(null) }
     var state by remember { mutableStateOf(AppUiState()) }
     var pendingCsv by remember { mutableStateOf<String?>(null) }
@@ -2640,6 +2633,26 @@ private fun NetSessionTesterApp() {
     BackHandler(enabled = showRunLogDetail) { showRunLogDetail = false }
     BackHandler(enabled = showNatDiagnosticDialog) { showNatDiagnosticDialog = false }
     BackHandler(enabled = appToolPage != AppToolPage.NONE) { appToolPage = AppToolPage.NONE }
+
+    LaunchedEffect(state.releaseUi.visible, state.releaseUi.finished, state.releaseUi.elapsedMs) {
+        if (!state.releaseUi.visible || !state.releaseUi.finished) return@LaunchedEffect
+        val completedSnapshot = state.releaseUi
+        delay(10_000L)
+        if (state.releaseUi == completedSnapshot) {
+            state = state.copy(releaseUi = ReleaseUiState())
+        }
+    }
+
+    DisposableEffect(context) {
+        val owner = context as? LifecycleOwner
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_START) {
+                networkInfoExpanded = false
+            }
+        }
+        owner?.lifecycle?.addObserver(observer)
+        onDispose { owner?.lifecycle?.removeObserver(observer) }
+    }
 
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
@@ -4109,6 +4122,10 @@ private fun NetSessionTesterApp() {
                     onOpenTracket = { appToolPage = AppToolPage.TRACKET },
                     onOpenMtu = { appToolPage = AppToolPage.MTU },
                     onOpenRoaming = { appToolPage = AppToolPage.ROAMING },
+                    onOpenPingSettings = {
+                        selectedTab = MainTab.TEST
+                        testPingFocusRequest += 1
+                    },
                     maskPrivacy = maskPrivacy,
                     onMaskPrivacyChange = { maskPrivacy = it },
                     onResolve = {
@@ -4167,6 +4184,10 @@ private fun NetSessionTesterApp() {
                 )
 
                 MainTab.TEST -> TestPage(
+                    listState = testListState,
+                    pingFocusRequest = testPingFocusRequest,
+                    sessionExpanded = sessionCardExpanded,
+                    onSessionExpandedChange = { sessionCardExpanded = it },
                     mode = mode,
                     status = state.status,
                     target = successLimit,
@@ -5095,6 +5116,7 @@ private fun SettingsPage(
     onOpenTracket: () -> Unit,
     onOpenMtu: () -> Unit,
     onOpenRoaming: () -> Unit,
+    onOpenPingSettings: () -> Unit,
     maskPrivacy: Boolean,
     onMaskPrivacyChange: (Boolean) -> Unit,
     onResolve: () -> Unit,
@@ -5132,12 +5154,14 @@ private fun SettingsPage(
     onRestoreDefault: () -> Unit
 ) {
     val context = LocalContext.current
-    val defaultCards = listOf("target", "network", "session", "ping")
-    var settingsCardOrder by remember { mutableStateOf(loadCardOrder(context.applicationContext, "settings_card_order_v2", defaultCards)) }
+    val defaultCards = listOf("network", "target", "session", "ping")
+    var settingsCardOrder by remember {
+        mutableStateOf(loadCardOrder(context.applicationContext, "settings_card_order_v3", defaultCards))
+    }
     fun updateSettingsOrder(next: List<String>) {
         val clean = (next.filter { it in defaultCards } + defaultCards.filterNot { it in next }).distinct()
         settingsCardOrder = clean
-        saveCardOrder(context.applicationContext, "settings_card_order_v2", clean)
+        saveCardOrder(context.applicationContext, "settings_card_order_v3", clean)
     }
 
     LazyColumn(
@@ -5206,7 +5230,13 @@ private fun SettingsPage(
                     }
                     "ping" -> SoftCard {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            MarkBox("ping", BlueSoft, Blue)
+                            Box(
+                                modifier = Modifier
+                                    .clip(ShapeM)
+                                    .clickable(onClick = onOpenPingSettings)
+                            ) {
+                                MarkBox("ping", BlueSoft, Blue)
+                            }
                             Spacer(Modifier.width(10.dp))
                             Column(Modifier.weight(1f)) {
                                 Text("独立 Ping", fontWeight = FontWeight.Bold, color = TextDark, fontSize = 13.sp)
@@ -5310,6 +5340,10 @@ private fun SettingsPage(
 
 @Composable
 private fun TestPage(
+    listState: LazyListState,
+    pingFocusRequest: Int,
+    sessionExpanded: Boolean,
+    onSessionExpandedChange: (Boolean) -> Unit,
     mode: TestMode,
     status: String,
     target: String,
@@ -5358,14 +5392,28 @@ private fun TestPage(
         isAdding -> "● 运行中"
         else -> status
     }
-    val defaultCards = listOf("control", "release", "ping", "sessions", "diagnosis", "logs")
-    var testCardOrder by remember { mutableStateOf(loadCardOrder(context.applicationContext, "test_card_order_v3", defaultCards)) }
-    val visibleIds = remember(releaseUi.visible, releaseBusy, showIpv4, showIpv6) {
+    val defaultCards = listOf("sessions", "release", "ping", "diagnosis", "logs")
+    val initialTestOrder = remember {
+        val saved = loadCardOrder(context.applicationContext, "test_card_order_v4", defaultCards)
+        (saved.filterNot { it == "control" } + defaultCards.filterNot { it in saved }).distinct()
+    }
+    var testCardOrder by remember { mutableStateOf(initialTestOrder) }
+    val totalSessionAttempts = ipv4Stats.totalAttempts + ipv6Stats.totalAttempts
+    var previousSessionAttempts by remember { mutableStateOf(totalSessionAttempts) }
+
+    LaunchedEffect(isAdding) {
+        if (isAdding) onSessionExpandedChange(true)
+    }
+    LaunchedEffect(totalSessionAttempts) {
+        if (previousSessionAttempts == 0 && totalSessionAttempts > 0) onSessionExpandedChange(true)
+        previousSessionAttempts = totalSessionAttempts
+    }
+
+    val visibleIds = remember(releaseUi.visible, releaseBusy) {
         buildList {
-            add("control")
+            add("sessions")
             if (releaseUi.visible || releaseBusy) add("release")
             add("ping")
-            if (showIpv4 || showIpv6) add("sessions")
             add("diagnosis")
             add("logs")
         }
@@ -5378,10 +5426,17 @@ private fun TestPage(
     fun updateTestOrder(nextVisible: List<String>) {
         val merged = (nextVisible + testCardOrder.filterNot { it in nextVisible } + defaultCards.filterNot { it in nextVisible || it in testCardOrder }).distinct()
         testCardOrder = merged
-        saveCardOrder(context.applicationContext, "test_card_order_v3", merged)
+        saveCardOrder(context.applicationContext, "test_card_order_v4", merged)
+    }
+
+    LaunchedEffect(pingFocusRequest, visibleOrder) {
+        if (pingFocusRequest <= 0) return@LaunchedEffect
+        val pingIndex = visibleOrder.indexOf("ping")
+        if (pingIndex >= 0) listState.animateScrollToItem(pingIndex + 1)
     }
 
     LazyColumn(
+        state = listState,
         modifier = Modifier
             .fillMaxSize()
             .padding(horizontal = 14.dp),
@@ -5398,8 +5453,14 @@ private fun TestPage(
         items(visibleOrder, key = { it }) { cardId ->
             ReorderableCardItem(id = cardId, order = visibleOrder, onOrderChange = ::updateTestOrder) {
                 when (cardId) {
-                    "control" -> SoftCard {
-                        SectionTitle("connection_tree", "连接数测试", Blue)
+                    "sessions" -> SoftCard {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            SectionTitle("connection_tree", "连接数测试", Blue)
+                            Spacer(Modifier.weight(1f))
+                            TextButton(onClick = { onSessionExpandedChange(!sessionExpanded) }) {
+                                Text(if (sessionExpanded) "收起" else "展开", color = Muted, fontSize = 12.sp)
+                            }
+                        }
                         Text(
                             when {
                                 releaseBusy -> "正在释放连接，完成后会自动恢复开始按钮"
@@ -5412,7 +5473,9 @@ private fun TestPage(
                         )
                         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                             Button(onClick = onStart, enabled = startEnabled, modifier = Modifier.weight(1f).height(40.dp), shape = ShapeM) {
-                                Icon(Icons.Filled.PlayArrow, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("开始", fontSize = 13.sp)
+                                Icon(Icons.Filled.PlayArrow, contentDescription = null)
+                                Spacer(Modifier.width(4.dp))
+                                Text("开始", fontSize = 13.sp)
                             }
                             Button(
                                 onClick = onStopAdding,
@@ -5420,11 +5483,39 @@ private fun TestPage(
                                 colors = ButtonDefaults.buttonColors(containerColor = RedSoft, contentColor = ErrorRed),
                                 modifier = Modifier.weight(1f).height(38.dp),
                                 shape = ShapeM
-                            ) { Icon(Icons.Filled.Stop, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("停止", fontSize = 13.sp) }
+                            ) {
+                                Icon(Icons.Filled.Stop, contentDescription = null)
+                                Spacer(Modifier.width(4.dp))
+                                Text("停止", fontSize = 13.sp)
+                            }
                         }
                         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                            OutlinedButton(onClick = onRelease, enabled = !releaseBusy, modifier = Modifier.weight(1f).height(38.dp), shape = ShapeM) { Icon(Icons.Filled.DeleteOutline, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("强制释放", fontSize = 13.sp) }
-                            OutlinedButton(onClick = onExport, modifier = Modifier.weight(1f).height(38.dp), shape = ShapeM) { Icon(Icons.Filled.Download, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("导出", fontSize = 13.sp) }
+                            OutlinedButton(onClick = onRelease, enabled = !releaseBusy, modifier = Modifier.weight(1f).height(38.dp), shape = ShapeM) {
+                                Icon(Icons.Filled.DeleteOutline, contentDescription = null)
+                                Spacer(Modifier.width(4.dp))
+                                Text("强制释放", fontSize = 13.sp)
+                            }
+                            OutlinedButton(onClick = onExport, modifier = Modifier.weight(1f).height(38.dp), shape = ShapeM) {
+                                Icon(Icons.Filled.Download, contentDescription = null)
+                                Spacer(Modifier.width(4.dp))
+                                Text("导出", fontSize = 13.sp)
+                            }
+                        }
+                        if (sessionExpanded) {
+                            HorizontalDivider(color = Border.copy(alpha = 0.72f))
+                            CombinedSessionStatsCard(
+                                ipv4Stats = ipv4Stats,
+                                ipv6Stats = ipv6Stats,
+                                maskPrivacy = maskPrivacy,
+                                ipv4Points = ipv4ChartPoints,
+                                ipv6Points = ipv6ChartPoints,
+                                showIpv4 = showIpv4,
+                                showIpv6 = showIpv6,
+                                chartMode = chartMode,
+                                onChartModeChange = onChartModeChange,
+                                testActive = isAdding,
+                                embedded = true
+                            )
                         }
                     }
                     "release" -> ReleaseProgressCard(releaseUi)
@@ -5441,17 +5532,6 @@ private fun TestPage(
                         onClear = onClearPing,
                         onLog = onShowPingLog
                     )
-                    "sessions" -> CombinedSessionStatsCard(
-                        ipv4Stats = ipv4Stats,
-                        ipv6Stats = ipv6Stats,
-                        maskPrivacy = maskPrivacy,
-                        ipv4Points = ipv4ChartPoints,
-                        ipv6Points = ipv6ChartPoints,
-                        showIpv4 = showIpv4,
-                        showIpv6 = showIpv6,
-                        chartMode = chartMode,
-                        onChartModeChange = onChartModeChange
-                    )
                     "diagnosis" -> DiagnosisAdviceInlineCard(mode, ipv4Stats, ipv6Stats)
                     "logs" -> RecentLogCard(logs, maskPrivacy, onMoreLogs)
                 }
@@ -5459,6 +5539,7 @@ private fun TestPage(
         }
         item { Spacer(Modifier.height(70.dp)) }
     }
+
 }
 
 
@@ -6920,8 +7001,12 @@ private fun CombinedSessionStatsCard(
     showIpv4: Boolean,
     showIpv6: Boolean,
     chartMode: ChartMode,
-    onChartModeChange: (ChartMode) -> Unit
+    onChartModeChange: (ChartMode) -> Unit,
+    testActive: Boolean = false,
+    embedded: Boolean = false
 ) {
+    val context = LocalContext.current
+    val clipboard = LocalClipboardManager.current
     val availableViews = remember(showIpv4, showIpv6) {
         buildList {
             if (showIpv4) add(SessionProtocolView.IPV4)
@@ -6952,17 +7037,80 @@ private fun CombinedSessionStatsCard(
         }
     }
 
-    SoftCard {
+    val active = when (selectedView) {
+        SessionProtocolView.IPV4 -> ipv4Stats.activeSessions
+        SessionProtocolView.IPV6 -> ipv6Stats.activeSessions
+        SessionProtocolView.COMPARE -> ipv4Stats.activeSessions + ipv6Stats.activeSessions
+    }
+    val attempts = when (selectedView) {
+        SessionProtocolView.IPV4 -> ipv4Stats.totalAttempts
+        SessionProtocolView.IPV6 -> ipv6Stats.totalAttempts
+        SessionProtocolView.COMPARE -> ipv4Stats.totalAttempts + ipv6Stats.totalAttempts
+    }
+    val success = when (selectedView) {
+        SessionProtocolView.IPV4 -> ipv4Stats.totalSuccess
+        SessionProtocolView.IPV6 -> ipv6Stats.totalSuccess
+        SessionProtocolView.COMPARE -> ipv4Stats.totalSuccess + ipv6Stats.totalSuccess
+    }
+    val failure = when (selectedView) {
+        SessionProtocolView.IPV4 -> ipv4Stats.totalFailure
+        SessionProtocolView.IPV6 -> ipv6Stats.totalFailure
+        SessionProtocolView.COMPARE -> ipv4Stats.totalFailure + ipv6Stats.totalFailure
+    }
+    val peak = when (selectedView) {
+        SessionProtocolView.IPV4 -> sessionPeakValue(ipv4Stats, ipv4Points)
+        SessionProtocolView.IPV6 -> sessionPeakValue(ipv6Stats, ipv6Points)
+        SessionProtocolView.COMPARE -> maxOf(
+            sessionPeakValue(ipv4Stats, ipv4Points),
+            sessionPeakValue(ipv6Stats, ipv6Points)
+        )
+    }
+    val targetCps = when (selectedView) {
+        SessionProtocolView.IPV4 -> ipv4Stats.lastAdded
+        SessionProtocolView.IPV6 -> ipv6Stats.lastAdded
+        SessionProtocolView.COMPARE -> maxOf(ipv4Stats.lastAdded, ipv6Stats.lastAdded)
+    }
+    val actualCps = when (selectedView) {
+        SessionProtocolView.IPV4 -> ipv4Stats.cps
+        SessionProtocolView.IPV6 -> ipv6Stats.cps
+        SessionProtocolView.COMPARE -> maxOf(ipv4Stats.cps, ipv6Stats.cps)
+    }
+    val averageLatencyMs = when (selectedView) {
+        SessionProtocolView.IPV4 -> ipv4Stats.averageConnectLatencyMs
+        SessionProtocolView.IPV6 -> ipv6Stats.averageConnectLatencyMs
+        SessionProtocolView.COMPARE -> {
+            val samples = ipv4Stats.totalSuccess + ipv6Stats.totalSuccess
+            if (samples > 0) {
+                ((ipv4Stats.averageConnectLatencyMs.toLong() * ipv4Stats.totalSuccess.toLong() +
+                    ipv6Stats.averageConnectLatencyMs.toLong() * ipv6Stats.totalSuccess.toLong()) / samples.toLong()).toInt()
+            } else 0
+        }
+    }
+    val rawAddress = when (selectedView) {
+        SessionProtocolView.IPV4 -> ipv4Stats.resolvedAddresses.joinToString(" / ")
+        SessionProtocolView.IPV6 -> ipv6Stats.resolvedAddresses.joinToString(" / ")
+        SessionProtocolView.COMPARE -> buildList {
+            if (ipv4Stats.resolvedAddresses.isNotEmpty()) add("IPv4 ${ipv4Stats.resolvedAddresses.joinToString(" / ")}")
+            if (ipv6Stats.resolvedAddresses.isNotEmpty()) add("IPv6 ${ipv6Stats.resolvedAddresses.joinToString(" / ")}")
+        }.joinToString("    ")
+    }
+    val displayAddress = when (selectedView) {
+        SessionProtocolView.IPV4 -> displayIpList(ipv4Stats.resolvedAddresses, maskPrivacy)
+        SessionProtocolView.IPV6 -> displayIpList(ipv6Stats.resolvedAddresses, maskPrivacy)
+        SessionProtocolView.COMPARE -> buildList {
+            if (ipv4Stats.resolvedAddresses.isNotEmpty()) add("IPv4 ${displayIpList(ipv4Stats.resolvedAddresses, maskPrivacy)}")
+            if (ipv6Stats.resolvedAddresses.isNotEmpty()) add("IPv6 ${displayIpList(ipv6Stats.resolvedAddresses, maskPrivacy)}")
+        }.joinToString("    ")
+    }
+
+    val content: @Composable ColumnScope.() -> Unit = {
         Row(verticalAlignment = Alignment.CenterVertically) {
             SectionTitle("connection_tree", "IPv4 / IPv6 会话", Blue)
             Spacer(Modifier.weight(1f))
             val phaseText = when (selectedView) {
                 SessionProtocolView.IPV4 -> ipv4Stats.phase
                 SessionProtocolView.IPV6 -> ipv6Stats.phase
-                SessionProtocolView.COMPARE -> when {
-                    ipv6Stats.totalAttempts > 0 -> ipv6Stats.phase
-                    else -> ipv4Stats.phase
-                }
+                SessionProtocolView.COMPARE -> if (ipv6Stats.totalAttempts > 0) ipv6Stats.phase else ipv4Stats.phase
             }
             Text(phaseText, color = Blue, fontWeight = FontWeight.Bold, maxLines = 1, fontSize = 12.sp)
         }
@@ -6971,63 +7119,25 @@ private fun CombinedSessionStatsCard(
             SessionProtocolSelector(selectedView, availableViews, onSelected = { selectedView = it })
         }
 
-        if (selectedView == SessionProtocolView.COMPARE) {
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                MetricTile("IPv4活动", ipv4Stats.activeSessions.toString(), Blue, Modifier.weight(1f))
-                MetricTile("IPv4失败", ipv4Stats.totalFailure.toString(), ErrorRed, Modifier.weight(1f))
-                MetricTile("IPv6活动", ipv6Stats.activeSessions.toString(), Purple, Modifier.weight(1f))
-                MetricTile("IPv6失败", ipv6Stats.totalFailure.toString(), ErrorRed, Modifier.weight(1f))
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                MetricTile("总尝试", (ipv4Stats.totalAttempts + ipv6Stats.totalAttempts).toString(), Navy, Modifier.weight(1f))
-                MetricTile("目标CPS", "${maxOf(ipv4Stats.lastAdded, ipv6Stats.lastAdded)}/s", Blue, Modifier.weight(1f))
-                MetricTile(
-                    "实际CPS",
-                    "${if (ipv6Stats.totalAttempts > 0) ipv6Stats.cps else ipv4Stats.cps}/s",
-                    Blue,
-                    Modifier.weight(1f)
-                )
-                MetricTile(
-                    "最高峰值",
-                    maxOf(sessionPeakValue(ipv4Stats, ipv4Points), sessionPeakValue(ipv6Stats, ipv6Points)).toString(),
-                    Green,
-                    Modifier.weight(1f)
-                )
-            }
-            val addressText = buildList {
-                if (ipv4Stats.resolvedAddresses.isNotEmpty()) add("IPv4 ${displayIpList(ipv4Stats.resolvedAddresses, maskPrivacy)}")
-                if (ipv6Stats.resolvedAddresses.isNotEmpty()) add("IPv6 ${displayIpList(ipv6Stats.resolvedAddresses, maskPrivacy)}")
-            }.joinToString("  ")
-            if (addressText.isNotBlank()) {
-                Text("地址：$addressText", maxLines = 1, overflow = TextOverflow.Ellipsis, color = Muted, fontSize = 11.sp)
-            }
-        } else {
-            val peak = sessionPeakValue(selectedStats, selectedRawPoints)
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                MetricTile("活动", selectedStats.activeSessions.toString(), Blue, Modifier.weight(1f))
-                MetricTile("峰值", if (peak > 0) peak.toString() else "—", Green, Modifier.weight(1f))
-                MetricTile("失败", selectedStats.totalFailure.toString(), ErrorRed, Modifier.weight(1f))
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                MetricTile("总计", selectedStats.totalAttempts.toString(), Navy, Modifier.weight(1f))
-                MetricTile("目标CPS", "${selectedStats.lastAdded}/s", Blue, Modifier.weight(1f))
-                MetricTile(
-                    if (selectedStats.activeSessions == 0 && selectedStats.totalAttempts > 0) "平均CPS" else "实际CPS",
-                    "${selectedStats.cps}/s",
-                    Blue,
-                    Modifier.weight(1f)
-                )
-            }
-            if (selectedStats.resolvedAddresses.isNotEmpty()) {
-                Text(
-                    "地址：${displayIpList(selectedStats.resolvedAddresses, maskPrivacy)}",
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    color = Muted,
-                    fontSize = 11.sp
-                )
-            }
+        Row(horizontalArrangement = Arrangement.spacedBy(5.dp), modifier = Modifier.fillMaxWidth()) {
+            MetricTile("活动", active.toString(), Blue, Modifier.weight(1f))
+            MetricTile("总计", attempts.toString(), Navy, Modifier.weight(1f))
+            MetricTile("CPS", "$targetCps/$actualCps", Blue, Modifier.weight(1f))
+            MetricTile("平均延迟", if (averageLatencyMs > 0) "${averageLatencyMs}ms" else "—", Purple, Modifier.weight(1f))
         }
+
+        SessionAddressRow(
+            displayAddress = displayAddress,
+            rawAddress = rawAddress,
+            onCopy = {
+                if (rawAddress.isBlank()) {
+                    Toast.makeText(context, "暂无可复制地址", Toast.LENGTH_SHORT).show()
+                } else {
+                    clipboard.setText(AnnotatedString(rawAddress))
+                    Toast.makeText(context, "地址已复制", Toast.LENGTH_SHORT).show()
+                }
+            }
+        )
 
         ChartModeSelector(chartMode, onChartModeChange)
 
@@ -7049,90 +7159,120 @@ private fun CombinedSessionStatsCard(
                 SessionProtocolView.COMPARE -> compareSeries
             }
             CombinedSessionGrowthChart(series)
-            if (selectedView == SessionProtocolView.COMPARE) {
-                SessionCompareStabilitySummary(ipv4Stats, ipv4Points, ipv6Stats, ipv6Points)
-            } else {
-                SessionStabilitySummary(selectedStats, selectedRawPoints)
-            }
         } else {
             if (selectedView == SessionProtocolView.COMPARE) {
                 CombinedSessionPeakChart(ipv4Stats, ipv4Points, ipv6Stats, ipv6Points)
-                SessionCompareStabilitySummary(ipv4Stats, ipv4Points, ipv6Stats, ipv6Points)
             } else {
                 SessionPeakChart(selectedStats, selectedRawPoints)
-                SessionStabilitySummary(selectedStats, selectedRawPoints)
             }
+        }
+
+        SessionResultSummaryCard(
+            peak = peak,
+            success = success,
+            failure = failure,
+            active = active,
+            attempts = attempts,
+            testActive = testActive
+        )
+    }
+
+    if (embedded) {
+        Column(verticalArrangement = Arrangement.spacedBy(7.dp), content = content)
+    } else {
+        SoftCard(content = content)
+    }
+}
+
+@Composable
+private fun SessionAddressRow(
+    displayAddress: String,
+    rawAddress: String,
+    onCopy: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color(0xFFF8FAFC), ShapeM)
+            .border(1.dp, Border.copy(alpha = 0.65f), ShapeM)
+            .padding(start = 9.dp, end = 3.dp, top = 3.dp, bottom = 3.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text("地址：", color = Muted, fontSize = 10.sp, maxLines = 1)
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .horizontalScroll(rememberScrollState())
+                .clickable(enabled = rawAddress.isNotBlank(), onClick = onCopy)
+        ) {
+            Text(
+                displayAddress.ifBlank { "—" },
+                color = TextDark,
+                fontSize = 10.sp,
+                maxLines = 1,
+                softWrap = false,
+                fontFamily = FontFamily.Monospace
+            )
+        }
+        IconButton(
+            onClick = onCopy,
+            enabled = rawAddress.isNotBlank(),
+            modifier = Modifier.width(32.dp).height(32.dp)
+        ) {
+            Icon(Icons.Filled.ContentCopy, contentDescription = "复制地址", tint = Blue, modifier = Modifier.width(16.dp).height(16.dp))
         }
     }
 }
 
 @Composable
-private fun SessionStabilitySummary(stats: ProtocolStats, points: List<ChartPoint>) {
-    val peak = sessionPeakValue(stats, points)
-    val stable = sessionStableValue(stats, points)
-    val retention = sessionRetentionPercent(stats, points)
+private fun SessionResultSummaryCard(
+    peak: Int,
+    success: Int,
+    failure: Int,
+    active: Int,
+    attempts: Int,
+    testActive: Boolean
+) {
+    val fourthLabel = if (testActive) "保持率" else "失败率"
+    val fourthValue = when {
+        testActive && peak > 0 -> String.format(Locale.US, "%.1f%%", active.toDouble() * 100.0 / peak.toDouble())
+        !testActive && attempts > 0 -> String.format(Locale.US, "%.2f%%", failure.toDouble() * 100.0 / attempts.toDouble())
+        else -> "—"
+    }
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .background(Color(0xFFF8FAFC), ShapeM)
             .border(1.dp, Border.copy(alpha = 0.75f), ShapeM)
-            .padding(vertical = 8.dp),
-        horizontalArrangement = Arrangement.SpaceEvenly
+            .padding(horizontal = 4.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        CompactSummaryValue("峰值", if (peak > 0) peak.toString() else "—", Blue)
-        CompactSummaryValue("稳定", if (stable > 0) stable.toString() else "—", Green)
-        CompactSummaryValue("保持率", if (peak > 0) String.format(Locale.US, "%.1f%%", retention) else "—", Purple)
+        FloatingSummaryValue("峰值", if (peak > 0) peak.toString() else "—", Blue, Modifier.weight(1f))
+        FloatingSummaryDivider()
+        FloatingSummaryValue("成功", success.toString(), Green, Modifier.weight(1f))
+        FloatingSummaryDivider()
+        FloatingSummaryValue("失败", failure.toString(), ErrorRed, Modifier.weight(1f))
+        FloatingSummaryDivider()
+        FloatingSummaryValue(fourthLabel, fourthValue, Purple, Modifier.weight(1f))
     }
 }
 
 @Composable
-private fun SessionCompareStabilitySummary(
-    ipv4Stats: ProtocolStats,
-    ipv4Points: List<ChartPoint>,
-    ipv6Stats: ProtocolStats,
-    ipv6Points: List<ChartPoint>
-) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(Color(0xFFF8FAFC), ShapeM)
-            .border(1.dp, Border.copy(alpha = 0.75f), ShapeM)
-            .padding(horizontal = 9.dp, vertical = 7.dp),
-        verticalArrangement = Arrangement.spacedBy(5.dp)
-    ) {
-        SessionCompareSummaryRow("IPv4", Blue, ipv4Stats, ipv4Points)
-        SessionCompareSummaryRow("IPv6", Purple, ipv6Stats, ipv6Points)
-    }
-}
-
-@Composable
-private fun SessionCompareSummaryRow(
-    label: String,
-    color: Color,
-    stats: ProtocolStats,
-    points: List<ChartPoint>
-) {
-    val peak = sessionPeakValue(stats, points)
-    val stable = sessionStableValue(stats, points)
-    val retention = sessionRetentionPercent(stats, points)
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Text(label, color = color, fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(42.dp))
-        Text("峰值 ${if (peak > 0) peak else "—"}", color = TextDark, fontSize = 10.sp, modifier = Modifier.weight(1f))
-        Text("稳定 ${if (stable > 0) stable else "—"}", color = TextDark, fontSize = 10.sp, modifier = Modifier.weight(1f))
-        Text(
-            "保持率 ${if (peak > 0) String.format(Locale.US, "%.1f%%", retention) else "—"}",
-            color = Muted,
-            fontSize = 10.sp
-        )
-    }
-}
-
-@Composable
-private fun CompactSummaryValue(label: String, value: String, color: Color) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(label, color = Muted, fontSize = 9.sp)
+private fun FloatingSummaryValue(label: String, value: String, color: Color, modifier: Modifier) {
+    Column(modifier = modifier, horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(label, color = Muted, fontSize = 9.sp, maxLines = 1)
         Text(value, color = color, fontSize = 13.sp, fontWeight = FontWeight.Bold, maxLines = 1)
     }
+}
+
+@Composable
+private fun FloatingSummaryDivider() {
+    Box(
+        modifier = Modifier
+            .width(1.dp)
+            .height(28.dp)
+            .background(Border.copy(alpha = 0.9f))
+    )
 }
 
 @Composable
@@ -7631,7 +7771,10 @@ private fun NatDiagnosticDialog(
                     lineHeight = 16.sp,
                     modifier = Modifier.background(Color(0xFFF8FAFC), ShapeM).padding(10.dp)
                 )
-                Text("STUN服务器", color = TextDark, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("STUN服务器", color = TextDark, fontSize = 13.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                    Text("未填写端口时默认 3478", color = Muted, fontSize = 10.sp)
+                }
                 servers.forEachIndexed { index, item ->
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                         OutlinedTextField(
@@ -7685,7 +7828,12 @@ private fun NatDiagnosticDialog(
                         modifier = Modifier.fillMaxWidth().background(if (r.success) BlueSoft else RedSoft, ShapeM).padding(12.dp)
                     ) {
                         Text("测试结果", color = Muted, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                        Text(r.natType, color = if (r.success) Blue else ErrorRed, fontSize = 18.sp, fontWeight = FontWeight.ExtraBold)
+                        Text(
+                            if (mode == ManualNatMode.RFC5780 && r.success) "RFC5780 行为检测完成" else r.natType,
+                            color = if (r.success) Blue else ErrorRed,
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.ExtraBold
+                        )
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                             MiniResultTile("映射行为", standardMappingText(r.mappingBehavior), Modifier.weight(1f))
                             MiniResultTile("过滤行为", standardFilteringText(r.filteringBehavior), Modifier.weight(1f))
@@ -9238,6 +9386,145 @@ private fun runMtuPing(address: String, ipv6: Boolean, mtu: Int, timeoutMs: Int,
     return false to fallback
 }
 
+private fun runMtuCandidate(
+    address: String,
+    ipv6: Boolean,
+    mtu: Int,
+    timeoutMs: Int,
+    mode: MtuProbeMode,
+    attempts: Int = 3,
+    requiredSuccess: Int = 2
+): Triple<Boolean, String, Int> {
+    val totalAttempts = attempts.coerceAtLeast(1)
+    val needed = requiredSuccess.coerceIn(1, totalAttempts)
+    var successCount = 0
+    var executed = 0
+    val details = mutableListOf<String>()
+    while (executed < totalAttempts) {
+        val (ok, detail) = runMtuPing(address, ipv6, mtu, timeoutMs, mode)
+        executed++
+        if (ok) successCount++
+        if (detail.isNotBlank()) details += detail
+        val remaining = totalAttempts - executed
+        if (successCount >= needed || successCount + remaining < needed) break
+    }
+    val passed = successCount >= needed
+    val summary = "$successCount/$executed 成功" + details.firstOrNull()?.let { " · $it" }.orEmpty()
+    return Triple(passed, summary, successCount)
+}
+
+private data class MtuPathProbe(
+    val protocol: String,
+    val address: String,
+    val mtu: Int?,
+    val steps: List<MtuStep>,
+    val detail: String,
+    val confidence: String,
+    val error: String = ""
+)
+
+private suspend fun resolveMtuFamilyAddress(hostInput: String, ipv6: Boolean): InetAddress? = withContext(Dispatchers.IO) {
+    val host = cleanToolHost(hostInput)
+    runCatching {
+        InetAddress.getAllByName(host).firstOrNull { address ->
+            if (ipv6) address is Inet6Address else address is Inet4Address
+        }
+    }.getOrNull()
+}
+
+private suspend fun probeMtuPath(
+    host: String,
+    ipv6: Boolean,
+    minMtuInput: Int,
+    maxMtuInput: Int,
+    localMtu: Int?,
+    timeoutMs: Int,
+    mode: MtuProbeMode,
+    onStep: suspend (MtuStep) -> Unit
+): MtuPathProbe {
+    val protocol = if (ipv6) "IPv6" else "IPv4"
+    val resolved = resolveMtuFamilyAddress(host, ipv6)
+        ?: return MtuPathProbe(protocol, "-", null, emptyList(), "未解析到 $protocol 地址", "低", "无可用地址")
+    val address = resolved.hostAddress?.substringBefore('%') ?: host
+    val minimum = (if (ipv6) minMtuInput.coerceAtLeast(1280) else minMtuInput).coerceIn(576, 9000)
+    val cappedMax = minOf(maxMtuInput.coerceIn(576, 9000), localMtu ?: 9000)
+    if (cappedMax < minimum) {
+        return MtuPathProbe(protocol, address, null, emptyList(), "本地接口 MTU 上限 $cappedMax 低于探测下限 $minimum", "低", "探测范围无效")
+    }
+
+    var low = minimum
+    var high = cappedMax
+    var best: Int? = null
+    val steps = mutableListOf<MtuStep>()
+    val observations = mutableListOf<Pair<Int, Boolean>>()
+    while (low <= high && currentCoroutineContext().isActive) {
+        val mid = (low + high) / 2
+        val (ok, detail, _) = runMtuCandidate(address, ipv6, mid, timeoutMs, mode, attempts = 3, requiredSuccess = 2)
+        val step = MtuStep(mid, ok, "[$protocol] $detail")
+        steps += step
+        observations += mid to ok
+        withContext(Dispatchers.Main) { onStep(step) }
+        if (ok) {
+            best = mid
+            low = mid + 1
+        } else {
+            high = mid - 1
+        }
+    }
+
+    if (best == null) {
+        return MtuPathProbe(protocol, address, null, steps, "$protocol 路径未得到有效 MTU", "低", "目标不响应或 ICMP 被限制")
+    }
+
+    var refinedBest = best
+    val refineStart = maxOf(minimum, best - 1)
+    val refineEnd = minOf(cappedMax, best + 2)
+    for (candidate in refineStart..refineEnd) {
+        val (ok, detail, _) = runMtuCandidate(address, ipv6, candidate, timeoutMs, mode, attempts = 3, requiredSuccess = 2)
+        val step = MtuStep(candidate, ok, "[$protocol 边界复测] $detail")
+        steps += step
+        observations += candidate to ok
+        withContext(Dispatchers.Main) { onStep(step) }
+        if (ok) refinedBest = maxOf(refinedBest, candidate)
+    }
+
+    val (confirmed, confirmDetail, _) = runMtuCandidate(address, ipv6, refinedBest, timeoutMs, mode, attempts = 5, requiredSuccess = 3)
+    val confirmStep = MtuStep(refinedBest, confirmed, "[$protocol 最终确认] $confirmDetail")
+    steps += confirmStep
+    withContext(Dispatchers.Main) { onStep(confirmStep) }
+    if (!confirmed) {
+        refinedBest = observations.filter { it.second }.maxOfOrNull { it.first } ?: best
+    }
+
+    val nextMtu = refinedBest + 1
+    val nextFailed = if (nextMtu <= cappedMax) {
+        val (nextOk, nextDetail, _) = runMtuCandidate(address, ipv6, nextMtu, timeoutMs, mode, attempts = 3, requiredSuccess = 2)
+        val nextStep = MtuStep(nextMtu, nextOk, "[$protocol 边界外确认] $nextDetail")
+        steps += nextStep
+        withContext(Dispatchers.Main) { onStep(nextStep) }
+        !nextOk
+    } else true
+
+    val sorted = observations.sortedBy { it.first }
+    var seenFailure = false
+    var nonMonotonic = false
+    sorted.forEach { (_, ok) ->
+        if (!ok) seenFailure = true else if (seenFailure) nonMonotonic = true
+    }
+    val confidence = when {
+        nonMonotonic -> "低"
+        confirmed && nextFailed -> "高"
+        confirmed -> "中"
+        else -> "低"
+    }
+    val detail = buildString {
+        append("MTU≈$refinedBest · 置信度$confidence")
+        if (cappedMax < maxMtuInput) append(" · 上限受本地接口 MTU $cappedMax 限制")
+        if (nonMonotonic) append(" · 结果不单调，可能受 ICMP 限速或网络波动影响")
+    }
+    return MtuPathProbe(protocol, address, refinedBest, steps, detail, confidence)
+}
+
 private fun analyzeMtu(mtu: Int?, ipv6: Boolean): String {
     if (mtu == null) return "未得到有效 MTU。可能目标不可达、系统 ping 能力受限，或当前网络拦截 ICMP。"
     return when {
@@ -9263,15 +9550,23 @@ private suspend fun runMtuProbeLive(
     val host = cleanToolHost(hostInput)
     val local = readLocalInterfaceMtu(context)
     val checkLines = mutableListOf<MtuCheckLine>()
+    checkLines += MtuCheckLine(
+        name = "本地接口",
+        value = local.first?.let { "MTU $it" } ?: "未读取到",
+        detail = local.second,
+        ok = local.first != null
+    )
 
     val needTcp = probeMode == MtuProbeMode.COMPREHENSIVE || probeMode == MtuProbeMode.TCP
     val tcpProbe = if (needTcp) runTcpBusinessMtuProbe(context, host, policy, timeoutMs) else null
     tcpProbe?.let { tcp ->
         checkLines += MtuCheckLine(
-            "TCP业务",
-            if (tcp.connected) "MSS≈${tcp.mss ?: "-"} / MTU≈${tcp.mtu ?: "-"}" else "连接失败",
-            tcp.detail,
-            tcp.connected
+            name = "TCP连通性",
+            value = if (tcp.connected) "成功 ${tcp.costMs}ms" else "连接失败",
+            detail = if (tcp.connected) {
+                "${tcp.protocol} · ${tcp.host}:${tcp.port}；TCP仅验证业务连通性，本地估算MSS≈${tcp.mss ?: "-"}，不作为路径MTU结果。"
+            } else tcp.detail,
+            ok = tcp.connected
         )
     }
 
@@ -9281,74 +9576,82 @@ private suspend fun runMtuProbeLive(
             address = tcpProbe?.address ?: "-",
             protocol = tcpProbe?.protocol ?: policy.label,
             method = probeMode.label,
-            mtu = tcpProbe?.mtu,
+            mtu = null,
             steps = emptyList(),
-            analysis = if (tcpProbe?.connected == true) "TCP 业务连通性正常。当前 Java 实现显示 MSS 估算值，后续可接 NDK TCP_MAXSEG 获取更准确的 TCP MSS。" else "TCP 连接失败，可能目标端口不可达或网络策略限制；可结合 ICMP 路径探测继续判断。",
+            analysis = if (tcpProbe?.connected == true) "TCP连接正常；本模式不输出路径MTU。" else "TCP连接失败；建议改用PMTU或综合模式继续检测。",
             localMtu = local.first,
             localDetail = local.second,
             tcpMss = tcpProbe?.mss,
-            tcpMtu = tcpProbe?.mtu,
+            tcpMtu = null,
             tcpDetail = tcpProbe?.detail.orEmpty(),
             checkLines = checkLines
         )
     }
 
-    val startResolve = resolveMtuAddress(host, policy)
-    val address = startResolve.first ?: return@withContext MtuResult(
-        host,
-        "-",
-        policy.label,
-        probeMode.label,
-        null,
-        emptyList(),
-        analyzeMtu(null, false),
-        startResolve.second ?: "解析失败",
-        localMtu = local.first,
-        localDetail = local.second,
-        tcpMss = tcpProbe?.mss,
-        tcpMtu = tcpProbe?.mtu,
-        tcpDetail = tcpProbe?.detail.orEmpty(),
-        appLayerDetail = "",
-        checkLines = checkLines
-    )
-    val ipv6 = address is Inet6Address
-    val minMtu = (if (ipv6) minMtuInput.coerceAtLeast(1280) else minMtuInput).coerceIn(576, 9000)
-    val maxMtu = maxMtuInput.coerceAtLeast(minMtu).coerceIn(minMtu, 9000)
-    var low = minMtu
-    var high = maxMtu
-    var best: Int? = null
-    val steps = mutableListOf<MtuStep>()
-    while (low <= high && currentCoroutineContext().isActive) {
-        val mid = (low + high) / 2
-        val pingMode = if (probeMode == MtuProbeMode.ICMP) MtuProbeMode.ICMP else MtuProbeMode.PMTU
-        val (ok, detail) = runMtuPing(address.hostAddress?.substringBefore('%') ?: host, ipv6, mid, timeoutMs, pingMode)
-        val step = MtuStep(mid, ok, detail.ifBlank { if (ok) "成功" else "失败/超时" })
-        steps += step
-        withContext(Dispatchers.Main) { onStep(step) }
-        if (ok) {
-            best = mid
-            low = mid + 1
-        } else {
-            high = mid - 1
+    val pathMode = if (probeMode == MtuProbeMode.ICMP) MtuProbeMode.ICMP else MtuProbeMode.PMTU
+    val pathResults = mutableListOf<MtuPathProbe>()
+    if (probeMode == MtuProbeMode.COMPREHENSIVE) {
+        pathResults += probeMtuPath(host, false, minMtuInput, maxMtuInput, local.first, timeoutMs, pathMode, onStep)
+        pathResults += probeMtuPath(host, true, minMtuInput, maxMtuInput, local.first, timeoutMs, pathMode, onStep)
+    } else {
+        val selected = resolveMtuAddress(host, policy).first
+        if (selected == null) {
+            return@withContext MtuResult(
+                target = host,
+                address = "-",
+                protocol = policy.label,
+                method = probeMode.label,
+                mtu = null,
+                steps = emptyList(),
+                analysis = "目标解析失败，未得到路径MTU。",
+                error = "无可用地址",
+                localMtu = local.first,
+                localDetail = local.second,
+                checkLines = checkLines
+            )
         }
+        pathResults += probeMtuPath(host, selected is Inet6Address, minMtuInput, maxMtuInput, local.first, timeoutMs, pathMode, onStep)
     }
-    val pathName = if (probeMode == MtuProbeMode.PMTU) "PMTU路径" else "ICMP路径"
-    checkLines += MtuCheckLine(pathName, best?.let { "MTU≈$it" } ?: "未得到", analyzeMtu(best, ipv6), best != null)
+
+    pathResults.forEach { path ->
+        checkLines += MtuCheckLine(
+            name = "${path.protocol}路径",
+            value = path.mtu?.let { "MTU≈$it" } ?: "未得到",
+            detail = if (path.error.isBlank()) "${path.detail}。${analyzeMtu(path.mtu, path.protocol == "IPv6")}" else path.detail,
+            ok = path.mtu != null
+        )
+    }
     if (probeMode == MtuProbeMode.PMTU || probeMode == MtuProbeMode.COMPREHENSIVE) {
-        checkLines += MtuCheckLine("PMTU说明", if (best != null) "已尝试" else "受限", pmtuModeNote(ipv6), best != null)
+        checkLines += MtuCheckLine(
+            name = "PMTU说明",
+            value = if (pathResults.any { it.mtu != null }) "已复测" else "受限",
+            detail = "每个候选值发送3次、至少2次成功才通过；边界再做5次确认。结果仍可能受ICMP策略影响。",
+            ok = pathResults.any { it.mtu != null }
+        )
     }
+
+    val validPaths = pathResults.filter { it.mtu != null }
+    val effectiveMtu = validPaths.mapNotNull { it.mtu }.minOrNull()
+    val addressText = validPaths.joinToString(" / ") { "${it.protocol} ${it.address}" }.ifBlank { "-" }
+    val protocolText = validPaths.joinToString(" / ") { it.protocol }.ifBlank { policy.label }
+    val analysisParts = pathResults.map { path ->
+        if (path.mtu != null) "${path.protocol} ${path.mtu}（置信度${path.confidence}）" else "${path.protocol}未得到"
+    }
+    val conservativeHint = effectiveMtu?.let { "；保守应用层单包建议≤${max(1200, it - 80)}字节" }.orEmpty()
+
     MtuResult(
         target = host,
-        address = address.hostAddress?.substringBefore('%') ?: "-",
-        protocol = if (ipv6) "IPv6" else "IPv4",
+        address = addressText,
+        protocol = protocolText,
         method = probeMode.label,
-        mtu = best,
-        steps = steps,
-        analysis = buildMtuOverallAnalysis(local.first, best, tcpProbe?.mtu, ipv6),
+        mtu = effectiveMtu,
+        steps = pathResults.flatMap { it.steps },
+        analysis = "${analysisParts.joinToString("；")}$conservativeHint",
+        error = if (validPaths.isEmpty()) "未得到有效路径MTU" else "",
         localMtu = local.first,
         localDetail = local.second,
         tcpMss = tcpProbe?.mss,
-        tcpMtu = tcpProbe?.mtu,
+        tcpMtu = null,
         tcpDetail = tcpProbe?.detail.orEmpty(),
         appLayerDetail = "",
         checkLines = checkLines
@@ -9356,12 +9659,12 @@ private suspend fun runMtuProbeLive(
 }
 
 private fun buildMtuOverallAnalysis(localMtu: Int?, icmpMtu: Int?, tcpMtu: Int?, ipv6: Boolean): String {
-    val effective = listOfNotNull(icmpMtu, tcpMtu).minOrNull()
-    val base = analyzeMtu(icmpMtu ?: tcpMtu, ipv6)
+    val base = analyzeMtu(icmpMtu, ipv6)
     val localHint = localMtu?.let { "本地上限 $it；" }.orEmpty()
-    val effectiveHint = effective?.let { "建议应用层单包保守控制在 ${max(1200, it - 80)} 字节以内。" }.orEmpty()
+    val effectiveHint = icmpMtu?.let { "建议应用层单包保守控制在 ${max(1200, it - 80)} 字节以内。" }.orEmpty()
     return "$localHint$base $effectiveHint".trim()
 }
+
 
 private fun intToIpv4(value: Int): String {
     return listOf(value and 0xff, value shr 8 and 0xff, value shr 16 and 0xff, value shr 24 and 0xff).joinToString(".")
@@ -9938,7 +10241,7 @@ private fun MtuToolPage(onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
     var host by remember { mutableStateOf("www.qq.com") }
     var policy by remember { mutableStateOf(ToolIpPolicy.AUTO) }
-    var minMtu by remember { mutableStateOf("1280") }
+    var minMtu by remember { mutableStateOf("576") }
     var maxMtu by remember { mutableStateOf("1500") }
     var timeoutMs by remember { mutableStateOf("1200") }
     var probeMode by remember { mutableStateOf(MtuProbeMode.COMPREHENSIVE) }
@@ -9956,7 +10259,7 @@ private fun MtuToolPage(onBack: () -> Unit) {
                     ConfigColumn("超时", Modifier.weight(1f)) { CleanField(timeoutMs, { timeoutMs = it.onlyDigits().take(5) }, "1200", keyboardType = KeyboardType.Number, leadingMark = "hourglass") }
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                    ConfigColumn("最小MTU", Modifier.weight(1f)) { CleanField(minMtu, { minMtu = it.onlyDigits().take(4) }, "1280", keyboardType = KeyboardType.Number, leadingMark = "tune") }
+                    ConfigColumn("最小MTU", Modifier.weight(1f)) { CleanField(minMtu, { minMtu = it.onlyDigits().take(4) }, "576", keyboardType = KeyboardType.Number, leadingMark = "tune") }
                     ConfigColumn("最大MTU", Modifier.weight(1f)) { CleanField(maxMtu, { maxMtu = it.onlyDigits().take(4) }, "1500", keyboardType = KeyboardType.Number, leadingMark = "tune") }
                 }
                 ConfigColumn("检测方式") {
@@ -9966,7 +10269,7 @@ private fun MtuToolPage(onBack: () -> Unit) {
                         }
                     }
                 }
-                Text("综合模式会同时给出 PMTU 增强探测、ICMP 路径估测和 TCP 业务 MSS/MTU 估算。TCP 精确 MSS 后续可接 NDK TCP_MAXSEG。", color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
+                Text("综合模式分别检测本地接口、IPv4路径、IPv6路径和TCP连通性。路径候选值会多次复测；TCP不再作为真实路径MTU。", color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
                 Button(
                     onClick = {
                         if (running) return@Button
@@ -9974,7 +10277,7 @@ private fun MtuToolPage(onBack: () -> Unit) {
                         steps = emptyList()
                         result = null
                         scope.launch {
-                            val r = runMtuProbeLive(context.applicationContext, host, policy, probeMode, minMtu.safeInt(1280, 576, 9000), maxMtu.safeInt(1500, 576, 9000), timeoutMs.safeInt(1200, 500, 10000)) { step ->
+                            val r = runMtuProbeLive(context.applicationContext, host, policy, probeMode, minMtu.safeInt(576, 576, 9000), maxMtu.safeInt(1500, 576, 9000), timeoutMs.safeInt(1200, 500, 10000)) { step ->
                                 steps = steps + step
                             }
                             result = r
@@ -9999,7 +10302,7 @@ private fun MtuProcessCard(running: Boolean, steps: List<MtuStep>, result: MtuRe
             Text(if (running) "运行中" else "完成", color = if (running) Blue else Muted, fontSize = 11.sp, fontWeight = FontWeight.Bold)
         }
         if (steps.isEmpty()) {
-            Text("等待开始。综合模式会显示 PMTU 增强、ICMP 路径和 TCP 业务检测；IPv6 模式会自动解析 AAAA。", color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
+            Text("等待开始。综合模式会分别显示本地接口、IPv4路径、IPv6路径与TCP连通性。", color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
         } else {
             Text(steps.joinToString("\n") { "尝试 ${it.mtu}：${if (it.success) "成功" else "失败"} ${it.detail}" }, color = TextDark, fontSize = 11.sp, lineHeight = 15.sp, fontFamily = FontFamily.Monospace, maxLines = 18, overflow = TextOverflow.Ellipsis, modifier = Modifier.horizontalScroll(rememberScrollState()))
         }

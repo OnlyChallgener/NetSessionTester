@@ -88,7 +88,8 @@ data class ProtocolStats(
     val cps: Int = 0,
     val errorSummary: Map<String, Int> = emptyMap(),
     val totalSuccess: Int = 0,
-    val maxStableSessions: Int = 0
+    val maxStableSessions: Int = 0,
+    val averageConnectLatencyMs: Int = 0
 )
 
 data class LogLine(
