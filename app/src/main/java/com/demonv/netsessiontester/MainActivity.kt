@@ -9472,13 +9472,19 @@ private suspend fun probeMtuPath(
         }
     }
 
-    if (best == null) {
-        return MtuPathProbe(protocol, address, null, steps, "$protocol 路径未得到有效 MTU", "低", "目标不响应或 ICMP 被限制")
-    }
+    val initialBest = best ?: return MtuPathProbe(
+        protocol = protocol,
+        address = address,
+        mtu = null,
+        steps = steps,
+        detail = "$protocol 路径未得到有效 MTU",
+        confidence = "低",
+        error = "目标不响应或 ICMP 被限制"
+    )
 
-    var refinedBest = best
-    val refineStart = maxOf(minimum, best - 1)
-    val refineEnd = minOf(cappedMax, best + 2)
+    var refinedBest: Int = initialBest
+    val refineStart = maxOf(minimum, initialBest - 1)
+    val refineEnd = minOf(cappedMax, initialBest + 2)
     for (candidate in refineStart..refineEnd) {
         val (ok, detail, _) = runMtuCandidate(address, ipv6, candidate, timeoutMs, mode, attempts = 3, requiredSuccess = 2)
         val step = MtuStep(candidate, ok, "[$protocol 边界复测] $detail")
@@ -9493,7 +9499,7 @@ private suspend fun probeMtuPath(
     steps += confirmStep
     withContext(Dispatchers.Main) { onStep(confirmStep) }
     if (!confirmed) {
-        refinedBest = observations.filter { it.second }.maxOfOrNull { it.first } ?: best
+        refinedBest = observations.filter { it.second }.maxOfOrNull { it.first } ?: initialBest
     }
 
     val nextMtu = refinedBest + 1
