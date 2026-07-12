@@ -1,5 +1,6 @@
 package com.demonv.netsessiontester.network
 
+import android.content.Context
 import com.demonv.netsessiontester.model.IpProtocol
 import com.demonv.netsessiontester.model.LogLevel
 import com.demonv.netsessiontester.model.LogLine
@@ -49,7 +50,8 @@ import kotlin.math.floor
  * - 停止时立即切 releaseEpoch，取消 pending scope；后续才返回的 socket 会自关闭，不再污染结果。
  * - close 时使用 SO_LINGER(0) 加速释放。
  */
-class TcpTester {
+class TcpTester(context: Context) {
+    private val appContext = context.applicationContext
     private val socketLock = Mutex()
     private val releaseEpoch = AtomicLong(0L)
     private val fdReserve = 128
@@ -83,7 +85,12 @@ class TcpTester {
     suspend fun resolveHost(host: String): ResolveResult = withContext(Dispatchers.IO) {
         val cleanHost = host.trim().removePrefix("[").removeSuffix("]").ifBlank { "www.baidu.com" }
         runCatching {
-            val all = InetAddress.getAllByName(cleanHost).toList()
+            val all = NetworkDnsResolver.resolveAddressesBlocking(
+                context = appContext,
+                host = cleanHost,
+                includeIpv4 = true,
+                includeIpv6 = true
+            )
             ResolveResult(
                 host = cleanHost,
                 ipv4 = all.filterIsInstance<Inet4Address>().mapNotNull { it.hostAddress }.distinct(),
@@ -498,7 +505,12 @@ class TcpTester {
 
     private suspend fun resolveInetAddresses(host: String, protocol: IpProtocol): List<InetAddress> = withContext(Dispatchers.IO) {
         val cleanHost = host.trim().removePrefix("[").removeSuffix("]").ifBlank { "www.baidu.com" }
-        InetAddress.getAllByName(cleanHost).filter { address ->
+        NetworkDnsResolver.resolveAddressesBlocking(
+            context = appContext,
+            host = cleanHost,
+            includeIpv4 = protocol == IpProtocol.IPV4,
+            includeIpv6 = protocol == IpProtocol.IPV6
+        ).filter { address ->
             when (protocol) {
                 IpProtocol.IPV4 -> address is Inet4Address
                 IpProtocol.IPV6 -> address is Inet6Address

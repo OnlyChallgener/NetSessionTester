@@ -193,6 +193,7 @@ import com.demonv.netsessiontester.model.TestMode
 import com.demonv.netsessiontester.network.TcpTester
 import com.demonv.netsessiontester.network.PublicIpDetector
 import com.demonv.netsessiontester.network.PublicIpResult
+import com.demonv.netsessiontester.network.NetworkDnsResolver
 import com.demonv.netsessiontester.ui.theme.NetSessionTesterTheme
 import com.demonv.netsessiontester.util.CsvExporter
 import kotlinx.coroutines.CancellationException
@@ -249,6 +250,7 @@ private enum class AppToolPage {
     TRACKET,
     MTU,
     ROAMING,
+    IPV6_DIAGNOSTIC,
     PING_HISTORY
 }
 
@@ -1680,8 +1682,11 @@ private fun stunTransactionKeyFromPacket(data: ByteArray, length: Int): String? 
 }
 
 private fun resolveFirstIpv4(host: String): InetAddress {
-    return InetAddress.getAllByName(host).firstOrNull { it is Inet4Address }
-        ?: error("STUN服务器无IPv4地址")
+    return NetworkDnsResolver.resolveAddressesBlocking(
+        host = host,
+        includeIpv4 = true,
+        includeIpv6 = false
+    ).firstOrNull { it is Inet4Address } ?: error("STUN服务器无IPv4地址")
 }
 
 private fun buildStunBindingRequest(changeIp: Boolean = false, changePort: Boolean = false): StunRequest {
@@ -2164,7 +2169,13 @@ private fun manualRfc3489Probe(endpoint: StunEndpoint, progress: (String) -> Uni
 private fun dnsProbe(context: Context, host: String, network: Network?): DnsProbeResult {
     val cleanHost = host.trim().removePrefix("[").removeSuffix("]").ifBlank { "www.baidu.com" }
     val systemResult = runCatching {
-        if (network != null) network.getAllByName(cleanHost).toList() else InetAddress.getAllByName(cleanHost).toList()
+        NetworkDnsResolver.resolveAddressesBlocking(
+            context = context,
+            host = cleanHost,
+            network = network,
+            includeIpv4 = true,
+            includeIpv6 = true
+        )
     }
     val system = systemResult.getOrDefault(emptyList())
     val systemHasA = system.any { it is Inet4Address }
@@ -2208,7 +2219,7 @@ private fun dnsQueryHasAaaa(host: String, server: String, network: Network?): Bo
     DatagramSocket().use { socket ->
         network?.bindSocket(socket)
         socket.soTimeout = 1200
-        val dnsAddress = if (network != null) network.getAllByName(server).first() else InetAddress.getByName(server)
+        val dnsAddress = InetAddress.getByName(server)
         socket.send(DatagramPacket(query, query.size, dnsAddress, 53))
         val buf = ByteArray(1024)
         val packet = DatagramPacket(buf, buf.size)
@@ -2409,7 +2420,11 @@ private suspend fun resolvePingTarget(host: String, protocol: PingProtocolMode):
                 else -> ResolvedPingTarget(literal.hostAddress ?: target, PingProtocolMode.IPV6, if (protocol == PingProtocolMode.AUTO) "AUTO · IPv6" else "IPv6")
             }
         }
-        val all = InetAddress.getAllByName(target).filterNot { it.isLoopbackAddress }
+        val all = NetworkDnsResolver.resolveAddressesBlocking(
+            host = target,
+            includeIpv4 = true,
+            includeIpv6 = true
+        ).filterNot { it.isLoopbackAddress }
         val v4 = all.firstOrNull { it is Inet4Address }
         val v6 = all.firstOrNull { it is Inet6Address }
         when (protocol) {
@@ -2636,7 +2651,8 @@ private fun NetSessionTesterApp() {
     val clipboardManager = LocalClipboardManager.current
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
-    val tester = remember { TcpTester() }
+    NetworkDnsResolver.install(context.applicationContext)
+    val tester = remember { TcpTester(context.applicationContext) }
     val historyStore = remember { HistoryStore(context.applicationContext) }
     val logStore = remember { LogStore(context.applicationContext) }
     val settingsStore = remember { SettingsStore(context.applicationContext) }
@@ -4286,6 +4302,7 @@ private fun NetSessionTesterApp() {
                 AppToolPage.TRACKET -> TracketToolPage(onBack = { appToolPage = AppToolPage.NONE })
                 AppToolPage.MTU -> MtuToolPage(onBack = { appToolPage = AppToolPage.NONE })
                 AppToolPage.ROAMING -> RoamingToolPage(onBack = { appToolPage = AppToolPage.NONE })
+                AppToolPage.IPV6_DIAGNOSTIC -> Ipv6DiagnosticToolPage(onBack = { appToolPage = AppToolPage.NONE })
                 AppToolPage.PING_HISTORY -> PingHistoryToolPage(logs = pingLogs, onBack = { appToolPage = AppToolPage.NONE }, onDeleteSession = { sessionId -> deletePingLogSession(sessionId) })
                 AppToolPage.NONE -> when (selectedTab) {
                 MainTab.SETTINGS -> SettingsPage(
@@ -4316,6 +4333,10 @@ private fun NetSessionTesterApp() {
                     onOpenTracket = { appToolPage = AppToolPage.TRACKET },
                     onOpenMtu = { appToolPage = AppToolPage.MTU },
                     onOpenRoaming = { appToolPage = AppToolPage.ROAMING },
+                    onOpenIpv6Diagnostics = {
+                        selectedTab = MainTab.TEST
+                        appToolPage = AppToolPage.IPV6_DIAGNOSTIC
+                    },
                     onOpenPingSettings = {
                         selectedTab = MainTab.TEST
                         testPingFocusRequest += 1
@@ -5310,6 +5331,7 @@ private fun SettingsPage(
     onOpenTracket: () -> Unit,
     onOpenMtu: () -> Unit,
     onOpenRoaming: () -> Unit,
+    onOpenIpv6Diagnostics: () -> Unit,
     onOpenPingSettings: () -> Unit,
     maskPrivacy: Boolean,
     onMaskPrivacyChange: (Boolean) -> Unit,
@@ -5403,6 +5425,7 @@ private fun SettingsPage(
                         onOpenTracket = onOpenTracket,
                         onOpenMtu = onOpenMtu,
                         onOpenRoaming = onOpenRoaming,
+                        onOpenIpv6Diagnostics = onOpenIpv6Diagnostics,
                         expanded = networkInfoExpanded,
                         onExpandedChange = onNetworkInfoExpandedChange
                     )
@@ -8348,12 +8371,10 @@ private fun cleanToolHost(input: String): String {
 }
 
 private fun readLocalDnsServers(context: Context): List<String> {
-    return runCatching {
-        val cm = context.getSystemService(ConnectivityManager::class.java) ?: return@runCatching emptyList<String>()
-        val network = cm.activeNetwork ?: return@runCatching emptyList<String>()
-        val lp = cm.getLinkProperties(network) ?: return@runCatching emptyList<String>()
-        lp.dnsServers.mapNotNull { it.hostAddress?.substringBefore('%') }.filter { it.isNotBlank() }.distinct()
-    }.getOrDefault(emptyList())
+    return NetworkDnsResolver.orderedDnsServers(context)
+        .mapNotNull { it.hostAddress?.substringBefore('%') }
+        .filter { it.isNotBlank() }
+        .distinct()
 }
 
 private fun dnsTextFromSnapshot(localDns: List<String>): String = localDns.joinToString(" / ").ifBlank { "未读取到" }
@@ -8641,12 +8662,19 @@ private suspend fun runNsLookupTool(
     val start = System.currentTimeMillis()
     if (mode == NsLookupMode.LOCAL) {
         return@withContext runCatching {
-            val addresses = InetAddress.getAllByName(host).toList()
+            val resolution = NetworkDnsResolver.resolveBlocking(
+                context = context,
+                hostInput = host,
+                includeIpv4 = recordType != NsLookupRecordType.AAAA,
+                includeIpv6 = recordType != NsLookupRecordType.A,
+                timeoutMs = timeout
+            )
+            val addresses = resolution.addresses
             val ipv4 = addresses.filterIsInstance<Inet4Address>().mapNotNull { it.hostAddress }.distinct()
             val ipv6 = addresses.filterIsInstance<Inet6Address>().mapNotNull { it.hostAddress?.substringBefore('%') }.distinct()
             NsLookupToolRecord(
                 host = host,
-                dnsServers = "本机DNS",
+                dnsServers = resolution.usedDnsServers.joinToString(" / ").ifBlank { "本机DNS" },
                 recordType = recordType.label,
                 ipv4 = if (recordType == NsLookupRecordType.AAAA) emptyList() else ipv4,
                 ipv6 = if (recordType == NsLookupRecordType.A) emptyList() else ipv6,
@@ -8727,7 +8755,13 @@ private suspend fun runTracketToolLive(
     val dns = dnsTextFromSnapshot(dnsSnapshot)
     val start = System.currentTimeMillis()
     try {
-        val resolved = InetAddress.getAllByName(host).toList().filterNot { it.isLoopbackAddress }
+        val resolved = NetworkDnsResolver.resolveAddressesBlocking(
+            context = context,
+            host = host,
+            includeIpv4 = true,
+            includeIpv6 = true,
+            timeoutMs = timeout
+        ).filterNot { it.isLoopbackAddress }
         val target = chooseToolTargetAddress(resolved, policy) ?: error("无法解析目标")
         val targetIp = target.hostAddress?.substringBefore('%') ?: host
         val ipv6 = target is Inet6Address
@@ -9011,6 +9045,223 @@ private fun ToolPageHeader(title: String, subtitle: String, onBack: () -> Unit) 
         Column(Modifier.weight(1f)) {
             Text(title, color = TextDark, fontWeight = FontWeight.ExtraBold, fontSize = 20.sp, maxLines = 1)
             Text(subtitle, color = Muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+    }
+}
+
+
+private data class Ipv6DiagnosticCheck(
+    val title: String,
+    val detail: String,
+    val passed: Boolean
+)
+
+private suspend fun runIpv6DiagnosticChecks(
+    context: Context,
+    onProgress: suspend (List<Ipv6DiagnosticCheck>) -> Unit
+): List<Ipv6DiagnosticCheck> = withContext(Dispatchers.IO) {
+    val checks = mutableListOf<Ipv6DiagnosticCheck>()
+    suspend fun add(title: String, passed: Boolean, detail: String) {
+        checks += Ipv6DiagnosticCheck(title, detail, passed)
+        withContext(Dispatchers.Main) { onProgress(checks.toList()) }
+    }
+
+    val cm = context.getSystemService(ConnectivityManager::class.java)
+    val network = cm?.activeNetwork
+    val lp = network?.let { cm.getLinkProperties(it) }
+    val localIpv6 = lp?.linkAddresses.orEmpty()
+        .map { it.address }
+        .filterIsInstance<Inet6Address>()
+        .firstOrNull { !it.isLoopbackAddress && !it.isLinkLocalAddress && !it.isMulticastAddress }
+    add(
+        title = "有效 IPv6 地址",
+        passed = localIpv6 != null,
+        detail = localIpv6?.hostAddress?.substringBefore('%') ?: "当前网络未获得可用 IPv6 地址"
+    )
+
+    val hasDefaultRoute = lp?.routes.orEmpty().any { route ->
+        val destination = route.destination
+        destination.address is Inet6Address && destination.prefixLength == 0
+    }
+    add("IPv6 默认路由", hasDefaultRoute, if (hasDefaultRoute) "已发现 ::/0 默认路由" else "未发现 IPv6 默认路由")
+
+    val orderedDns = NetworkDnsResolver.orderedDnsServers(context, network)
+    val firstDns = orderedDns.firstOrNull()
+    add(
+        "本机 DNS 可用",
+        orderedDns.isNotEmpty(),
+        if (firstDns != null) {
+            "优先 ${if (firstDns is Inet4Address) "IPv4" else "IPv6"} DNS：${firstDns.hostAddress?.substringBefore('%')}"
+        } else "当前链路未提供 DNS"
+    )
+
+    val domesticCandidates = listOf("www.baidu.com", "www.qq.com", "www.taobao.com", "testipv6.cn")
+    var targetHost = ""
+    var targetIpv6: Inet6Address? = null
+    var dualStackPassed = false
+    for (candidate in domesticCandidates) {
+        val resolution = runCatching {
+            NetworkDnsResolver.resolveBlocking(
+                context = context,
+                hostInput = candidate,
+                network = network,
+                includeIpv4 = true,
+                includeIpv6 = true,
+                timeoutMs = 1_500
+            )
+        }.getOrNull() ?: continue
+        val v4 = resolution.addresses.any { it is Inet4Address }
+        val v6 = resolution.addresses.filterIsInstance<Inet6Address>().firstOrNull()
+        if (v6 != null && targetIpv6 == null) {
+            targetHost = candidate
+            targetIpv6 = v6
+        }
+        if (v4 && v6 != null) dualStackPassed = true
+        if (targetIpv6 != null && dualStackPassed) break
+    }
+    add(
+        "AAAA 解析",
+        targetIpv6 != null,
+        targetIpv6?.let { "$targetHost → ${it.hostAddress?.substringBefore('%')}" } ?: "国内常用目标未返回 AAAA"
+    )
+    add("双栈域名", dualStackPassed, if (dualStackPassed) "同一目标同时返回 A / AAAA" else "未确认双栈解析")
+
+    val publicIpv6Result = runCatching { PublicIpDetector.detect(network).ipv6 }.getOrNull()
+    val publicIpv6Ok = publicIpv6Result?.isUsableIpText() == true
+    add("公网 IPv6", publicIpv6Ok, if (publicIpv6Ok) publicIpv6Result.orEmpty() else "公网 IPv6 暂未检测到")
+
+    val targetAddress = targetIpv6
+    val simplePingOk = targetAddress?.let { address ->
+        runCatching {
+            val target = address.hostAddress?.substringBefore('%') ?: return@runCatching false
+            val commands = listOf(
+                listOf("/system/bin/ping6", "-c", "1", "-W", "2", target),
+                listOf("/system/bin/ping", "-6", "-c", "1", "-W", "2", target)
+            )
+            commands.any { command ->
+                runCatching {
+                    val process = ProcessBuilder(command).redirectErrorStream(true).start()
+                    val finished = process.waitFor(3, TimeUnit.SECONDS)
+                    if (!finished) process.destroyForcibly()
+                    finished && process.exitValue() == 0
+                }.getOrDefault(false)
+            }
+        }.getOrDefault(false)
+    } ?: false
+    add("IPv6 ICMP", simplePingOk, if (simplePingOk) "$targetHost ICMPv6 正常" else "ICMPv6 未通过，可能受目标策略影响")
+
+    val tcpOk = targetAddress?.let { address ->
+        runCatching {
+            Socket().use { socket ->
+                network?.bindSocket(socket)
+                socket.connect(InetSocketAddress(address, 443), 2_500)
+            }
+            true
+        }.getOrDefault(false)
+    } ?: false
+    add("IPv6 TCP 443", tcpOk, if (tcpOk) "$targetHost:443 建连成功" else "TCP 443 未建立")
+
+    val basicMtuOk = targetAddress?.let { address ->
+        runMtuPing(
+            address = address.hostAddress?.substringBefore('%').orEmpty(),
+            ipv6 = true,
+            mtu = 1280,
+            timeoutMs = 2_000,
+            mode = MtuProbeMode.PMTU
+        ).first
+    } ?: false
+    add("IPv6 基础 MTU", basicMtuOk, if (basicMtuOk) "1280 字节路径正常" else "1280 字节大包未确认")
+
+    val interfaceMtu = readLocalInterfaceMtu(context).first?.coerceIn(1280, 1500) ?: 1500
+    val nearMtuOk = targetAddress?.let { address ->
+        runMtuPing(
+            address = address.hostAddress?.substringBefore('%').orEmpty(),
+            ipv6 = true,
+            mtu = interfaceMtu,
+            timeoutMs = 2_000,
+            mode = MtuProbeMode.PMTU
+        ).first
+    } ?: false
+    add("接近链路 MTU", nearMtuOk, if (nearMtuOk) "$interfaceMtu 字节通过" else "$interfaceMtu 字节未通过或无响应")
+
+    checks
+}
+
+@Composable
+private fun Ipv6DiagnosticToolPage(onBack: () -> Unit) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var running by remember { mutableStateOf(false) }
+    var checks by remember { mutableStateOf<List<Ipv6DiagnosticCheck>>(emptyList()) }
+    val score = checks.count { it.passed }
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize().padding(horizontal = 14.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        item {
+            ToolPageHeader("IPv6 专项检测", "参考中国网络环境的 10 分制检测", onBack)
+        }
+        item {
+            SoftCard {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    SectionTitle("ipv6", "IPv6 状况评分", Green)
+                    Spacer(Modifier.weight(1f))
+                    Text(
+                        if (checks.isEmpty()) "—/10" else "$score/10",
+                        color = if (score >= 8) Green else if (score >= 6) Orange else ErrorRed,
+                        fontSize = 22.sp,
+                        fontWeight = FontWeight.ExtraBold
+                    )
+                }
+                Text(
+                    "自动使用当前网络，并优先通过本机 IPv4 DNS 查询 A / AAAA；测试不会修改系统网络设置。",
+                    color = Muted,
+                    fontSize = 11.sp,
+                    lineHeight = 15.sp
+                )
+                Button(
+                    onClick = {
+                        if (!running) {
+                            running = true
+                            checks = emptyList()
+                            scope.launch {
+                            runCatching {
+                                runIpv6DiagnosticChecks(context.applicationContext) { progress -> checks = progress }
+                            }
+                            running = false
+                            }
+                        }
+                    },
+                    enabled = !running,
+                    modifier = Modifier.fillMaxWidth().height(44.dp),
+                    shape = ShapeM
+                ) {
+                    Text(if (running) "检测中…" else if (checks.isEmpty()) "开始 IPv6 检测" else "重新检测")
+                }
+            }
+        }
+        if (checks.isEmpty()) {
+            item {
+                SoftCard {
+                    Text("点击开始后依次检查 IPv6 地址、路由、DNS、连通性和大包能力。", color = Muted, fontSize = 12.sp)
+                }
+            }
+        } else {
+            itemsIndexed(checks) { index, check ->
+                SoftCard {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("${index + 1}", color = Muted, fontSize = 11.sp, modifier = Modifier.width(22.dp))
+                        MarkBox(if (check.passed) "check" else "!", if (check.passed) GreenSoft else RedSoft, if (check.passed) Green else ErrorRed)
+                        Spacer(Modifier.width(8.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(check.title, color = TextDark, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                            Text(check.detail, color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
+                        }
+                        Text(if (check.passed) "通过" else "未通过", color = if (check.passed) Green else ErrorRed, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
         }
     }
 }
@@ -9606,7 +9857,11 @@ private val RoamingPingTimeoutPresets = listOf(800, 1000, 2000, 5000)
 private suspend fun resolveMtuAddress(hostInput: String, policy: ToolIpPolicy): Pair<InetAddress?, String?> = withContext(Dispatchers.IO) {
     val host = cleanToolHost(hostInput)
     runCatching {
-        val addresses = InetAddress.getAllByName(host).filterNot { it.isLoopbackAddress }
+        val addresses = NetworkDnsResolver.resolveAddressesBlocking(
+            host = host,
+            includeIpv4 = true,
+            includeIpv6 = true
+        ).filterNot { it.isLoopbackAddress }
         val selected = chooseToolTargetAddress(addresses, policy)
         selected to null
     }.getOrElse { null to (it.message ?: "解析失败") }
@@ -9799,7 +10054,11 @@ private data class MtuPathProbe(
 private suspend fun resolveMtuFamilyAddress(hostInput: String, ipv6: Boolean): InetAddress? = withContext(Dispatchers.IO) {
     val host = cleanToolHost(hostInput)
     runCatching {
-        InetAddress.getAllByName(host).firstOrNull { address ->
+        NetworkDnsResolver.resolveAddressesBlocking(
+            host = host,
+            includeIpv4 = !ipv6,
+            includeIpv6 = ipv6
+        ).firstOrNull { address ->
             if (ipv6) address is Inet6Address else address is Inet4Address
         }
     }.getOrNull()
@@ -12094,6 +12353,7 @@ private fun NetworkEnvironmentSettingsCard(
     onOpenTracket: () -> Unit,
     onOpenMtu: () -> Unit,
     onOpenRoaming: () -> Unit,
+    onOpenIpv6Diagnostics: () -> Unit,
     expanded: Boolean,
     onExpandedChange: (Boolean) -> Unit
 ) {
@@ -12112,7 +12372,16 @@ private fun NetworkEnvironmentSettingsCard(
                 val ipv4Text = if (maskPrivacy) maskIpText(publicIpResult.ipv4) else publicIpResult.ipv4
                 val ipv6Text = if (maskPrivacy) maskIpText(publicIpResult.ipv6) else publicIpResult.ipv6
                 InfoMetricTile("ipv4", "IPv4", ipv4Text, BlueSoft, Blue, Modifier.weight(1f), onClick = onCopyPublicIpv4)
-                InfoMetricTile("ipv6", "IPv6", ipv6Text, GreenSoft, Green, Modifier.weight(1f), onClick = onCopyPublicIpv6)
+                InfoMetricTile(
+                    icon = "ipv6",
+                    label = "IPv6",
+                    value = ipv6Text,
+                    iconBg = GreenSoft,
+                    iconColor = Green,
+                    modifier = Modifier.weight(1f),
+                    onIconClick = onOpenIpv6Diagnostics,
+                    onValueClick = if (publicIpResult.ipv6.isUsableIpText()) onCopyPublicIpv6 else onOpenIpv6Diagnostics
+                )
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 InfoMetricTile("nat", "NAT", probeInfo.natType, Color(0xFFFFE4E6), ErrorRed, Modifier.weight(1f), onClick = onOpenNatDiagnostics)
@@ -12127,7 +12396,16 @@ private fun NetworkEnvironmentSettingsCard(
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
             InfoMetricTile("ipv4", "公网IPv4", if (maskPrivacy) maskIpText(publicIpResult.ipv4) else publicIpResult.ipv4, BlueSoft, Blue, Modifier.weight(1f), onClick = onCopyPublicIpv4)
             val ipv6Display = publicIpResult.ipv6
-            InfoMetricTile("ipv6", "公网IPv6", if (maskPrivacy) maskIpText(ipv6Display) else ipv6Display, GreenSoft, Green, Modifier.weight(1f), onClick = onCopyPublicIpv6)
+            InfoMetricTile(
+                icon = "ipv6",
+                label = "公网IPv6",
+                value = if (maskPrivacy) maskIpText(ipv6Display) else ipv6Display,
+                iconBg = GreenSoft,
+                iconColor = Green,
+                modifier = Modifier.weight(1f),
+                onIconClick = onOpenIpv6Diagnostics,
+                onValueClick = if (ipv6Display.isUsableIpText()) onCopyPublicIpv6 else onOpenIpv6Diagnostics
+            )
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
             val mapped = if (publicIpResult.ipv4.isUsableIpText() && probeInfo.portText != "不可用" && probeInfo.portText != "待检测") "${publicIpResult.ipv4}:${probeInfo.portText}" else probeInfo.portText
@@ -12178,8 +12456,11 @@ private fun InfoMetricTile(
     iconBg: Color,
     iconColor: Color,
     modifier: Modifier = Modifier,
-    onClick: (() -> Unit)? = null
+    onClick: (() -> Unit)? = null,
+    onIconClick: (() -> Unit)? = null,
+    onValueClick: (() -> Unit)? = null
 ) {
+    val interaction = remember { MutableInteractionSource() }
     @Composable
     fun TileContent() {
         Row(
@@ -12187,7 +12468,17 @@ private fun InfoMetricTile(
             modifier = Modifier.padding(9.dp)
         ) {
             val displayIcon = if (icon == "nat") natIconMark(value) else icon
-            MarkBox(displayIcon, iconBg, iconColor)
+            Box(
+                modifier = Modifier.then(
+                    if (onIconClick != null) Modifier.clickable(
+                        interactionSource = interaction,
+                        indication = null,
+                        onClick = onIconClick
+                    ) else Modifier
+                )
+            ) {
+                MarkBox(displayIcon, iconBg, iconColor)
+            }
             Spacer(Modifier.width(8.dp))
             Column(Modifier.weight(1f)) {
                 Text(label, color = Muted, fontSize = 11.sp, maxLines = 1)
@@ -12197,12 +12488,22 @@ private fun InfoMetricTile(
                     fontWeight = FontWeight.Bold,
                     fontSize = 14.sp,
                     maxLines = 1,
-                    modifier = Modifier.horizontalScroll(rememberScrollState())
+                    softWrap = false,
+                    modifier = Modifier
+                        .horizontalScroll(rememberScrollState())
+                        .then(
+                            if (onValueClick != null) Modifier.clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null,
+                                onClick = onValueClick
+                            ) else Modifier
+                        )
                 )
             }
         }
     }
-    if (onClick != null) {
+    val wholeTileClick = onClick.takeIf { onIconClick == null && onValueClick == null }
+    if (wholeTileClick != null) {
         Surface(
             modifier = modifier
                 .heightIn(min = 58.dp)
@@ -12210,7 +12511,7 @@ private fun InfoMetricTile(
                 .clickable(
                     interactionSource = remember { MutableInteractionSource() },
                     indication = null,
-                    onClick = onClick
+                    onClick = wholeTileClick
                 ),
             shape = ShapeM,
             color = Color(0xFFF8FAFC),
