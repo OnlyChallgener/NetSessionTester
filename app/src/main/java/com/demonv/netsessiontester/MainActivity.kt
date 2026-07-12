@@ -1755,6 +1755,33 @@ private fun localIpv6Addresses(): List<String> = runCatching {
         .distinct()
 }.getOrDefault(emptyList())
 
+/**
+ * 读取当前 activeNetwork 自身的全局 IPv6。
+ * 公网查询服务不可达时，用它作为首页 IPv6 的即时兜底；不会扫描其他网卡，
+ * 因此不会误拿已经断开的 VPN/Wi-Fi 接口地址。
+ */
+private fun activeNetworkGlobalIpv6(context: Context, network: Network? = null): String? = runCatching {
+    val cm = context.getSystemService(ConnectivityManager::class.java) ?: return@runCatching null
+    val active = network ?: cm.activeNetwork ?: return@runCatching null
+    val linkProperties = cm.getLinkProperties(active) ?: return@runCatching null
+
+    linkProperties.linkAddresses
+        .asSequence()
+        .map { it.address }
+        .filterIsInstance<Inet6Address>()
+        .firstOrNull { address ->
+            if (address.isAnyLocalAddress || address.isLoopbackAddress ||
+                address.isLinkLocalAddress || address.isSiteLocalAddress ||
+                address.isMulticastAddress
+            ) return@firstOrNull false
+
+            val firstByte = address.address.firstOrNull()?.toInt()?.and(0xFF) ?: return@firstOrNull false
+            (firstByte and 0xFE) != 0xFC // 排除 fc00::/7 ULA
+        }
+        ?.hostAddress
+        ?.substringBefore('%')
+}.getOrNull()
+
 private fun <T> java.util.Enumeration<T>.toListCompat(): List<T> {
     val list = mutableListOf<T>()
     while (hasMoreElements()) list += nextElement()
@@ -2942,6 +2969,7 @@ private fun NetSessionTesterApp() {
     val settingsListState = rememberSaveable(saver = LazyListState.Saver) { LazyListState() }
     val testListState = rememberSaveable(saver = LazyListState.Saver) { LazyListState() }
     var testPingFocusRequest by remember { mutableStateOf(0) }
+    var settingsNetworkFocusRequest by remember { mutableStateOf(0) }
     var sessionCardExpanded by remember { mutableStateOf(false) }
     var networkInfoExpanded by rememberSaveable { mutableStateOf(false) }
     var runningJob by remember { mutableStateOf<Job?>(null) }
@@ -3040,10 +3068,23 @@ private fun NetSessionTesterApp() {
     var bottomNotice by remember { mutableStateOf(BottomNoticeUi()) }
     var bottomNoticeJob by remember { mutableStateOf<Job?>(null) }
 
+    fun closeIpv6DiagnosticsToNetworkInfo() {
+        appToolPage = AppToolPage.NONE
+        selectedTab = MainTab.SETTINGS
+        networkInfoExpanded = true
+        settingsNetworkFocusRequest += 1
+    }
+
     BackHandler(enabled = showRunLogDetail) { showRunLogDetail = false }
     BackHandler(enabled = showNatHistoryDialog) { showNatHistoryDialog = false }
     BackHandler(enabled = showNatDiagnosticDialog) { showNatDiagnosticDialog = false }
-    BackHandler(enabled = appToolPage != AppToolPage.NONE) { appToolPage = AppToolPage.NONE }
+    BackHandler(enabled = appToolPage != AppToolPage.NONE) {
+        if (appToolPage == AppToolPage.IPV6_DIAGNOSTIC) {
+            closeIpv6DiagnosticsToNetworkInfo()
+        } else {
+            appToolPage = AppToolPage.NONE
+        }
+    }
 
     LaunchedEffect(state.releaseUi.visible, state.releaseUi.finished, state.releaseUi.elapsedMs) {
         if (!state.releaseUi.visible || !state.releaseUi.finished) return@LaunchedEffect
@@ -3159,6 +3200,16 @@ private fun NetSessionTesterApp() {
             val appContext = context.applicationContext
             val connectivity = appContext.getSystemService(ConnectivityManager::class.java)
             val network = connectivity?.activeNetwork
+            val immediateLinkIpv6 = activeNetworkGlobalIpv6(appContext, network)
+            // 先从当前链路立即显示全局 IPv6，不等待外部公网查询源。
+            // 后续若检测到不同的真实出口 IPv6，再静默替换。
+            if (generation == networkRefreshGeneration && immediateLinkIpv6 != null &&
+                publicIpResult.ipv6 != immediateLinkIpv6
+            ) {
+                publicIpResult = publicIpResult.copy(ipv6 = immediateLinkIpv6)
+                ipv6ConnectivityVerified = true
+                publicIpv6FailureStreak = 0
+            }
             try {
                 val result = withContext(Dispatchers.IO) {
                     runCatching { PublicIpDetector.detect(network) }.getOrElse { PublicIpResult() }
@@ -3167,11 +3218,19 @@ private fun NetSessionTesterApp() {
 
                 val detectedIpv4 = result.ipv4.takeIf(::isUsableIpv4)
                 val detectedIpv6 = result.ipv6.takeIf(::isUsableIpv6)
+                val activeNetworkIpv6 = activeNetworkGlobalIpv6(appContext, network)
                 val normalizedIpv6 = when {
                     detectedIpv6 != null -> {
                         publicIpv6FailureStreak = 0
                         ipv6ConnectivityVerified = true
                         detectedIpv6
+                    }
+                    activeNetworkIpv6 != null -> {
+                        // 国外公网查询源在国内偶发不可达时，立即展示当前链路的全局 IPv6。
+                        // 后台查询之后若拿到真实出口 IPv6，会再静默替换。
+                        publicIpv6FailureStreak = 0
+                        ipv6ConnectivityVerified = true
+                        activeNetworkIpv6
                     }
                     isUsableIpv6(publicIpResult.ipv6) && publicIpv6FailureStreak < 2 -> {
                         publicIpv6FailureStreak += 1
@@ -3216,7 +3275,9 @@ private fun NetSessionTesterApp() {
                     )
                 }.getOrElse {
                     NetworkProbeInfo(
-                        localIp = localIpv4Addresses().firstOrNull() ?: localIpv6Addresses().firstOrNull() ?: "待检测",
+                        localIp = localIpv4Addresses().firstOrNull()
+                            ?: activeNetworkGlobalIpv6(appContext, network)
+                            ?: "待检测",
                         carrier = "未知",
                         natType = "待检测",
                         latencyText = "待检测",
@@ -4682,7 +4743,7 @@ private fun NetSessionTesterApp() {
                 AppToolPage.MTU -> MtuToolPage(onBack = { appToolPage = AppToolPage.NONE })
                 AppToolPage.ROAMING -> RoamingToolPage(onBack = { appToolPage = AppToolPage.NONE })
                 AppToolPage.IPV6_DIAGNOSTIC -> Ipv6DiagnosticToolPage(
-                    onBack = { appToolPage = AppToolPage.NONE },
+                    onBack = { closeIpv6DiagnosticsToNetworkInfo() },
                     onResult = { address, verified ->
                         if (address != null && isUsableIpv6(address)) {
                             publicIpResult = publicIpResult.copy(ipv6 = address)
@@ -4702,6 +4763,7 @@ private fun NetSessionTesterApp() {
                 AppToolPage.NONE -> when (selectedTab) {
                 MainTab.SETTINGS -> SettingsPage(
                     listState = settingsListState,
+                    networkInfoFocusRequest = settingsNetworkFocusRequest,
                     networkInfoExpanded = networkInfoExpanded,
                     onNetworkInfoExpandedChange = { networkInfoExpanded = it },
                     host = host,
@@ -4729,7 +4791,9 @@ private fun NetSessionTesterApp() {
                     onOpenMtu = { appToolPage = AppToolPage.MTU },
                     onOpenRoaming = { appToolPage = AppToolPage.ROAMING },
                     onOpenIpv6Diagnostics = {
-                        selectedTab = MainTab.TEST
+                        // 从网络信息进入时，不切到测试页；专项页退出后强制回到设置页网络信息卡片。
+                        selectedTab = MainTab.SETTINGS
+                        networkInfoExpanded = true
                         appToolPage = AppToolPage.IPV6_DIAGNOSTIC
                     },
                     onOpenPingSettings = {
@@ -5704,6 +5768,7 @@ private fun ReorderableCardItem(
 @Composable
 private fun SettingsPage(
     listState: LazyListState,
+    networkInfoFocusRequest: Int,
     networkInfoExpanded: Boolean,
     onNetworkInfoExpandedChange: (Boolean) -> Unit,
     host: String,
@@ -5773,6 +5838,15 @@ private fun SettingsPage(
         val clean = (next.filter { it in defaultCards } + defaultCards.filterNot { it in next }).distinct()
         settingsCardOrder = clean
         saveCardOrder(context.applicationContext, "settings_card_order_v3", clean)
+    }
+
+    LaunchedEffect(networkInfoFocusRequest, settingsCardOrder) {
+        if (networkInfoFocusRequest <= 0) return@LaunchedEffect
+        val networkCardIndex = settingsCardOrder.indexOf("network")
+        if (networkCardIndex >= 0) {
+            // 第0项是页面标题，网络信息卡片从第1项开始。直接定位，避免先闪到测试页或其他卡片。
+            listState.scrollToItem(networkCardIndex + 1)
+        }
     }
 
     LazyColumn(
@@ -9619,14 +9693,14 @@ private suspend fun runIpv6DiagnosticChecks(
     val cm = context.getSystemService(ConnectivityManager::class.java)
     val network = cm?.activeNetwork
     val lp = network?.let { cm.getLinkProperties(it) }
-    val localIpv6 = lp?.linkAddresses.orEmpty()
-        .map { it.address }
-        .filterIsInstance<Inet6Address>()
-        .firstOrNull { !it.isLoopbackAddress && !it.isLinkLocalAddress && !it.isMulticastAddress }
+    val localIpv6Text = activeNetworkGlobalIpv6(context, network)
+    val localIpv6 = localIpv6Text?.let { value ->
+        runCatching { InetAddress.getByName(value) as? Inet6Address }.getOrNull()
+    }
     add(
         title = "有效 IPv6 地址",
         passed = localIpv6 != null,
-        detail = localIpv6?.hostAddress?.substringBefore('%') ?: "当前网络未获得可用 IPv6 地址"
+        detail = localIpv6Text ?: "当前网络未获得可用 IPv6 地址"
     )
 
     val hasDefaultRoute = lp?.routes.orEmpty().any { route ->
@@ -9677,8 +9751,12 @@ private suspend fun runIpv6DiagnosticChecks(
     add("双栈域名", dualStackPassed, if (dualStackPassed) "同一目标同时返回 A / AAAA" else "未确认双栈解析")
 
     val publicIpv6Result = runCatching { PublicIpDetector.detect(network).ipv6 }.getOrNull()
-    val publicIpv6Ok = publicIpv6Result?.let(::isUsableIpv6) == true
-    add("公网 IPv6", publicIpv6Ok, if (publicIpv6Ok) publicIpv6Result.orEmpty() else "公网 IPv6 暂未检测到")
+        ?.takeIf(::isUsableIpv6)
+    // 公网查询源不可达时，当前 activeNetwork 的全局 IPv6 仍能证明本机已具备 IPv6。
+    // 详情保持为纯地址，便于专项检测结束后直接同步回首页。
+    val effectiveIpv6 = publicIpv6Result ?: localIpv6Text
+    val publicIpv6Ok = effectiveIpv6?.let(::isUsableIpv6) == true
+    add("公网 IPv6", publicIpv6Ok, effectiveIpv6 ?: "公网 IPv6 暂未检测到")
 
     val targetAddress = targetIpv6
     val simplePingOk = targetAddress?.let { address ->
