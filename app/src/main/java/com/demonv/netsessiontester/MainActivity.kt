@@ -1985,6 +1985,14 @@ private fun manualNatProbe(mode: ManualNatMode, servers: List<String>, progress:
     )
 }
 
+private fun compatibleNatTypeFromRfc5780(mappingBehavior: String, filteringBehavior: String): String = when {
+    mappingBehavior == "端口保持" && filteringBehavior == "开放" -> "NAT1 / 全锥形"
+    mappingBehavior == "端口保持" && filteringBehavior == "地址受限" -> "NAT2 / 地址受限型"
+    mappingBehavior == "端口保持" && filteringBehavior == "端口受限" -> "NAT3 / 端口受限型"
+    mappingBehavior == "端口变化" -> "NAT4 / 对称型"
+    else -> "NAT类型待确认"
+}
+
 private fun manualRfc5780Probe(endpoint: StunEndpoint, progress: (String) -> Unit = {}): ManualNatResult? {
     return runCatching {
         progress("RFC5780 Filtering · 测试回包限制")
@@ -2004,7 +2012,7 @@ private fun manualRfc5780Probe(endpoint: StunEndpoint, progress: (String) -> Uni
         }
         ManualNatResult(
             success = true,
-            natType = "RFC5780 行为检测完成",
+            natType = compatibleNatTypeFromRfc5780(mapping.behavior, filtering.behavior),
             mappingBehavior = mapping.behavior,
             filteringBehavior = filtering.behavior,
             localAddress = localIpv4Addresses().firstOrNull()?.let { "$it:${mapping.base.mappedPort}" } ?: "本地端口:${mapping.base.mappedPort}",
@@ -6966,8 +6974,9 @@ private fun SessionProtocolSelector(
             Box(
                 modifier = Modifier
                     .weight(1f)
+                    .shadow(if (isSelected) 4.dp else 0.dp, ShapeM, clip = false)
                     .clip(ShapeM)
-                    .background(if (isSelected) Color.White else Color.Transparent, ShapeM)
+                    .background(if (isSelected) BlueSoft else Color.Transparent, ShapeM)
                     .clickable(
                         interactionSource = interactionSource,
                         indication = null,
@@ -6978,11 +6987,7 @@ private fun SessionProtocolSelector(
             ) {
                 Text(
                     item.label,
-                    color = when {
-                        !isSelected -> Muted
-                        item == SessionProtocolView.IPV6 -> Purple
-                        else -> Blue
-                    },
+                    color = if (isSelected) Blue else Muted,
                     fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
                     fontSize = 12.sp
                 )
@@ -7023,8 +7028,36 @@ private fun CombinedSessionStatsCard(
             }
         )
     }
+    var autoSwitchStage by rememberSaveable(showIpv4, showIpv6) { mutableStateOf(0) }
+    var previousTestActive by remember { mutableStateOf(testActive) }
+
     LaunchedEffect(availableViews) {
         if (selectedView !in availableViews && availableViews.isNotEmpty()) selectedView = availableViews.first()
+    }
+    LaunchedEffect(
+        testActive,
+        ipv4Stats.totalAttempts,
+        ipv6Stats.totalAttempts,
+        showIpv4,
+        showIpv6
+    ) {
+        if (showIpv4 && showIpv6) {
+            when {
+                testActive && !previousTestActive -> {
+                    selectedView = SessionProtocolView.IPV4
+                    autoSwitchStage = 1
+                }
+                testActive && ipv6Stats.totalAttempts > 0 && autoSwitchStage < 2 -> {
+                    selectedView = SessionProtocolView.IPV6
+                    autoSwitchStage = 2
+                }
+                !testActive && previousTestActive && ipv4Stats.totalAttempts > 0 && ipv6Stats.totalAttempts > 0 -> {
+                    selectedView = SessionProtocolView.COMPARE
+                    autoSwitchStage = 3
+                }
+            }
+        }
+        previousTestActive = testActive
     }
 
     val selectedStats = if (selectedView == SessionProtocolView.IPV6) ipv6Stats else ipv4Stats
@@ -7120,10 +7153,10 @@ private fun CombinedSessionStatsCard(
         }
 
         Row(horizontalArrangement = Arrangement.spacedBy(5.dp), modifier = Modifier.fillMaxWidth()) {
-            MetricTile("活动", active.toString(), Blue, Modifier.weight(1f))
-            MetricTile("总计", attempts.toString(), Navy, Modifier.weight(1f))
-            MetricTile("CPS", "$targetCps/$actualCps", Blue, Modifier.weight(1f))
-            MetricTile("平均延迟", if (averageLatencyMs > 0) "${averageLatencyMs}ms" else "—", Purple, Modifier.weight(1f))
+            SessionMetricTileCompact("活动", active.toString(), Blue, Modifier.weight(1f))
+            SessionMetricTileCompact("总计", attempts.toString(), Navy, Modifier.weight(1f))
+            SessionMetricTileCompact("CPS", "$targetCps/$actualCps", Blue, Modifier.weight(1f))
+            SessionMetricTileCompact("平均延迟", if (averageLatencyMs > 0) "${averageLatencyMs}ms" else "—", Purple, Modifier.weight(1f))
         }
 
         SessionAddressRow(
@@ -7181,6 +7214,46 @@ private fun CombinedSessionStatsCard(
         Column(verticalArrangement = Arrangement.spacedBy(7.dp), content = content)
     } else {
         SoftCard(content = content)
+    }
+}
+
+@Composable
+private fun SessionMetricTileCompact(
+    label: String,
+    value: String,
+    color: Color,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier
+            .heightIn(min = 50.dp)
+            .background(Color(0xFFF8FAFC), ShapeM)
+            .border(1.dp, Border.copy(alpha = 0.72f), ShapeM)
+            .padding(horizontal = 4.dp, vertical = 5.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Text(
+            value,
+            color = color,
+            fontSize = 13.sp,
+            lineHeight = 15.sp,
+            fontWeight = FontWeight.ExtraBold,
+            maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Clip
+        )
+        Spacer(Modifier.height(1.dp))
+        Text(
+            label,
+            color = Muted,
+            fontSize = 9.sp,
+            lineHeight = 11.sp,
+            fontWeight = FontWeight.Medium,
+            maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Clip
+        )
     }
 }
 
@@ -7244,7 +7317,7 @@ private fun SessionResultSummaryCard(
             .fillMaxWidth()
             .background(Color(0xFFF8FAFC), ShapeM)
             .border(1.dp, Border.copy(alpha = 0.75f), ShapeM)
-            .padding(horizontal = 4.dp, vertical = 8.dp),
+            .padding(horizontal = 3.dp, vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         FloatingSummaryValue("峰值", if (peak > 0) peak.toString() else "—", Blue, Modifier.weight(1f))
@@ -7259,9 +7332,13 @@ private fun SessionResultSummaryCard(
 
 @Composable
 private fun FloatingSummaryValue(label: String, value: String, color: Color, modifier: Modifier) {
-    Column(modifier = modifier, horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(label, color = Muted, fontSize = 9.sp, maxLines = 1)
-        Text(value, color = color, fontSize = 13.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+    Column(
+        modifier = modifier,
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(1.dp)
+    ) {
+        Text(label, color = Muted, fontSize = 8.sp, lineHeight = 10.sp, maxLines = 1, softWrap = false)
+        Text(value, color = color, fontSize = 12.sp, lineHeight = 14.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
     }
 }
 
@@ -7270,7 +7347,7 @@ private fun FloatingSummaryDivider() {
     Box(
         modifier = Modifier
             .width(1.dp)
-            .height(28.dp)
+            .height(22.dp)
             .background(Border.copy(alpha = 0.9f))
     )
 }
@@ -7829,7 +7906,7 @@ private fun NatDiagnosticDialog(
                     ) {
                         Text("测试结果", color = Muted, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                         Text(
-                            if (mode == ManualNatMode.RFC5780 && r.success) "RFC5780 行为检测完成" else r.natType,
+                            r.natType,
                             color = if (r.success) Blue else ErrorRed,
                             fontSize = 18.sp,
                             fontWeight = FontWeight.ExtraBold
@@ -7837,6 +7914,14 @@ private fun NatDiagnosticDialog(
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                             MiniResultTile("映射行为", standardMappingText(r.mappingBehavior), Modifier.weight(1f))
                             MiniResultTile("过滤行为", standardFilteringText(r.filteringBehavior), Modifier.weight(1f))
+                        }
+                        if (mode == ManualNatMode.RFC5780 && r.success) {
+                            Text(
+                                "传统 NAT 类型为兼容换算；准确判断请同时参考上方 RFC5780 映射行为和过滤行为。",
+                                color = Muted,
+                                fontSize = 10.sp,
+                                lineHeight = 14.sp
+                            )
                         }
                         MiniResultLine("本地地址", r.localAddress)
                         MiniResultLine("公网地址", r.publicAddress)
@@ -9087,6 +9172,12 @@ private enum class MtuProbeMode(val label: String) {
     PMTU("PMTU")
 }
 
+private enum class MtuRunMode(val label: String) {
+    IPV4("IPv4"),
+    IPV6("IPv6"),
+    FAILOVER("故障转移")
+}
+
 private data class MtuStep(val mtu: Int, val success: Boolean, val detail: String)
 private data class MtuCheckLine(val name: String, val value: String, val detail: String, val ok: Boolean = true)
 private data class MtuResult(
@@ -9386,21 +9477,30 @@ private fun runMtuPing(address: String, ipv6: Boolean, mtu: Int, timeoutMs: Int,
     return false to fallback
 }
 
-private fun runMtuCandidate(
+private suspend fun waitWhileMtuPaused(pauseRequested: () -> Boolean) {
+    while (pauseRequested() && currentCoroutineContext().isActive) {
+        delay(80L)
+    }
+}
+
+private suspend fun runMtuCandidate(
     address: String,
     ipv6: Boolean,
     mtu: Int,
     timeoutMs: Int,
     mode: MtuProbeMode,
     attempts: Int = 3,
-    requiredSuccess: Int = 2
+    requiredSuccess: Int = 2,
+    pauseRequested: () -> Boolean = { false }
 ): Triple<Boolean, String, Int> {
     val totalAttempts = attempts.coerceAtLeast(1)
     val needed = requiredSuccess.coerceIn(1, totalAttempts)
     var successCount = 0
     var executed = 0
     val details = mutableListOf<String>()
-    while (executed < totalAttempts) {
+    while (executed < totalAttempts && currentCoroutineContext().isActive) {
+        waitWhileMtuPaused(pauseRequested)
+        currentCoroutineContext().ensureActive()
         val (ok, detail) = runMtuPing(address, ipv6, mtu, timeoutMs, mode)
         executed++
         if (ok) successCount++
@@ -9435,22 +9535,17 @@ private suspend fun resolveMtuFamilyAddress(hostInput: String, ipv6: Boolean): I
 private suspend fun probeMtuPath(
     host: String,
     ipv6: Boolean,
-    minMtuInput: Int,
-    maxMtuInput: Int,
     localMtu: Int?,
     timeoutMs: Int,
-    mode: MtuProbeMode,
-    onStep: suspend (MtuStep) -> Unit
+    onStep: suspend (MtuStep) -> Unit,
+    pauseRequested: () -> Boolean = { false }
 ): MtuPathProbe {
     val protocol = if (ipv6) "IPv6" else "IPv4"
     val resolved = resolveMtuFamilyAddress(host, ipv6)
         ?: return MtuPathProbe(protocol, "-", null, emptyList(), "未解析到 $protocol 地址", "低", "无可用地址")
     val address = resolved.hostAddress?.substringBefore('%') ?: host
-    val minimum = (if (ipv6) minMtuInput.coerceAtLeast(1280) else minMtuInput).coerceIn(576, 9000)
-    val cappedMax = minOf(maxMtuInput.coerceIn(576, 9000), localMtu ?: 9000)
-    if (cappedMax < minimum) {
-        return MtuPathProbe(protocol, address, null, emptyList(), "本地接口 MTU 上限 $cappedMax 低于探测下限 $minimum", "低", "探测范围无效")
-    }
+    val minimum = if (ipv6) 1280 else 576
+    val cappedMax = (localMtu ?: 1500).coerceIn(minimum, 9000)
 
     var low = minimum
     var high = cappedMax
@@ -9458,8 +9553,18 @@ private suspend fun probeMtuPath(
     val steps = mutableListOf<MtuStep>()
     val observations = mutableListOf<Pair<Int, Boolean>>()
     while (low <= high && currentCoroutineContext().isActive) {
+        waitWhileMtuPaused(pauseRequested)
         val mid = (low + high) / 2
-        val (ok, detail, _) = runMtuCandidate(address, ipv6, mid, timeoutMs, mode, attempts = 3, requiredSuccess = 2)
+        val (ok, detail, _) = runMtuCandidate(
+            address = address,
+            ipv6 = ipv6,
+            mtu = mid,
+            timeoutMs = timeoutMs,
+            mode = MtuProbeMode.PMTU,
+            attempts = 3,
+            requiredSuccess = 2,
+            pauseRequested = pauseRequested
+        )
         val step = MtuStep(mid, ok, "[$protocol] $detail")
         steps += step
         observations += mid to ok
@@ -9479,14 +9584,24 @@ private suspend fun probeMtuPath(
         steps = steps,
         detail = "$protocol 路径未得到有效 MTU",
         confidence = "低",
-        error = "目标不响应或 ICMP 被限制"
+        error = "目标不响应或网络限制了大包探测"
     )
 
     var refinedBest: Int = initialBest
     val refineStart = maxOf(minimum, initialBest - 1)
     val refineEnd = minOf(cappedMax, initialBest + 2)
     for (candidate in refineStart..refineEnd) {
-        val (ok, detail, _) = runMtuCandidate(address, ipv6, candidate, timeoutMs, mode, attempts = 3, requiredSuccess = 2)
+        waitWhileMtuPaused(pauseRequested)
+        val (ok, detail, _) = runMtuCandidate(
+            address = address,
+            ipv6 = ipv6,
+            mtu = candidate,
+            timeoutMs = timeoutMs,
+            mode = MtuProbeMode.PMTU,
+            attempts = 3,
+            requiredSuccess = 2,
+            pauseRequested = pauseRequested
+        )
         val step = MtuStep(candidate, ok, "[$protocol 边界复测] $detail")
         steps += step
         observations += candidate to ok
@@ -9494,7 +9609,16 @@ private suspend fun probeMtuPath(
         if (ok) refinedBest = maxOf(refinedBest, candidate)
     }
 
-    val (confirmed, confirmDetail, _) = runMtuCandidate(address, ipv6, refinedBest, timeoutMs, mode, attempts = 5, requiredSuccess = 3)
+    val (confirmed, confirmDetail, _) = runMtuCandidate(
+        address = address,
+        ipv6 = ipv6,
+        mtu = refinedBest,
+        timeoutMs = timeoutMs,
+        mode = MtuProbeMode.PMTU,
+        attempts = 5,
+        requiredSuccess = 3,
+        pauseRequested = pauseRequested
+    )
     val confirmStep = MtuStep(refinedBest, confirmed, "[$protocol 最终确认] $confirmDetail")
     steps += confirmStep
     withContext(Dispatchers.Main) { onStep(confirmStep) }
@@ -9504,7 +9628,16 @@ private suspend fun probeMtuPath(
 
     val nextMtu = refinedBest + 1
     val nextFailed = if (nextMtu <= cappedMax) {
-        val (nextOk, nextDetail, _) = runMtuCandidate(address, ipv6, nextMtu, timeoutMs, mode, attempts = 3, requiredSuccess = 2)
+        val (nextOk, nextDetail, _) = runMtuCandidate(
+            address = address,
+            ipv6 = ipv6,
+            mtu = nextMtu,
+            timeoutMs = timeoutMs,
+            mode = MtuProbeMode.PMTU,
+            attempts = 3,
+            requiredSuccess = 2,
+            pauseRequested = pauseRequested
+        )
         val nextStep = MtuStep(nextMtu, nextOk, "[$protocol 边界外确认] $nextDetail")
         steps += nextStep
         withContext(Dispatchers.Main) { onStep(nextStep) }
@@ -9524,33 +9657,29 @@ private suspend fun probeMtuPath(
         else -> "低"
     }
     val detail = buildString {
-        append("MTU≈$refinedBest · 置信度$confidence")
-        if (cappedMax < maxMtuInput) append(" · 上限受本地接口 MTU $cappedMax 限制")
-        if (nonMonotonic) append(" · 结果不单调，可能受 ICMP 限速或网络波动影响")
+        append("路径 MTU 约为 $refinedBest 字节 · 置信度$confidence")
+        if (nonMonotonic) append(" · 网络有波动，建议再测一次")
     }
     return MtuPathProbe(protocol, address, refinedBest, steps, detail, confidence)
 }
 
 private fun analyzeMtu(mtu: Int?, ipv6: Boolean): String {
-    if (mtu == null) return "未得到有效 MTU。可能目标不可达、系统 ping 能力受限，或当前网络拦截 ICMP。"
+    if (mtu == null) return "没有测出有效路径 MTU，可能是目标不响应或网络限制了大包探测。"
     return when {
-        ipv6 && mtu < 1280 -> "低于 IPv6 最小链路 MTU 1280，结果不可靠，可能是系统命令或目标响应限制。"
-        mtu >= 1498 -> "接近标准以太网 1500，路径 MTU 表现正常。"
-        mtu in 1488..1497 -> "接近 PPPoE 常见 1492，可能经过宽带拨号或运营商封装链路。"
-        mtu in 1390..1460 -> "明显低于 1500，常见于 VPN、隧道、移动网络或中间链路封装。"
-        mtu in 1280..1389 -> "MTU 偏低，IPv6 保底可用但可能存在隧道、VPN 或链路质量问题。"
-        else -> "MTU 偏低，建议结合外网下载、丢包和延迟继续判断。"
+        ipv6 && mtu < 1280 -> "结果低于 IPv6 的最低要求，建议更换目标后复测。"
+        mtu >= 1498 -> "接近常见的 1500 字节，当前路径表现正常。"
+        mtu in 1488..1497 -> "接近宽带拨号常见的 1492 字节。"
+        mtu in 1390..1487 -> "路径 MTU 低于常见值，可能经过 VPN、隧道或额外封装。"
+        else -> "路径 MTU 偏低，建议更换网络或目标复测。"
     }
 }
 
 private suspend fun runMtuProbeLive(
     context: Context,
     hostInput: String,
-    policy: ToolIpPolicy,
-    probeMode: MtuProbeMode,
-    minMtuInput: Int,
-    maxMtuInput: Int,
+    runMode: MtuRunMode,
     timeoutMs: Int,
+    pauseRequested: () -> Boolean,
     onStep: suspend (MtuStep) -> Unit
 ): MtuResult = withContext(Dispatchers.IO) {
     val host = cleanToolHost(hostInput)
@@ -9558,107 +9687,88 @@ private suspend fun runMtuProbeLive(
     val checkLines = mutableListOf<MtuCheckLine>()
     checkLines += MtuCheckLine(
         name = "本地接口",
-        value = local.first?.let { "MTU $it" } ?: "未读取到",
-        detail = local.second,
+        value = local.first?.let { "$it 字节" } ?: "未读取到",
+        detail = "这是手机当前网络接口允许的上限，不等于到目标服务器的路径 MTU。",
         ok = local.first != null
     )
 
-    val needTcp = probeMode == MtuProbeMode.COMPREHENSIVE || probeMode == MtuProbeMode.TCP
-    val tcpProbe = if (needTcp) runTcpBusinessMtuProbe(context, host, policy, timeoutMs) else null
-    tcpProbe?.let { tcp ->
-        checkLines += MtuCheckLine(
-            name = "TCP连通性",
-            value = if (tcp.connected) "成功 ${tcp.costMs}ms" else "连接失败",
-            detail = if (tcp.connected) {
-                "${tcp.protocol} · ${tcp.host}:${tcp.port}；TCP仅验证业务连通性，本地估算MSS≈${tcp.mss ?: "-"}，不作为路径MTU结果。"
-            } else tcp.detail,
-            ok = tcp.connected
-        )
-    }
+    suspend fun probe(ipv6: Boolean): MtuPathProbe = probeMtuPath(
+        host = host,
+        ipv6 = ipv6,
+        localMtu = local.first,
+        timeoutMs = timeoutMs,
+        onStep = onStep,
+        pauseRequested = pauseRequested
+    )
 
-    if (probeMode == MtuProbeMode.TCP) {
-        return@withContext MtuResult(
-            target = host,
-            address = tcpProbe?.address ?: "-",
-            protocol = tcpProbe?.protocol ?: policy.label,
-            method = probeMode.label,
-            mtu = null,
-            steps = emptyList(),
-            analysis = if (tcpProbe?.connected == true) "TCP连接正常；本模式不输出路径MTU。" else "TCP连接失败；建议改用PMTU或综合模式继续检测。",
-            localMtu = local.first,
-            localDetail = local.second,
-            tcpMss = tcpProbe?.mss,
-            tcpMtu = null,
-            tcpDetail = tcpProbe?.detail.orEmpty(),
-            checkLines = checkLines
-        )
-    }
-
-    val pathMode = if (probeMode == MtuProbeMode.ICMP) MtuProbeMode.ICMP else MtuProbeMode.PMTU
     val pathResults = mutableListOf<MtuPathProbe>()
-    if (probeMode == MtuProbeMode.COMPREHENSIVE) {
-        pathResults += probeMtuPath(host, false, minMtuInput, maxMtuInput, local.first, timeoutMs, pathMode, onStep)
-        pathResults += probeMtuPath(host, true, minMtuInput, maxMtuInput, local.first, timeoutMs, pathMode, onStep)
-    } else {
-        val selected = resolveMtuAddress(host, policy).first
-        if (selected == null) {
-            return@withContext MtuResult(
-                target = host,
-                address = "-",
-                protocol = policy.label,
-                method = probeMode.label,
-                mtu = null,
-                steps = emptyList(),
-                analysis = "目标解析失败，未得到路径MTU。",
-                error = "无可用地址",
-                localMtu = local.first,
-                localDetail = local.second,
-                checkLines = checkLines
-            )
+    when (runMode) {
+        MtuRunMode.IPV4 -> pathResults += probe(false)
+        MtuRunMode.IPV6 -> pathResults += probe(true)
+        MtuRunMode.FAILOVER -> {
+            val ipv4 = probe(false)
+            pathResults += ipv4
+            if (ipv4.mtu == null) {
+                checkLines += MtuCheckLine(
+                    name = "故障转移",
+                    value = "转到 IPv6",
+                    detail = "IPv4 没有测出有效结果，已自动尝试 IPv6。",
+                    ok = true
+                )
+                pathResults += probe(true)
+            }
         }
-        pathResults += probeMtuPath(host, selected is Inet6Address, minMtuInput, maxMtuInput, local.first, timeoutMs, pathMode, onStep)
     }
 
     pathResults.forEach { path ->
+        val ipv6 = path.protocol == "IPv6"
+        val mss = path.mtu?.let { (it - if (ipv6) 60 else 40).coerceAtLeast(0) }
         checkLines += MtuCheckLine(
-            name = "${path.protocol}路径",
-            value = path.mtu?.let { "MTU≈$it" } ?: "未得到",
-            detail = if (path.error.isBlank()) "${path.detail}。${analyzeMtu(path.mtu, path.protocol == "IPv6")}" else path.detail,
+            name = "${path.protocol} 路径 MTU",
+            value = path.mtu?.let { "$it 字节" } ?: "未测出",
+            detail = if (path.mtu != null) {
+                "从本机到目标服务器，建议单个 IP 数据包不要超过 ${path.mtu} 字节。${analyzeMtu(path.mtu, ipv6)}"
+            } else {
+                path.error.ifBlank { path.detail }
+            },
             ok = path.mtu != null
         )
-    }
-    if (probeMode == MtuProbeMode.PMTU || probeMode == MtuProbeMode.COMPREHENSIVE) {
         checkLines += MtuCheckLine(
-            name = "PMTU说明",
-            value = if (pathResults.any { it.mtu != null }) "已复测" else "受限",
-            detail = "每个候选值发送3次、至少2次成功才通过；边界再做5次确认。结果仍可能受ICMP策略影响。",
-            ok = pathResults.any { it.mtu != null }
+            name = "${path.protocol} 建议 MSS",
+            value = mss?.let { "$it 字节" } ?: "—",
+            detail = if (mss != null) {
+                "按路径 MTU 扣除 ${if (ipv6) "IPv6+TCP 60" else "IPv4+TCP 40"} 字节计算，适合作为 TCP MSS 的建议值。"
+            } else {
+                "路径 MTU 未测出，暂时无法给出 MSS 建议。"
+            },
+            ok = mss != null
         )
     }
 
-    val validPaths = pathResults.filter { it.mtu != null }
-    val effectiveMtu = validPaths.mapNotNull { it.mtu }.minOrNull()
-    val addressText = validPaths.joinToString(" / ") { "${it.protocol} ${it.address}" }.ifBlank { "-" }
-    val protocolText = validPaths.joinToString(" / ") { it.protocol }.ifBlank { policy.label }
-    val analysisParts = pathResults.map { path ->
-        if (path.mtu != null) "${path.protocol} ${path.mtu}（置信度${path.confidence}）" else "${path.protocol}未得到"
+    val successfulPath = pathResults.firstOrNull { it.mtu != null }
+    val effectiveMtu = successfulPath?.mtu
+    val effectiveIpv6 = successfulPath?.protocol == "IPv6"
+    val suggestedMss = effectiveMtu?.let { (it - if (effectiveIpv6) 60 else 40).coerceAtLeast(0) }
+    val analysis = if (effectiveMtu != null && suggestedMss != null) {
+        "当前到目标的路径 MTU 约为 $effectiveMtu 字节，建议 TCP MSS 为 $suggestedMss 字节。"
+    } else {
+        "没有测出有效路径 MTU；可更换目标、切换协议或稍后再测。"
     }
-    val conservativeHint = effectiveMtu?.let { "；保守应用层单包建议≤${max(1200, it - 80)}字节" }.orEmpty()
 
     MtuResult(
         target = host,
-        address = addressText,
-        protocol = protocolText,
-        method = probeMode.label,
+        address = successfulPath?.address ?: pathResults.joinToString(" / ") { it.address }.ifBlank { "-" },
+        protocol = successfulPath?.protocol ?: runMode.label,
+        method = runMode.label,
         mtu = effectiveMtu,
         steps = pathResults.flatMap { it.steps },
-        analysis = "${analysisParts.joinToString("；")}$conservativeHint",
-        error = if (validPaths.isEmpty()) "未得到有效路径MTU" else "",
+        analysis = analysis,
+        error = if (effectiveMtu == null) "未得到有效路径 MTU" else "",
         localMtu = local.first,
         localDetail = local.second,
-        tcpMss = tcpProbe?.mss,
+        tcpMss = suggestedMss,
         tcpMtu = null,
-        tcpDetail = tcpProbe?.detail.orEmpty(),
+        tcpDetail = "",
         appLayerDetail = "",
         checkLines = checkLines
     )
@@ -10245,72 +10355,140 @@ private fun roamingXTicks(size: Int): List<Int> {
 private fun MtuToolPage(onBack: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val pauseFlag = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
     var host by remember { mutableStateOf("www.qq.com") }
-    var policy by remember { mutableStateOf(ToolIpPolicy.AUTO) }
-    var minMtu by remember { mutableStateOf("576") }
-    var maxMtu by remember { mutableStateOf("1500") }
     var timeoutMs by remember { mutableStateOf("1200") }
-    var probeMode by remember { mutableStateOf(MtuProbeMode.COMPREHENSIVE) }
+    var runMode by remember { mutableStateOf(MtuRunMode.IPV4) }
     var running by remember { mutableStateOf(false) }
+    var paused by remember { mutableStateOf(false) }
+    var job by remember { mutableStateOf<Job?>(null) }
     var steps by remember { mutableStateOf<List<MtuStep>>(emptyList()) }
     var result by remember { mutableStateOf<MtuResult?>(null) }
 
+    DisposableEffect(Unit) {
+        onDispose {
+            pauseFlag.set(false)
+            job?.cancel()
+        }
+    }
+
     LazyColumn(modifier = Modifier.fillMaxSize().padding(horizontal = 14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        item { ToolPageHeader("MTU检测", "综合 / ICMP / TCP / PMTU 路径分析", onBack) }
+        item { ToolPageHeader("MTU检测", "准确测试路径 MTU 与建议 MSS", onBack) }
         item {
             SoftCard {
                 ConfigLongRow("目标") { CleanField(host, { host = it }, "www.qq.com", leadingMark = "host") }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                    ConfigColumn("IP策略", Modifier.weight(1f)) { PolicyPicker(policy) { policy = it } }
-                    ConfigColumn("超时", Modifier.weight(1f)) { CleanField(timeoutMs, { timeoutMs = it.onlyDigits().take(5) }, "1200", keyboardType = KeyboardType.Number, leadingMark = "hourglass") }
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                    ConfigColumn("最小MTU", Modifier.weight(1f)) { CleanField(minMtu, { minMtu = it.onlyDigits().take(4) }, "576", keyboardType = KeyboardType.Number, leadingMark = "tune") }
-                    ConfigColumn("最大MTU", Modifier.weight(1f)) { CleanField(maxMtu, { maxMtu = it.onlyDigits().take(4) }, "1500", keyboardType = KeyboardType.Number, leadingMark = "tune") }
-                }
-                ConfigColumn("检测方式") {
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
-                        MtuProbeMode.values().forEach { mode ->
-                            MiniSelectPill(mode.label, probeMode == mode, Modifier.width(74.dp)) { probeMode = mode }
+                ConfigColumn("测试协议") {
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+                        MtuRunMode.values().forEach { mode ->
+                            MiniSelectPill(mode.label, runMode == mode, Modifier.weight(1f)) {
+                                if (!running) runMode = mode
+                            }
                         }
                     }
                 }
-                Text("综合模式分别检测本地接口、IPv4路径、IPv6路径和TCP连通性。路径候选值会多次复测；TCP不再作为真实路径MTU。", color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
+                ConfigLongRow("单次等待") {
+                    CleanField(
+                        timeoutMs,
+                        { timeoutMs = it.onlyDigits().take(5) },
+                        "1200",
+                        keyboardType = KeyboardType.Number,
+                        leadingMark = "hourglass"
+                    )
+                }
+                Text(
+                    when (runMode) {
+                        MtuRunMode.IPV4 -> "默认使用 IPv4 禁止分片探测，自动寻找可稳定通过的最大数据包，并计算建议 TCP MSS。"
+                        MtuRunMode.IPV6 -> "使用 IPv6 大包探测路径上限，并按 IPv6/TCP 头部计算建议 MSS。"
+                        MtuRunMode.FAILOVER -> "先测试 IPv4；如果 IPv4 无法得到有效结果，再自动转到 IPv6。"
+                    },
+                    color = Muted,
+                    fontSize = 11.sp,
+                    lineHeight = 15.sp
+                )
                 Button(
                     onClick = {
-                        if (running) return@Button
-                        running = true
-                        steps = emptyList()
-                        result = null
-                        scope.launch {
-                            val r = runMtuProbeLive(context.applicationContext, host, policy, probeMode, minMtu.safeInt(576, 576, 9000), maxMtu.safeInt(1500, 576, 9000), timeoutMs.safeInt(1200, 500, 10000)) { step ->
-                                steps = steps + step
+                        if (running) {
+                            paused = !paused
+                            pauseFlag.set(paused)
+                        } else {
+                            running = true
+                            paused = false
+                            pauseFlag.set(false)
+                            steps = emptyList()
+                            result = null
+                            job = scope.launch {
+                                try {
+                                    result = runMtuProbeLive(
+                                        context = context.applicationContext,
+                                        hostInput = host,
+                                        runMode = runMode,
+                                        timeoutMs = timeoutMs.safeInt(1200, 500, 10000),
+                                        pauseRequested = { pauseFlag.get() }
+                                    ) { step ->
+                                        steps = steps + step
+                                    }
+                                } catch (_: CancellationException) {
+                                    // 页面退出时结束当前检测，不写入错误结果。
+                                } finally {
+                                    pauseFlag.set(false)
+                                    paused = false
+                                    running = false
+                                    job = null
+                                }
                             }
-                            result = r
-                            running = false
                         }
                     },
                     modifier = Modifier.fillMaxWidth().height(48.dp),
                     shape = RoundedCornerShape(18.dp)
-                ) { Text(if (running) "检测中..." else "开始检测", fontWeight = FontWeight.ExtraBold) }
+                ) {
+                    Text(
+                        when {
+                            running && paused -> "继续测试"
+                            running -> "暂停"
+                            result != null -> "重新测试"
+                            else -> "开始测试"
+                        },
+                        fontWeight = FontWeight.ExtraBold
+                    )
+                }
             }
         }
-        item { MtuProcessCard(running, steps, result) }
+        item { MtuProcessCard(running = running, paused = paused, steps = steps, result = result) }
         item { Spacer(Modifier.height(16.dp)) }
     }
 }
 
 @Composable
-private fun MtuProcessCard(running: Boolean, steps: List<MtuStep>, result: MtuResult?) {
+private fun MtuProcessCard(running: Boolean, paused: Boolean, steps: List<MtuStep>, result: MtuResult?) {
     SoftCompactToolCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("检测过程", color = TextDark, fontWeight = FontWeight.ExtraBold, fontSize = 14.sp, modifier = Modifier.weight(1f))
-            Text(if (running) "运行中" else "完成", color = if (running) Blue else Muted, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            val stateText = when {
+                paused -> "已暂停"
+                running -> "运行中"
+                result != null -> "完成"
+                else -> "等待"
+            }
+            Text(stateText, color = if (running) Blue else Muted, fontSize = 11.sp, fontWeight = FontWeight.Bold)
         }
         if (steps.isEmpty()) {
-            Text("等待开始。综合模式会分别显示本地接口、IPv4路径、IPv6路径与TCP连通性。", color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
+            Text(
+                if (paused) "检测已暂停，点击继续测试后从当前进度恢复。" else "开始后会自动寻找路径可稳定通过的最大数据包。",
+                color = Muted,
+                fontSize = 11.sp,
+                lineHeight = 15.sp
+            )
         } else {
-            Text(steps.joinToString("\n") { "尝试 ${it.mtu}：${if (it.success) "成功" else "失败"} ${it.detail}" }, color = TextDark, fontSize = 11.sp, lineHeight = 15.sp, fontFamily = FontFamily.Monospace, maxLines = 18, overflow = TextOverflow.Ellipsis, modifier = Modifier.horizontalScroll(rememberScrollState()))
+            Text(
+                steps.joinToString("\n") { "${it.mtu} 字节：${if (it.success) "通过" else "未通过"} · ${it.detail}" },
+                color = TextDark,
+                fontSize = 11.sp,
+                lineHeight = 15.sp,
+                fontFamily = FontFamily.Monospace,
+                maxLines = 18,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.horizontalScroll(rememberScrollState())
+            )
         }
         result?.let { r ->
             HorizontalDivider(color = Border)
@@ -10336,12 +10514,9 @@ private fun MtuProcessCard(running: Boolean, steps: List<MtuStep>, result: MtuRe
                         }
                     }
                 }
-            } else {
-                ToolMonoLine("结果", r.mtu?.let { "有效 MTU ≈ $it" } ?: "未得到")
             }
-            if (r.tcpDetail.isNotBlank()) Text("TCP：${r.tcpDetail}", color = Muted, fontSize = 10.sp, lineHeight = 14.sp)
-            if (r.error.isNotBlank()) Text("错误：${r.error}", color = ErrorRed, fontSize = 11.sp)
-            Text("综合分析：${r.analysis}", color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
+            if (r.error.isNotBlank()) Text("提示：${r.error}", color = ErrorRed, fontSize = 11.sp)
+            Text(r.analysis, color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
         }
     }
 }
