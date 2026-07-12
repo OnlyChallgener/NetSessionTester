@@ -365,17 +365,29 @@ class TcpTester(context: Context) {
             else -> "测试完成"
         }
 
+        val nearFdLimit =
+            finalPeak >= 32_000 ||
+                finalPeak >= fdSafeStop ||
+                stats.phase == "FD上限" ||
+                errors.keys.any { it.contains("FD", ignoreCase = true) }
+        val holdDurationMs = if (nearFdLimit) 0L else 5_000L
+
         var stableActive = totalSuccess
-        if (config.keepConnectionsAfterStop && totalSuccess > 0 && currentCoroutineContext().isActive) {
+        if (
+            config.keepConnectionsAfterStop &&
+            totalSuccess > 0 &&
+            currentCoroutineContext().isActive &&
+            holdDurationMs > 0L
+        ) {
             val holdStartedAt = System.currentTimeMillis()
-            val holdDurationMs = 10_000L
+            val totalHoldSeconds = (holdDurationMs / 1_000L).coerceAtLeast(1L)
             while (currentCoroutineContext().isActive) {
                 val elapsed = System.currentTimeMillis() - holdStartedAt
                 stableActive = activeCount(protocol)
-                val seconds = (elapsed / 1_000L).coerceIn(0L, 10L)
+                val seconds = (elapsed / 1_000L).coerceIn(0L, totalHoldSeconds)
                 onStats(
                     stats.copy(
-                        phase = "保持验证 ${seconds}/10s",
+                        phase = "保持验证 ${seconds}/${totalHoldSeconds}s",
                         activeSessions = stableActive,
                         totalSuccess = totalSuccess,
                         totalFailure = totalFailure,
@@ -392,9 +404,15 @@ class TcpTester(context: Context) {
             }
             val retention = if (totalSuccess > 0) stableActive * 100.0 / totalSuccess.toDouble() else 0.0
             onLog(LogLine(level = LogLevel.INFO, text = "${protocol.label} 保持验证完成：开始 $totalSuccess，稳定 $stableActive，保持率 ${String.format("%.1f", retention)}%"))
+        } else if (config.keepConnectionsAfterStop && totalSuccess > 0 && nearFdLimit) {
+            onLog(LogLine(level = LogLevel.INFO, text = "${protocol.label} 已接近 FD 上限，跳过保持验证并进入释放流程"))
         }
 
-        val finalPhase = if (config.keepConnectionsAfterStop && totalSuccess > 0) "$baseFinalPhase · 已保持10s" else baseFinalPhase
+        val finalPhase = when {
+            !config.keepConnectionsAfterStop || totalSuccess <= 0 -> baseFinalPhase
+            nearFdLimit -> "$baseFinalPhase · 跳过保持"
+            else -> "$baseFinalPhase · 已保持5s"
+        }
         val finalStats = stats.copy(
             phase = finalPhase,
             activeSessions = stableActive,
