@@ -1161,19 +1161,28 @@ private fun carrierFromMccMnc(code: String): String {
 
 private fun normalizeCarrierName(name: String): String {
     val raw = name.trim()
-    val value = raw.lowercase()
+    val value = raw.lowercase(Locale.US)
     return when {
         value.isBlank() || value == "unknown" || value == "null" -> "未知"
-        "广电" in value || "cbn" in value || "broadnet" in value || "broadcast" in value || "china radio" in value -> "中国广电"
-        "移动" in value || "china mobile" in value || "chinamobile" in value || "cmcc" in value || "cmnet" in value -> "中国移动"
-        "联通" in value || "china unicom" in value || "unicom" in value || "china169" in value || "cnc" in value -> "中国联通"
-        "电信" in value || "chinanet" in value || "china telecom" in value || "telecom" in value || "ctcc" in value -> "中国电信"
-        "cernet" in value || "教育网" in value -> "教育网"
-        "dr.peng" in value || "dr peng" in value || "鹏博士" in value -> "鹏博士"
-        // ASN/IP接口有时会把地址字段误放到 org/isp，例如 “No. 1, Jin Rong Street”。
-        // 运营商卡片只显示明确识别到的运营商，避免把街道/公司地址当成运营商。
         value.contains("street") || value.contains("road") || value.contains("building") || value.contains("floor") -> "未知"
         value.contains("jin rong") || value.contains("no. 1") || value.contains("address") -> "未知"
+
+        "广电" in value || "china broadnet" in value || "china broadcasting network" in value ||
+            "china broadcast network" in value || "cbn" in value || "broadnet" in value ||
+            "radio and television network" in value -> "中国广电"
+
+        "移动" in value || "china mobile" in value || "chinamobile" in value ||
+            "cmcc" in value || "cmnet" in value || "china mobile international" in value -> "中国移动"
+
+        "联通" in value || "china unicom" in value || "unicom" in value ||
+            "china169" in value || "cucc" in value || "cncgroup" in value ||
+            "china netcom" in value -> "中国联通"
+
+        "电信" in value || "chinanet" in value || "china telecom" in value ||
+            "telecom china" in value || "ctcc" in value || "cn2" in value -> "中国电信"
+
+        "cernet" in value || "教育网" in value -> "教育网"
+        "dr.peng" in value || "dr peng" in value || "鹏博士" in value -> "鹏博士"
         else -> "未知"
     }
 }
@@ -1190,29 +1199,112 @@ private fun inferCarrierFromIpv6Prefix(ipv6: String): String {
     }
 }
 
-private data class CarrierCacheEntry(
-    val result: CarrierDetectionResult?,
+private data class IpIntelligenceResult(
+    val ip: String,
+    val countryCode: String = "",
+    val countryName: String = "",
+    val companyName: String = "",
+    val companyType: String = "",
+    val asnNumber: Int = 0,
+    val asnOrganization: String = "",
+    val asnDescription: String = "",
+    val asnType: String = "",
+    val isDatacenter: Boolean = false,
+    val isMobile: Boolean = false,
+    val isVpn: Boolean = false,
+    val isProxy: Boolean = false,
+    val isTor: Boolean = false,
+    val source: String = ""
+)
+
+private data class IpIntelligenceCacheEntry(
+    val result: IpIntelligenceResult?,
     val checkedAtMs: Long
 )
 
-private val carrierDetectionCache = mutableMapOf<String, CarrierCacheEntry>()
-private val carrierDetectionCacheLock = Any()
+private val ipIntelligenceCache = mutableMapOf<String, IpIntelligenceCacheEntry>()
+private val ipIntelligenceCacheLock = Any()
 
-private fun detectCarrierFromAsn(ip: String): CarrierDetectionResult? {
+private fun knownChinaCarrierFromAsn(asn: Int): String = when (asn) {
+    4134, 4809 -> "中国电信"
+    4837, 9929 -> "中国联通"
+    9808, 58453 -> "中国移动"
+    else -> "未知"
+}
+
+private fun carrierFromIntelligence(result: IpIntelligenceResult): String {
+    val textCarrier = listOf(
+        result.companyName,
+        result.asnOrganization,
+        result.asnDescription
+    ).asSequence()
+        .map(::normalizeCarrierName)
+        .firstOrNull { it != "未知" }
+        ?: "未知"
+    if (textCarrier != "未知") return textCarrier
+    return knownChinaCarrierFromAsn(result.asnNumber)
+}
+
+private fun queryIpIntelligence(ip: String): IpIntelligenceResult? {
     val target = ip.trim()
     if (!target.isUsableIpText()) return null
+
     val now = System.currentTimeMillis()
-    synchronized(carrierDetectionCacheLock) {
-        carrierDetectionCache[target]?.takeIf { now - it.checkedAtMs < 300_000L }?.let {
-            return it.result
+    synchronized(ipIntelligenceCacheLock) {
+        ipIntelligenceCache[target]?.let { cached ->
+            val ttl = if (cached.result != null) 30 * 60_000L else 5 * 60_000L
+            if (now - cached.checkedAtMs < ttl) return cached.result
         }
     }
-    val result = runCatching {
+
+    val primary = runCatching {
         val encoded = URLEncoder.encode(target, Charsets.UTF_8.name())
-        val conn = (URL("https://ipwho.is/$encoded?fields=success,connection").openConnection() as HttpURLConnection).apply {
+        val conn = (URL("https://api.ipapi.is/?q=$encoded").openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
-            connectTimeout = 1800
-            readTimeout = 2200
+            connectTimeout = 1_800
+            readTimeout = 2_500
+            useCaches = false
+            setRequestProperty("Accept", "application/json")
+            setRequestProperty("Cache-Control", "no-cache")
+            setRequestProperty("User-Agent", "NetSessionTester")
+        }
+        try {
+            if (conn.responseCode !in 200..299) return@runCatching null
+            val body = conn.inputStream.bufferedReader().use { it.readText() }
+            val obj = JSONObject(body)
+            if (obj.has("error")) return@runCatching null
+
+            val company = obj.optJSONObject("company")
+            val asn = obj.optJSONObject("asn")
+            val location = obj.optJSONObject("location")
+            IpIntelligenceResult(
+                ip = obj.optString("ip", target).ifBlank { target },
+                countryCode = location?.optString("country_code", "").orEmpty(),
+                countryName = location?.optString("country", "").orEmpty(),
+                companyName = company?.optString("name", "").orEmpty(),
+                companyType = company?.optString("type", "").orEmpty(),
+                asnNumber = asn?.optInt("asn", 0) ?: 0,
+                asnOrganization = asn?.optString("org", "").orEmpty(),
+                asnDescription = asn?.optString("descr", "").orEmpty(),
+                asnType = asn?.optString("type", "").orEmpty(),
+                isDatacenter = obj.optBoolean("is_datacenter", false),
+                isMobile = obj.optBoolean("is_mobile", false),
+                isVpn = obj.optBoolean("is_vpn", false),
+                isProxy = obj.optBoolean("is_proxy", false),
+                isTor = obj.optBoolean("is_tor", false),
+                source = "ipapi.is"
+            )
+        } finally {
+            conn.disconnect()
+        }
+    }.getOrNull()
+
+    val result = primary ?: runCatching {
+        val encoded = URLEncoder.encode(target, Charsets.UTF_8.name())
+        val conn = (URL("https://ipwho.is/$encoded?fields=success,country,country_code,connection").openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = 1_800
+            readTimeout = 2_500
             useCaches = false
             setRequestProperty("Accept", "application/json")
             setRequestProperty("Cache-Control", "no-cache")
@@ -1223,30 +1315,39 @@ private fun detectCarrierFromAsn(ip: String): CarrierDetectionResult? {
             val body = conn.inputStream.bufferedReader().use { it.readText() }
             val obj = JSONObject(body)
             if (!obj.optBoolean("success", false)) return@runCatching null
-            val connection = obj.optJSONObject("connection") ?: return@runCatching null
-            val samples = listOf(
-                connection.optString("isp", ""),
-                connection.optString("org", ""),
-                connection.optString("asn", "")
+            val connection = obj.optJSONObject("connection")
+            IpIntelligenceResult(
+                ip = target,
+                countryCode = obj.optString("country_code", ""),
+                countryName = obj.optString("country", ""),
+                companyName = connection?.optString("isp", "").orEmpty(),
+                asnOrganization = connection?.optString("org", "").orEmpty(),
+                asnDescription = connection?.optString("asn", "").orEmpty(),
+                source = "ipwho.is"
             )
-            val carrier = samples.asSequence()
-                .map { normalizeCarrierName(it) }
-                .firstOrNull { it != "未知" }
-                ?: "未知"
-            carrier.takeIf { it != "未知" }?.let { CarrierDetectionResult(it, "ASN") }
         } finally {
             conn.disconnect()
         }
     }.getOrNull()
-    synchronized(carrierDetectionCacheLock) {
-        carrierDetectionCache[target] = CarrierCacheEntry(result, now)
-        if (carrierDetectionCache.size > 16) {
-            carrierDetectionCache.entries.sortedBy { it.value.checkedAtMs }.take(carrierDetectionCache.size - 16).forEach {
-                carrierDetectionCache.remove(it.key)
-            }
+
+    synchronized(ipIntelligenceCacheLock) {
+        ipIntelligenceCache[target] = IpIntelligenceCacheEntry(result, now)
+        if (ipIntelligenceCache.size > 24) {
+            ipIntelligenceCache.entries
+                .sortedBy { it.value.checkedAtMs }
+                .take(ipIntelligenceCache.size - 24)
+                .forEach { ipIntelligenceCache.remove(it.key) }
         }
     }
     return result
+}
+
+private fun detectCarrierFromAsn(ip: String): CarrierDetectionResult? {
+    val intelligence = queryIpIntelligence(ip) ?: return null
+    val carrier = carrierFromIntelligence(intelligence)
+    return carrier.takeIf { it != "未知" }?.let {
+        CarrierDetectionResult(it, "${intelligence.source}/ASN")
+    }
 }
 
 private data class VpnExitDisplay(
@@ -1255,12 +1356,13 @@ private data class VpnExitDisplay(
     val checkedAtMs: Long
 )
 
-@Volatile
-private var cachedVpnExitDisplay: VpnExitDisplay? = null
+private val vpnExitDisplayCache = mutableMapOf<String, VpnExitDisplay>()
+private val vpnExitDisplayCacheLock = Any()
 
 private fun countryNameZh(code: String, fallback: String): String {
     val normalized = code.trim().uppercase(Locale.US)
     val fixed = when (normalized) {
+        "CN" -> "中国"
         "US" -> "美国"
         "JP" -> "日本"
         "SG" -> "新加坡"
@@ -1274,6 +1376,13 @@ private fun countryNameZh(code: String, fallback: String): String {
         "AU" -> "澳大利亚"
         "KR" -> "韩国"
         "NL" -> "荷兰"
+        "RU" -> "俄罗斯"
+        "IN" -> "印度"
+        "MY" -> "马来西亚"
+        "TH" -> "泰国"
+        "PH" -> "菲律宾"
+        "ID" -> "印度尼西亚"
+        "VN" -> "越南"
         else -> ""
     }
     if (fixed.isNotBlank()) return fixed
@@ -1283,27 +1392,47 @@ private fun countryNameZh(code: String, fallback: String): String {
     return localized.ifBlank { fallback.trim().ifBlank { "未知地区" } }
 }
 
-private fun vpnExitTypeFromOrganization(organization: String): String {
-    val text = organization.lowercase(Locale.US)
-    if (text.isBlank()) return "未知类型"
-    val hostingKeywords = listOf(
+private fun organizationLooksLikeHosting(text: String): Boolean {
+    val value = text.lowercase(Locale.US)
+    val keywords = listOf(
         "amazon", "aws", "google cloud", "google llc", "microsoft", "azure",
         "digitalocean", "vultr", "linode", "akamai", "ovh", "hetzner",
         "oracle cloud", "alibaba cloud", "aliyun", "tencent cloud", "cloudflare",
         "huawei cloud", "hosting", "hostinger", "datacenter", "data center",
         "server", "colo", "colocation", "leaseweb", "rackspace", "choopa",
-        "contabo", "m247", "zenlayer", "cloud"
+        "contabo", "m247", "zenlayer", "cloud", "vps", "dedicated"
     )
-    if (hostingKeywords.any { it in text }) return "机房"
+    return keywords.any { it in value }
+}
 
-    val accessKeywords = listOf(
+private fun organizationLooksLikeAccessIsp(text: String): Boolean {
+    val value = text.lowercase(Locale.US)
+    val keywords = listOf(
         "telecom", "communications", "broadband", "fiber", "fibre", "cable",
-        "wireless", "mobile", "internet service", "isp", "residential",
-        "comcast", "verizon", "spectrum", "charter", "cox", "vodafone",
-        "telefonica", "orange", "deutsche telekom", "softbank", "kddi", "ntt",
-        "singtel", "starhub", "telstra", "unicom", "chinanet", "china mobile"
+        "wireless", "mobile", "internet service", "internet provider", "isp",
+        "residential", "comcast", "verizon", "spectrum", "charter", "cox",
+        "vodafone", "telefonica", "orange", "deutsche telekom", "softbank",
+        "kddi", "ntt", "singtel", "starhub", "telstra", "unicom", "chinanet",
+        "china mobile"
     )
-    return if (accessKeywords.any { it in text }) "家庭地址" else "未知类型"
+    return keywords.any { it in value }
+}
+
+private fun vpnExitTypeFromIntelligence(result: IpIntelligenceResult): String {
+    val orgText = listOf(result.companyName, result.asnOrganization, result.asnDescription)
+        .filter { it.isNotBlank() }
+        .joinToString(" ")
+    val typeText = listOf(result.companyType, result.asnType)
+        .firstOrNull { it.isNotBlank() }
+        .orEmpty()
+        .lowercase(Locale.US)
+
+    return when {
+        result.isDatacenter || typeText == "hosting" || organizationLooksLikeHosting(orgText) -> "机房"
+        result.isMobile -> "移动网络"
+        typeText == "isp" || organizationLooksLikeAccessIsp(orgText) -> "家庭地址"
+        else -> "未知类型"
+    }
 }
 
 private fun detectVpnExitDisplay(ipv4: String, ipv6: String): String {
@@ -1311,54 +1440,43 @@ private fun detectVpnExitDisplay(ipv4: String, ipv6: String): String {
         ?: ipv6.takeIf { it.isUsableIpText() }
         ?: return "VPN/代理"
     val now = System.currentTimeMillis()
-    cachedVpnExitDisplay?.takeIf { it.ip == target && now - it.checkedAtMs < 60_000L }?.let {
-        return it.label
+    synchronized(vpnExitDisplayCacheLock) {
+        vpnExitDisplayCache[target]?.takeIf { now - it.checkedAtMs < 10 * 60_000L }?.let {
+            return it.label
+        }
     }
 
-    val detected = runCatching {
-        val encoded = URLEncoder.encode(target, Charsets.UTF_8.name())
-        val conn = (URL("https://ipwho.is/$encoded?fields=success,country,country_code,connection").openConnection() as HttpURLConnection).apply {
-            requestMethod = "GET"
-            connectTimeout = 1800
-            readTimeout = 2200
-            useCaches = false
-            setRequestProperty("Accept", "application/json")
-            setRequestProperty("Cache-Control", "no-cache")
-            setRequestProperty("User-Agent", "NetSessionTester")
-        }
-        try {
-            if (conn.responseCode !in 200..299) return@runCatching null
-            val body = conn.inputStream.bufferedReader().use { it.readText() }
-            val obj = JSONObject(body)
-            if (!obj.optBoolean("success", false)) return@runCatching null
-            val country = countryNameZh(obj.optString("country_code", ""), obj.optString("country", ""))
-            val connection = obj.optJSONObject("connection")
-            val organization = listOf(
-                connection?.optString("isp", "").orEmpty(),
-                connection?.optString("org", "").orEmpty(),
-                connection?.optString("asn", "").orEmpty()
-            ).filter { it.isNotBlank() }.joinToString(" ")
-            "$country · ${vpnExitTypeFromOrganization(organization)}"
-        } finally {
-            conn.disconnect()
-        }
-    }.getOrNull()
+    val intelligence = queryIpIntelligence(target)
+    val label = if (intelligence != null) {
+        val country = countryNameZh(intelligence.countryCode, intelligence.countryName)
+        "$country · ${vpnExitTypeFromIntelligence(intelligence)}"
+    } else {
+        "VPN/代理"
+    }
 
-    val label = detected ?: "VPN/代理"
-    cachedVpnExitDisplay = VpnExitDisplay(target, label, now)
+    synchronized(vpnExitDisplayCacheLock) {
+        vpnExitDisplayCache[target] = VpnExitDisplay(target, label, now)
+        if (vpnExitDisplayCache.size > 12) {
+            vpnExitDisplayCache.entries
+                .sortedBy { it.value.checkedAtMs }
+                .take(vpnExitDisplayCache.size - 12)
+                .forEach { vpnExitDisplayCache.remove(it.key) }
+        }
+    }
     return label
 }
 
 private fun displayCarrierFromEnv(env: NetworkEnvironment, ipv4: String, ipv6: String, full: Boolean): String {
     val prefixCarrier = inferCarrierFromIpv6Prefix(ipv6)
-    val asnCarrier = if (env.hasWifi && !env.hasVpn) {
-        detectCarrierFromAsn(ipv6).takeIf { it?.carrier != "未知" }
-            ?: detectCarrierFromAsn(ipv4).takeIf { it?.carrier != "未知" }
+    val ipCarrier = if (!env.hasVpn) {
+        detectCarrierFromAsn(ipv4).takeIf { it?.carrier != "未知" }
+            ?: detectCarrierFromAsn(ipv6).takeIf { it?.carrier != "未知" }
     } else null
+
     return when {
         env.hasVpn -> detectVpnExitDisplay(ipv4, ipv6)
         env.hasCellular && env.carrierName.isNotBlank() && env.carrierName != "未知" -> env.carrierName
-        asnCarrier != null -> asnCarrier.carrier
+        ipCarrier != null -> ipCarrier.carrier
         prefixCarrier != "未知" -> prefixCarrier
         env.hasWifi -> "WiFi出口未知"
         ipv4.isUsableIpText() || ipv6.isUsableIpText() -> "出口未知"
@@ -7594,7 +7712,8 @@ private fun CombinedSessionStatsCard(
     }
 }
 
-private val SessionMetricCompactHeight = 54.dp
+private val SessionMetricCompactHeight = 48.dp
+private val SessionCompareMetricCompactHeight = 54.dp
 
 @Composable
 private fun SessionMetricTileCompact(
@@ -7646,7 +7765,7 @@ private fun SessionCompareMetricTileCompact(
 ) {
     Column(
         modifier = modifier
-            .height(SessionMetricCompactHeight)
+            .height(SessionCompareMetricCompactHeight)
             .background(Color(0xFFF8FAFC), ShapeM)
             .border(1.dp, Border.copy(alpha = 0.72f), ShapeM)
             .padding(horizontal = 3.dp, vertical = 3.dp),
@@ -7779,7 +7898,7 @@ private fun SessionCompareResultSummaryCard(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .height(SessionMetricCompactHeight)
+            .height(SessionCompareMetricCompactHeight)
             .background(Color(0xFFF8FAFC), ShapeM)
             .border(1.dp, Border.copy(alpha = 0.75f), ShapeM)
             .padding(horizontal = 3.dp, vertical = 3.dp),
