@@ -1721,12 +1721,22 @@ private fun buildNetworkProbeInfo(
 
 private fun String.isUsableIpText(): Boolean {
     val v = trim()
-    return v.isNotBlank() && v != "不可用" && v != "检测中" && v != "未知"
+    return v.isNotBlank() &&
+        v != "不可用" &&
+        v != "检测中" &&
+        v != "待检测" &&
+        v != "未知" &&
+        v != "IPv6可用"
 }
 
 private fun isUsableIpv4(value: String): Boolean {
     val v = value.trim()
-    return v.isUsableIpText() && v.count { it == '.' } == 3
+    return v.isUsableIpText() && runCatching { InetAddress.getByName(v) is Inet4Address }.getOrDefault(false)
+}
+
+private fun isUsableIpv6(value: String): Boolean {
+    val v = value.trim().substringBefore('%')
+    return v.isUsableIpText() && runCatching { InetAddress.getByName(v) is Inet6Address }.getOrDefault(false)
 }
 
 private fun localIpv4Addresses(): List<String> = runCatching {
@@ -2963,6 +2973,8 @@ private fun NetSessionTesterApp() {
     var historyCounts by remember { mutableStateOf(HistoryCounts()) }
     var publicIpResult by remember { mutableStateOf(PublicIpResult()) }
     var publicIpLoading by remember { mutableStateOf(false) }
+    var ipv6ConnectivityVerified by remember { mutableStateOf(false) }
+    var publicIpv6FailureStreak by remember { mutableStateOf(0) }
     var networkProbeInfo by remember { mutableStateOf(NetworkProbeInfo()) }
     var manualStopRequested by remember { mutableStateOf(false) }
     var currentTestConfig by remember { mutableStateOf<SessionConfig?>(null) }
@@ -3153,9 +3165,30 @@ private fun NetSessionTesterApp() {
                 }
                 if (generation != networkRefreshGeneration) return@launch
 
+                val detectedIpv4 = result.ipv4.takeIf(::isUsableIpv4)
+                val detectedIpv6 = result.ipv6.takeIf(::isUsableIpv6)
+                val normalizedIpv6 = when {
+                    detectedIpv6 != null -> {
+                        publicIpv6FailureStreak = 0
+                        ipv6ConnectivityVerified = true
+                        detectedIpv6
+                    }
+                    isUsableIpv6(publicIpResult.ipv6) && publicIpv6FailureStreak < 2 -> {
+                        publicIpv6FailureStreak += 1
+                        publicIpResult.ipv6
+                    }
+                    ipv6ConnectivityVerified -> {
+                        publicIpv6FailureStreak += 1
+                        "IPv6可用"
+                    }
+                    else -> {
+                        publicIpv6FailureStreak += 1
+                        "待检测"
+                    }
+                }
                 val normalizedResult = result.copy(
-                    ipv4 = result.ipv4.takeIf { it.isUsableIpText() } ?: "待检测",
-                    ipv6 = result.ipv6.takeIf { it.isUsableIpText() } ?: "待检测"
+                    ipv4 = detectedIpv4 ?: "待检测",
+                    ipv6 = normalizedIpv6
                 )
                 // 公网出口先显示，运营商/出口类型随后异步补全。数据未变化时不写 Compose 状态，避免 VPN 模式下每轮刷新闪动。
                 if (publicIpResult != normalizedResult) {
@@ -3245,10 +3278,15 @@ private fun NetSessionTesterApp() {
             val vpnActive = detectNetworkEnvironment(appContext).hasVpn
             val signatureChanged = signature != lastNetworkInfoSignature
             if (signatureChanged) {
-                // 仅使旧查询失效，不先清空可见数据；新结果相同则整个刷新过程保持静默。
+                // 默认网络确实变化时，旧公网 IPv6 不再沿用；同一网络的普通刷新仍保持静默。
                 networkRefreshGeneration += 1L
                 networkRefreshJob?.cancel()
                 publicIpLoading = false
+                ipv6ConnectivityVerified = false
+                publicIpv6FailureStreak = 0
+                if (publicIpResult.ipv6 != "待检测") {
+                    publicIpResult = publicIpResult.copy(ipv6 = "待检测")
+                }
                 lastNetworkInfoSignature = signature
             }
             // 同一个 VPN Network 内切换节点时 Network 对象可能不变，因此仍强制复查公网 IP；
@@ -4643,7 +4681,23 @@ private fun NetSessionTesterApp() {
                 AppToolPage.TRACKET -> TracketToolPage(onBack = { appToolPage = AppToolPage.NONE })
                 AppToolPage.MTU -> MtuToolPage(onBack = { appToolPage = AppToolPage.NONE })
                 AppToolPage.ROAMING -> RoamingToolPage(onBack = { appToolPage = AppToolPage.NONE })
-                AppToolPage.IPV6_DIAGNOSTIC -> Ipv6DiagnosticToolPage(onBack = { appToolPage = AppToolPage.NONE })
+                AppToolPage.IPV6_DIAGNOSTIC -> Ipv6DiagnosticToolPage(
+                    onBack = { appToolPage = AppToolPage.NONE },
+                    onResult = { address, verified ->
+                        if (address != null && isUsableIpv6(address)) {
+                            publicIpResult = publicIpResult.copy(ipv6 = address)
+                            publicIpv6FailureStreak = 0
+                        } else if (verified && !isUsableIpv6(publicIpResult.ipv6)) {
+                            publicIpResult = publicIpResult.copy(ipv6 = "IPv6可用")
+                        }
+                        if (verified || address != null) {
+                            ipv6ConnectivityVerified = true
+                            if (networkProbeInfo.ipv6Status != "IPv6正常") {
+                                networkProbeInfo = networkProbeInfo.copy(ipv6Status = "IPv6正常")
+                            }
+                        }
+                    }
+                )
                 AppToolPage.PING_HISTORY -> PingHistoryToolPage(logs = pingLogs, onBack = { appToolPage = AppToolPage.NONE }, onDeleteSession = { sessionId -> deletePingLogSession(sessionId) })
                 AppToolPage.NONE -> when (selectedTab) {
                 MainTab.SETTINGS -> SettingsPage(
@@ -9623,7 +9677,7 @@ private suspend fun runIpv6DiagnosticChecks(
     add("双栈域名", dualStackPassed, if (dualStackPassed) "同一目标同时返回 A / AAAA" else "未确认双栈解析")
 
     val publicIpv6Result = runCatching { PublicIpDetector.detect(network).ipv6 }.getOrNull()
-    val publicIpv6Ok = publicIpv6Result?.isUsableIpText() == true
+    val publicIpv6Ok = publicIpv6Result?.let(::isUsableIpv6) == true
     add("公网 IPv6", publicIpv6Ok, if (publicIpv6Ok) publicIpv6Result.orEmpty() else "公网 IPv6 暂未检测到")
 
     val targetAddress = targetIpv6
@@ -9684,7 +9738,10 @@ private suspend fun runIpv6DiagnosticChecks(
 }
 
 @Composable
-private fun Ipv6DiagnosticToolPage(onBack: () -> Unit) {
+private fun Ipv6DiagnosticToolPage(
+    onBack: () -> Unit,
+    onResult: (address: String?, verified: Boolean) -> Unit
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var running by remember { mutableStateOf(false) }
@@ -9721,11 +9778,20 @@ private fun Ipv6DiagnosticToolPage(onBack: () -> Unit) {
                         if (!running) {
                             running = true
                             checks = emptyList()
+                            PublicIpDetector.invalidate()
                             scope.launch {
-                            runCatching {
-                                runIpv6DiagnosticChecks(context.applicationContext) { progress -> checks = progress }
-                            }
-                            running = false
+                                val finalChecks = runCatching {
+                                    runIpv6DiagnosticChecks(context.applicationContext) { progress -> checks = progress }
+                                }.getOrDefault(emptyList())
+                                if (finalChecks.isNotEmpty()) {
+                                    checks = finalChecks
+                                    val publicCheck = finalChecks.firstOrNull { it.title == "公网 IPv6" }
+                                    val publicAddress = publicCheck?.detail
+                                        ?.takeIf { publicCheck.passed && isUsableIpv6(it) }
+                                    val verified = finalChecks.count { it.passed } >= 8
+                                    onResult(publicAddress, verified)
+                                }
+                                running = false
                             }
                         }
                     },
@@ -12876,7 +12942,7 @@ private fun NetworkEnvironmentSettingsCard(
                     iconColor = Green,
                     modifier = Modifier.weight(1f),
                     onIconClick = onOpenIpv6Diagnostics,
-                    onValueClick = if (publicIpResult.ipv6.isUsableIpText()) onCopyPublicIpv6 else onOpenIpv6Diagnostics
+                    onValueClick = if (isUsableIpv6(publicIpResult.ipv6)) onCopyPublicIpv6 else onOpenIpv6Diagnostics
                 )
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
@@ -12900,7 +12966,7 @@ private fun NetworkEnvironmentSettingsCard(
                 iconColor = Green,
                 modifier = Modifier.weight(1f),
                 onIconClick = onOpenIpv6Diagnostics,
-                onValueClick = if (ipv6Display.isUsableIpText()) onCopyPublicIpv6 else onOpenIpv6Diagnostics
+                onValueClick = if (isUsableIpv6(ipv6Display)) onCopyPublicIpv6 else onOpenIpv6Diagnostics
             )
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
