@@ -911,18 +911,18 @@ private data class NetworkEnvironment(
 )
 
 private data class NetworkProbeInfo(
-    val localIp: String = "检测中",
+    val localIp: String = "待检测",
     val carrier: String = "未知",
-    val natType: String = "检测中",
-    val latencyText: String = "检测中",
-    val portText: String = "检测中",
-    val priority: String = "检测中",
-    val mappingBehavior: String = "检测中",
-    val filterBehavior: String = "检测中",
-    val ipv6Status: String = "检测中",
-    val dnsStatus: String = "检测中",
-    val confidence: String = "检测中",
-    val diagnosis: String = "检测中",
+    val natType: String = "待检测",
+    val latencyText: String = "待检测",
+    val portText: String = "待检测",
+    val priority: String = "待检测",
+    val mappingBehavior: String = "待检测",
+    val filterBehavior: String = "待检测",
+    val ipv6Status: String = "待检测",
+    val dnsStatus: String = "待检测",
+    val confidence: String = "待检测",
+    val diagnosis: String = "",
     val proxyNotice: String = "",
     val refreshMode: String = "待检测"
 )
@@ -1012,6 +1012,89 @@ private data class ManualNatResult(
     val message: String = ""
 )
 
+private data class NatHistoryRecord(
+    val id: Long,
+    val timeText: String,
+    val mode: String,
+    val natType: String,
+    val mappingBehavior: String,
+    val filteringBehavior: String,
+    val localAddress: String,
+    val publicAddress: String,
+    val method: String,
+    val server: String,
+    val message: String,
+    val durationMs: Long
+)
+
+private const val NAT_HISTORY_PREFS = "nat_history_v1"
+private const val NAT_HISTORY_KEY = "records"
+private const val NAT_HISTORY_MAX = 20
+
+private fun NatHistoryRecord.toJson(): JSONObject = JSONObject().apply {
+    put("id", id)
+    put("timeText", timeText)
+    put("mode", mode)
+    put("natType", natType)
+    put("mappingBehavior", mappingBehavior)
+    put("filteringBehavior", filteringBehavior)
+    put("localAddress", localAddress)
+    put("publicAddress", publicAddress)
+    put("method", method)
+    put("server", server)
+    put("message", message)
+    put("durationMs", durationMs)
+}
+
+private fun natHistoryRecordFromJson(obj: JSONObject): NatHistoryRecord? = runCatching {
+    NatHistoryRecord(
+        id = obj.optLong("id", 0L).takeIf { it > 0L } ?: return@runCatching null,
+        timeText = obj.optString("timeText", ""),
+        mode = obj.optString("mode", ""),
+        natType = obj.optString("natType", ""),
+        mappingBehavior = obj.optString("mappingBehavior", ""),
+        filteringBehavior = obj.optString("filteringBehavior", ""),
+        localAddress = obj.optString("localAddress", ""),
+        publicAddress = obj.optString("publicAddress", ""),
+        method = obj.optString("method", ""),
+        server = obj.optString("server", ""),
+        message = obj.optString("message", ""),
+        durationMs = obj.optLong("durationMs", 0L).coerceAtLeast(0L)
+    )
+}.getOrNull()
+
+private fun loadNatHistory(context: Context): List<NatHistoryRecord> {
+    val raw = context.getSharedPreferences(NAT_HISTORY_PREFS, Context.MODE_PRIVATE)
+        .getString(NAT_HISTORY_KEY, "[]").orEmpty()
+    return runCatching {
+        val array = JSONArray(raw)
+        buildList {
+            for (index in 0 until array.length()) {
+                val record = natHistoryRecordFromJson(array.optJSONObject(index) ?: continue)
+                if (record != null) add(record)
+            }
+        }.sortedByDescending { it.id }.take(NAT_HISTORY_MAX)
+    }.getOrDefault(emptyList())
+}
+
+private fun saveNatHistory(context: Context, record: NatHistoryRecord): List<NatHistoryRecord> {
+    val next = (listOf(record) + loadNatHistory(context).filterNot { it.id == record.id })
+        .sortedByDescending { it.id }
+        .take(NAT_HISTORY_MAX)
+    val array = JSONArray()
+    next.forEach { array.put(it.toJson()) }
+    context.getSharedPreferences(NAT_HISTORY_PREFS, Context.MODE_PRIVATE)
+        .edit()
+        .putString(NAT_HISTORY_KEY, array.toString())
+        .apply()
+    return next
+}
+
+private fun natHistorySizeKb(records: List<NatHistoryRecord>): Double {
+    val array = JSONArray()
+    records.forEach { array.put(it.toJson()) }
+    return array.toString().toByteArray(Charsets.UTF_8).size / 1024.0
+}
 
 private val stunRandom = java.security.SecureRandom()
 
@@ -1156,14 +1239,17 @@ private fun displayCarrierFromEnv(env: NetworkEnvironment, ipv4: String, ipv6: S
 
 
 private suspend fun detectNetworkProbe(
+    context: Context,
+    network: Network?,
     publicIpResult: PublicIpResult,
     env: NetworkEnvironment,
     targetHost: String,
     targetPort: Int
 ): NetworkProbeInfo = withContext(Dispatchers.IO) {
-    // V1.1.3：NAT 手动诊断支持多服务器顺延与测试阶段显示。
-    // NAT 类型交给手动诊断面板，避免普通 STUN 自动误判 NAT1。
+    // NAT 类型只由手动诊断更新；这里仅刷新轻量网络信息。
     buildNetworkProbeInfo(
+        context = context,
+        network = network,
         publicIpResult = publicIpResult,
         env = env,
         targetHost = targetHost,
@@ -1173,12 +1259,16 @@ private suspend fun detectNetworkProbe(
 }
 
 private suspend fun detectNetworkProbeLight(
+    context: Context,
+    network: Network?,
     publicIpResult: PublicIpResult,
     env: NetworkEnvironment,
     targetHost: String,
     targetPort: Int
 ): NetworkProbeInfo = withContext(Dispatchers.IO) {
     buildNetworkProbeInfo(
+        context = context,
+        network = network,
         publicIpResult = publicIpResult,
         env = env,
         targetHost = targetHost,
@@ -1188,6 +1278,8 @@ private suspend fun detectNetworkProbeLight(
 }
 
 private fun buildNetworkProbeInfo(
+    context: Context,
+    network: Network?,
     publicIpResult: PublicIpResult,
     env: NetworkEnvironment,
     targetHost: String,
@@ -1198,7 +1290,7 @@ private fun buildNetworkProbeInfo(
     val localIpv6 = localIpv6Addresses().firstOrNull()
     val publicV4FromHttp = publicIpResult.ipv4.takeIf { isUsableIpv4(it) }
     val hasPublicV6 = publicIpResult.ipv6.isUsableIpText()
-    val dns = runCatching { dnsProbe(targetHost) }.getOrElse {
+    val dns = runCatching { dnsProbe(context, targetHost, network) }.getOrElse {
         DnsProbeResult(
             systemHasA = false,
             systemHasAaaa = false,
@@ -2069,16 +2161,19 @@ private fun manualRfc3489Probe(endpoint: StunEndpoint, progress: (String) -> Uni
     }.getOrElse { error("${endpoint.key} 检测失败：${it.message ?: "未知错误"}") }
 }
 
-private fun dnsProbe(host: String): DnsProbeResult {
+private fun dnsProbe(context: Context, host: String, network: Network?): DnsProbeResult {
     val cleanHost = host.trim().removePrefix("[").removeSuffix("]").ifBlank { "www.baidu.com" }
-    val system = runCatching { InetAddress.getAllByName(cleanHost).toList() }.getOrDefault(emptyList())
+    val systemResult = runCatching {
+        if (network != null) network.getAllByName(cleanHost).toList() else InetAddress.getAllByName(cleanHost).toList()
+    }
+    val system = systemResult.getOrDefault(emptyList())
     val systemHasA = system.any { it is Inet4Address }
     val systemHasAaaa = system.any { it is Inet6Address }
     val fakeIp = system.filterIsInstance<Inet4Address>().any { isFakeIpAddress(it.hostAddress.orEmpty()) }
 
     val domesticHasAaaa = if (!systemHasAaaa) {
         listOf("223.5.5.5", "119.29.29.29").any { server ->
-            runCatching { dnsQueryHasAaaa(cleanHost, server) }.getOrDefault(false)
+            runCatching { dnsQueryHasAaaa(cleanHost, server, network) }.getOrDefault(false)
         }
     } else {
         false
@@ -2086,7 +2181,7 @@ private fun dnsProbe(host: String): DnsProbeResult {
 
     val globalHasAaaa = if (!systemHasAaaa && !domesticHasAaaa) {
         listOf("1.1.1.1", "8.8.8.8").any { server ->
-            runCatching { dnsQueryHasAaaa(cleanHost, server) }.getOrDefault(false)
+            runCatching { dnsQueryHasAaaa(cleanHost, server, network) }.getOrDefault(false)
         }
     } else {
         false
@@ -2097,7 +2192,8 @@ private fun dnsProbe(host: String): DnsProbeResult {
         systemHasAaaa = systemHasAaaa,
         domesticHasAaaa = domesticHasAaaa,
         globalHasAaaa = globalHasAaaa,
-        fakeIpDetected = fakeIp
+        fakeIpDetected = fakeIp,
+        error = systemResult.exceptionOrNull()?.message
     )
 }
 
@@ -2106,12 +2202,14 @@ private fun isFakeIpAddress(ip: String): Boolean {
     return p.size == 4 && p[0] == 198 && p[1] in 18..19
 }
 
-private fun dnsQueryHasAaaa(host: String, server: String): Boolean {
+private fun dnsQueryHasAaaa(host: String, server: String, network: Network?): Boolean {
     val txId = (System.nanoTime().toInt() and 0xFFFF)
     val query = buildDnsQuery(host, txId, qType = 28)
     DatagramSocket().use { socket ->
+        network?.bindSocket(socket)
         socket.soTimeout = 1200
-        socket.send(DatagramPacket(query, query.size, InetAddress.getByName(server), 53))
+        val dnsAddress = if (network != null) network.getAllByName(server).first() else InetAddress.getByName(server)
+        socket.send(DatagramPacket(query, query.size, dnsAddress, 53))
         val buf = ByteArray(1024)
         val packet = DatagramPacket(buf, buf.size)
         socket.receive(packet)
@@ -2605,6 +2703,9 @@ private fun NetSessionTesterApp() {
     var hostHistory by remember { mutableStateOf<List<String>>(emptyList()) }
     var pingTargetHistory by remember { mutableStateOf<List<String>>(emptyList()) }
     var networkWatchJob by remember { mutableStateOf<Job?>(null) }
+    var networkRefreshJob by remember { mutableStateOf<Job?>(null) }
+    var networkRefreshGeneration by remember { mutableStateOf(0L) }
+    var appInForeground by remember { mutableStateOf(true) }
     var testNetworkSignature by remember { mutableStateOf("") }
     var lastNetworkInfoSignature by remember { mutableStateOf("") }
     var activeRunId by remember { mutableStateOf(0L) }
@@ -2618,6 +2719,8 @@ private fun NetSessionTesterApp() {
     var showRunLogDetail by remember { mutableStateOf(false) }
     var showPingLogDialog by remember { mutableStateOf(false) }
     var showNatDiagnosticDialog by remember { mutableStateOf(false) }
+    var showNatHistoryDialog by remember { mutableStateOf(false) }
+    var natHistory by remember { mutableStateOf(loadNatHistory(context.applicationContext)) }
     var natDiagnosticResult by remember { mutableStateOf<ManualNatResult?>(null) }
     var natDiagnosticRunning by remember { mutableStateOf(false) }
     var natDiagnosticProgress by remember { mutableStateOf("") }
@@ -2639,6 +2742,7 @@ private fun NetSessionTesterApp() {
     var bottomNoticeJob by remember { mutableStateOf<Job?>(null) }
 
     BackHandler(enabled = showRunLogDetail) { showRunLogDetail = false }
+    BackHandler(enabled = showNatHistoryDialog) { showNatHistoryDialog = false }
     BackHandler(enabled = showNatDiagnosticDialog) { showNatDiagnosticDialog = false }
     BackHandler(enabled = appToolPage != AppToolPage.NONE) { appToolPage = AppToolPage.NONE }
 
@@ -2654,12 +2758,20 @@ private fun NetSessionTesterApp() {
     DisposableEffect(context) {
         val owner = context as? LifecycleOwner
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_START) {
-                networkInfoExpanded = false
+            when (event) {
+                Lifecycle.Event.ON_START -> {
+                    appInForeground = true
+                    networkInfoExpanded = false
+                }
+                Lifecycle.Event.ON_STOP -> appInForeground = false
+                else -> Unit
             }
         }
         owner?.lifecycle?.addObserver(observer)
-        onDispose { owner?.lifecycle?.removeObserver(observer) }
+        onDispose {
+            owner?.lifecycle?.removeObserver(observer)
+            networkRefreshJob?.cancel()
+        }
     }
 
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
@@ -2696,7 +2808,7 @@ private fun NetSessionTesterApp() {
 
     fun copyText(value: String, label: String) {
         val clean = value.trim()
-        if (clean.isBlank() || clean == "不可用" || clean == "检测中") {
+        if (clean.isBlank() || clean == "不可用" || clean == "检测中" || clean == "待检测" || clean == "未知") {
             scope.launch { snackbarHostState.showSnackbar("$label 暂不可复制") }
             return
         }
@@ -2739,32 +2851,78 @@ private fun NetSessionTesterApp() {
     }
 
     fun refreshPublicIp() {
-        if (publicIpLoading) return
-        scope.launch {
+        networkRefreshGeneration += 1L
+        val generation = networkRefreshGeneration
+        networkRefreshJob?.cancel()
+        networkRefreshJob = scope.launch {
             publicIpLoading = true
+            val appContext = context.applicationContext
+            val connectivity = appContext.getSystemService(ConnectivityManager::class.java)
+            val network = connectivity?.activeNetwork
             try {
-                val result = runCatching { PublicIpDetector.detect() }.getOrElse { PublicIpResult() }
-                publicIpResult = result
-                networkProbeInfo = runCatching {
-                    detectNetworkProbe(result, detectNetworkEnvironment(context), host.ifBlank { "www.baidu.com" }, port.toIntOrNull() ?: 80)
-                }.getOrElse { error ->
+                val result = withContext(Dispatchers.IO) {
+                    runCatching { PublicIpDetector.detect(network) }.getOrElse { PublicIpResult() }
+                }
+                val freshProbe = runCatching {
+                    detectNetworkProbe(
+                        context = appContext,
+                        network = network,
+                        publicIpResult = result,
+                        env = detectNetworkEnvironment(appContext),
+                        targetHost = host.ifBlank { "www.baidu.com" },
+                        targetPort = port.toIntOrNull() ?: 80
+                    )
+                }.getOrElse {
                     NetworkProbeInfo(
-                        localIp = localIpv4Addresses().firstOrNull() ?: localIpv6Addresses().firstOrNull() ?: "不可用",
-                        natType = "检测失败",
-                        latencyText = "不可用",
-                        portText = "不可用",
-                        priority = "未知",
-                        mappingBehavior = "未知",
-                        filterBehavior = "未知",
-                        ipv6Status = "不可用",
-                        dnsStatus = "检测失败",
-                        confidence = "低",
-                        diagnosis = error.message ?: "网络信息检测失败"
+                        localIp = localIpv4Addresses().firstOrNull() ?: localIpv6Addresses().firstOrNull() ?: "待检测",
+                        carrier = "未知",
+                        natType = "待检测",
+                        latencyText = "待检测",
+                        portText = "待检测",
+                        priority = "待检测",
+                        mappingBehavior = "待检测",
+                        filterBehavior = "待检测",
+                        ipv6Status = "待检测",
+                        dnsStatus = "待检测",
+                        confidence = "待检测",
+                        diagnosis = ""
                     )
                 }
-                lastNetworkInfoSignature = currentNetworkSignature(context)
+                if (generation != networkRefreshGeneration) return@launch
+
+                publicIpResult = result.copy(
+                    ipv4 = result.ipv4.takeIf { it.isUsableIpText() } ?: "待检测",
+                    ipv6 = result.ipv6.takeIf { it.isUsableIpText() } ?: "待检测"
+                )
+                // 5 秒轻量刷新不能覆盖本次手动 NAT 诊断结果。
+                networkProbeInfo = if (natDiagnosticResult != null) {
+                    freshProbe.copy(
+                        natType = networkProbeInfo.natType,
+                        portText = networkProbeInfo.portText,
+                        mappingBehavior = networkProbeInfo.mappingBehavior,
+                        filterBehavior = networkProbeInfo.filterBehavior,
+                        confidence = networkProbeInfo.confidence,
+                        diagnosis = networkProbeInfo.diagnosis,
+                        refreshMode = networkProbeInfo.refreshMode
+                    )
+                } else {
+                    freshProbe.copy(
+                        natType = "待检测",
+                        portText = "待检测",
+                        mappingBehavior = "待检测",
+                        filterBehavior = "待检测",
+                        confidence = "待检测",
+                        refreshMode = "待检测"
+                    )
+                }
+                lastNetworkInfoSignature = currentNetworkSignature(appContext)
+            } catch (_: CancellationException) {
+                throw CancellationException("网络信息刷新已被新一轮替换")
             } finally {
-                publicIpLoading = false
+                if (generation == networkRefreshGeneration) {
+                    publicIpLoading = false
+                    networkRefreshJob = null
+                }
             }
         }
     }
@@ -2831,18 +2989,13 @@ private fun NetSessionTesterApp() {
         }
     }
 
-    LaunchedEffect(settingsLoaded) {
-        if (settingsLoaded) {
-            lastNetworkInfoSignature = currentNetworkSignature(context)
-            while (true) {
-                delay(2_000L)
-                val nowSignature = currentNetworkSignature(context)
-                if (nowSignature != lastNetworkInfoSignature) {
-                    if (!state.isAdding && !finishInProgress && !publicIpLoading) {
-                        refreshPublicIp()
-                    }
-                }
-            }
+    LaunchedEffect(settingsLoaded, appInForeground, state.isAdding, finishInProgress) {
+        if (!settingsLoaded || !appInForeground) return@LaunchedEffect
+        // 进入前台立即刷新；连接数压测/释放阶段暂停轻量刷新，避免额外占用 FD。
+        if (!state.isAdding && !finishInProgress) refreshPublicIp()
+        while (appInForeground) {
+            delay(5_000L)
+            if (!state.isAdding && !finishInProgress) refreshPublicIp()
         }
     }
 
@@ -3963,6 +4116,13 @@ private fun NetSessionTesterApp() {
         PingLogDialog(logs = pingLogs, onDismiss = { showPingLogDialog = false })
     }
 
+    if (showNatHistoryDialog) {
+        NatHistoryDialog(
+            records = natHistory,
+            onDismiss = { showNatHistoryDialog = false }
+        )
+    }
+
     if (showNatDiagnosticDialog) {
         NatDiagnosticDialog(
             mode = natManualMode,
@@ -3970,6 +4130,10 @@ private fun NetSessionTesterApp() {
             running = natDiagnosticRunning,
             progressText = natDiagnosticProgress,
             result = natDiagnosticResult,
+            onOpenHistory = {
+                showNatDiagnosticDialog = false
+                showNatHistoryDialog = true
+            },
             onModeChange = { mode ->
                 natManualMode = mode
                 natDiagnosticResult = null
@@ -3983,11 +4147,13 @@ private fun NetSessionTesterApp() {
                     scope.launch {
                         natDiagnosticRunning = true
                         natDiagnosticProgress = "准备检测 · IPv4 · UDP"
+                        val startedAt = SystemClock.elapsedRealtime()
                         val modeNow = natManualMode
                         val serverNow = if (modeNow == ManualNatMode.RFC5780) natRfc5780Servers else natRfc3489Servers
                         val result = withContext(Dispatchers.IO) {
                             manualNatProbe(modeNow, serverNow) { message -> scope.launch { natDiagnosticProgress = message } }
                         }
+                        val durationMs = (SystemClock.elapsedRealtime() - startedAt).coerceAtLeast(0L)
                         natDiagnosticResult = result
                         natDiagnosticProgress = if (result.success) "检测完成 · ${result.method} · ${result.server}" else "检测失败 · ${result.message}"
                         networkProbeInfo = networkProbeInfo.copy(
@@ -3996,8 +4162,28 @@ private fun NetSessionTesterApp() {
                             mappingBehavior = result.mappingBehavior,
                             filterBehavior = result.filteringBehavior,
                             confidence = if (result.success) if (result.method == "RFC5780") "高" else "中" else "低",
-                            diagnosis = if (result.success) "手动NAT诊断完成：${result.method} · ${result.server}。${result.message}" else "手动NAT诊断失败：${result.message}"
+                            diagnosis = if (result.success) "手动NAT诊断完成：${result.method} · ${result.server}。${result.message}" else "手动NAT诊断失败：${result.message}",
+                            refreshMode = if (result.success) "已检测" else "待检测"
                         )
+                        if (result.success) {
+                            natHistory = saveNatHistory(
+                                context.applicationContext,
+                                NatHistoryRecord(
+                                    id = System.currentTimeMillis(),
+                                    timeText = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date()),
+                                    mode = modeNow.label,
+                                    natType = result.natType,
+                                    mappingBehavior = standardMappingText(result.mappingBehavior),
+                                    filteringBehavior = standardFilteringText(result.filteringBehavior),
+                                    localAddress = result.localAddress,
+                                    publicAddress = result.publicAddress,
+                                    method = result.method,
+                                    server = result.server,
+                                    message = result.message,
+                                    durationMs = durationMs
+                                )
+                            )
+                        }
                         natDiagnosticRunning = false
                     }
                 }
@@ -7814,6 +8000,7 @@ private fun NatDiagnosticDialog(
     running: Boolean,
     progressText: String,
     result: ManualNatResult?,
+    onOpenHistory: () -> Unit,
     onModeChange: (ManualNatMode) -> Unit,
     onServersChange: (List<String>) -> Unit,
     onRun: () -> Unit,
@@ -7825,7 +8012,16 @@ private fun NatDiagnosticDialog(
             TextButton(onClick = onDismiss, enabled = !running) { Text("完成", fontSize = 13.sp) }
         },
         dismissButton = {
-            TextButton(onClick = onRun, enabled = !running) { Text(if (running) "检测中" else "开始检测", fontSize = 13.sp, fontWeight = FontWeight.Bold) }
+            Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                TextButton(onClick = onRun, enabled = !running) {
+                    Text(if (running) "检测中" else "开始检测", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                }
+                TextButton(onClick = onOpenHistory, enabled = !running) {
+                    Icon(Icons.Filled.History, contentDescription = null, modifier = Modifier.width(16.dp).height(16.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("历史记录", fontSize = 13.sp)
+                }
+            }
         },
         title = { Text("NAT 类型检测", fontWeight = FontWeight.ExtraBold, color = TextDark) },
         text = {
@@ -7928,6 +8124,85 @@ private fun NatDiagnosticDialog(
                         MiniResultLine("测试方法", r.method)
                         MiniResultLine("服务器", r.server)
                         if (r.message.isNotBlank()) Text(r.message, color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
+                    }
+                }
+            }
+        }
+    )
+}
+
+@Composable
+private fun NatHistoryDialog(
+    records: List<NatHistoryRecord>,
+    onDismiss: () -> Unit
+) {
+    var expandedIds by remember(records) { mutableStateOf<Set<Long>>(emptySet()) }
+    val sizeKb = remember(records) { natHistorySizeKb(records) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭", fontSize = 13.sp) } },
+        title = { Text("NAT 检测历史", fontWeight = FontWeight.ExtraBold, color = TextDark) },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 560.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    "已保存 ${records.size}/$NAT_HISTORY_MAX 条 · 占用 ${String.format(Locale.US, "%.1f", sizeKb)} KB",
+                    color = Muted,
+                    fontSize = 11.sp
+                )
+                if (records.isEmpty()) {
+                    Text("暂无 NAT 检测记录。", color = Muted, fontSize = 12.sp, modifier = Modifier.padding(vertical = 16.dp))
+                } else {
+                    records.forEach { record ->
+                        val expanded = record.id in expandedIds
+                        Surface(
+                            shape = ShapeM,
+                            color = Color(0xFFF8FAFC),
+                            border = BorderStroke(0.7.dp, Border.copy(alpha = 0.75f)),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    expandedIds = if (expanded) expandedIds - record.id else expandedIds + record.id
+                                }
+                        ) {
+                            Column(
+                                modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 9.dp),
+                                verticalArrangement = Arrangement.spacedBy(5.dp)
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Column(Modifier.weight(1f)) {
+                                        Text(record.timeText, color = Muted, fontSize = 10.sp)
+                                        Text(
+                                            "${record.mode} · ${record.natType}",
+                                            color = TextDark,
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                    Text(if (expanded) "收起" else "展开", color = Blue, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                }
+                                if (expanded) {
+                                    HorizontalDivider(color = Border.copy(alpha = 0.7f))
+                                    MiniResultLine("映射行为", record.mappingBehavior.ifBlank { "—" })
+                                    MiniResultLine("过滤行为", record.filteringBehavior.ifBlank { "—" })
+                                    MiniResultLine("本地地址", record.localAddress.ifBlank { "—" })
+                                    MiniResultLine("公网地址", record.publicAddress.ifBlank { "—" })
+                                    MiniResultLine("测试方法", record.method.ifBlank { record.mode })
+                                    MiniResultLine("服务器", record.server.ifBlank { "—" })
+                                    MiniResultLine("检测耗时", if (record.durationMs > 0L) "${record.durationMs}ms" else "—")
+                                    if (record.message.isNotBlank()) {
+                                        Text(record.message, color = Muted, fontSize = 10.sp, lineHeight = 14.sp)
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -9166,7 +9441,7 @@ private fun TracketToolPage(onBack: () -> Unit) {
 
 
 private enum class MtuProbeMode(val label: String) {
-    COMPREHENSIVE("综合"),
+    FAILOVER("故障转移"),
     ICMP("ICMP"),
     TCP("TCP"),
     PMTU("PMTU")
@@ -9175,7 +9450,7 @@ private enum class MtuProbeMode(val label: String) {
 private enum class MtuRunMode(val label: String) {
     IPV4("IPv4"),
     IPV6("IPv6"),
-    FAILOVER("故障转移")
+    AUTO("自动")
 }
 
 private data class MtuStep(val mtu: Int, val success: Boolean, val detail: String)
@@ -9379,14 +9654,13 @@ private data class MtuTcpProbe(
 private suspend fun runTcpBusinessMtuProbe(
     context: Context,
     hostInput: String,
-    policy: ToolIpPolicy,
+    ipv6: Boolean,
     timeoutMs: Int,
     port: Int = 443
 ): MtuTcpProbe = withContext(Dispatchers.IO) {
     val host = cleanToolHost(hostInput)
-    val resolved = resolveMtuAddress(host, policy)
-    val address = resolved.first ?: return@withContext MtuTcpProbe(false, host, port, "-", policy.label, 0L, null, null, "解析失败：${resolved.second ?: "无可用地址"}")
-    val ipv6 = address is Inet6Address
+    val address = resolveMtuFamilyAddress(host, ipv6)
+        ?: return@withContext MtuTcpProbe(false, host, port, "-", if (ipv6) "IPv6" else "IPv4", 0L, null, null, "未解析到${if (ipv6) "IPv6" else "IPv4"}地址")
     val cleanAddress = address.hostAddress?.substringBefore('%') ?: host
     val localMtu = readLocalInterfaceMtu(context).first
     val start = SystemClock.elapsedRealtime()
@@ -9399,13 +9673,12 @@ private suspend fun runTcpBusinessMtuProbe(
     runCatching { socket.close() }
     val cost = SystemClock.elapsedRealtime() - start
     val estimatedMss = if (ok) localMtu?.let { (it - if (ipv6) 60 else 40).coerceAtLeast(0) } else null
-    val estimatedMtu = estimatedMss?.let { it + if (ipv6) 60 else 40 }
     val detail = if (ok) {
-        "TCP ${host}:$port 连接成功 ${cost}ms；Android Java 层无法直接读取 TCP_MAXSEG，当前以本地 MTU 估算 MSS，后续可接 NDK getsockopt(TCP_MAXSEG) 精确读取"
+        "TCP ${host}:$port 连接成功 ${cost}ms；受 Android Java 接口限制，MSS 为按本地接口 MTU 计算的建议值，不等同于精确路径 MTU。"
     } else {
-        "TCP ${host}:$port 连接失败或超时；不代表 ICMP/UDP 不可达"
+        "TCP ${host}:$port 连接失败或超时。"
     }
-    MtuTcpProbe(ok, host, port, cleanAddress, if (ipv6) "IPv6" else "IPv4", cost, estimatedMss, estimatedMtu, detail)
+    MtuTcpProbe(ok, host, port, cleanAddress, if (ipv6) "IPv6" else "IPv4", cost, estimatedMss, localMtu, detail)
 }
 
 private fun pmtuModeNote(ipv6: Boolean): String {
@@ -9437,9 +9710,9 @@ private fun runMtuPing(address: String, ipv6: Boolean, mtu: Int, timeoutMs: Int,
         )
     }
     val commands = when (mode) {
+        MtuProbeMode.FAILOVER -> pmtuCommands + fastCommands
         MtuProbeMode.ICMP -> fastCommands
         MtuProbeMode.PMTU -> pmtuCommands
-        MtuProbeMode.COMPREHENSIVE -> pmtuCommands + fastCommands
         MtuProbeMode.TCP -> pmtuCommands
     }
     var last = ""
@@ -9532,11 +9805,44 @@ private suspend fun resolveMtuFamilyAddress(hostInput: String, ipv6: Boolean): I
     }.getOrNull()
 }
 
+private suspend fun runMtuCandidateQuick(
+    address: String,
+    ipv6: Boolean,
+    mtu: Int,
+    timeoutMs: Int,
+    mode: MtuProbeMode,
+    pauseRequested: () -> Boolean
+): Triple<Boolean, String, Int> {
+    var successes = 0
+    var executed = 0
+    val details = mutableListOf<String>()
+    repeat(2) {
+        waitWhileMtuPaused(pauseRequested)
+        currentCoroutineContext().ensureActive()
+        val (ok, detail) = runMtuPing(address, ipv6, mtu, timeoutMs, mode)
+        executed++
+        if (ok) successes++
+        if (detail.isNotBlank()) details += detail
+    }
+    if (successes == 1) {
+        waitWhileMtuPaused(pauseRequested)
+        currentCoroutineContext().ensureActive()
+        val (ok, detail) = runMtuPing(address, ipv6, mtu, timeoutMs, mode)
+        executed++
+        if (ok) successes++
+        if (detail.isNotBlank()) details += detail
+    }
+    val passed = if (executed >= 3) successes >= 2 else successes == 2
+    val summary = "$successes/$executed 成功" + details.firstOrNull()?.let { " · $it" }.orEmpty()
+    return Triple(passed, summary, successes)
+}
+
 private suspend fun probeMtuPath(
     host: String,
     ipv6: Boolean,
     localMtu: Int?,
     timeoutMs: Int,
+    probeMode: MtuProbeMode,
     onStep: suspend (MtuStep) -> Unit,
     pauseRequested: () -> Boolean = { false }
 ): MtuPathProbe {
@@ -9546,38 +9852,52 @@ private suspend fun probeMtuPath(
     val address = resolved.hostAddress?.substringBefore('%') ?: host
     val minimum = if (ipv6) 1280 else 576
     val cappedMax = (localMtu ?: 1500).coerceIn(minimum, 9000)
+    val effectiveMode = if (probeMode == MtuProbeMode.FAILOVER) MtuProbeMode.PMTU else probeMode
 
-    var low = minimum
-    var high = cappedMax
-    var best: Int? = null
     val steps = mutableListOf<MtuStep>()
-    val observations = mutableListOf<Pair<Int, Boolean>>()
-    while (low <= high && currentCoroutineContext().isActive) {
-        waitWhileMtuPaused(pauseRequested)
-        val mid = (low + high) / 2
-        val (ok, detail, _) = runMtuCandidate(
-            address = address,
-            ipv6 = ipv6,
-            mtu = mid,
-            timeoutMs = timeoutMs,
-            mode = MtuProbeMode.PMTU,
-            attempts = 3,
-            requiredSuccess = 2,
-            pauseRequested = pauseRequested
-        )
-        val step = MtuStep(mid, ok, "[$protocol] $detail")
-        steps += step
-        observations += mid to ok
-        withContext(Dispatchers.Main) { onStep(step) }
-        if (ok) {
-            best = mid
-            low = mid + 1
+    val observations = linkedMapOf<Int, Boolean>()
+
+    suspend fun testCandidate(mtu: Int, label: String, quick: Boolean = true): Boolean {
+        val result = if (quick) {
+            runMtuCandidateQuick(address, ipv6, mtu, timeoutMs, effectiveMode, pauseRequested)
         } else {
-            high = mid - 1
+            runMtuCandidate(
+                address = address,
+                ipv6 = ipv6,
+                mtu = mtu,
+                timeoutMs = timeoutMs,
+                mode = effectiveMode,
+                attempts = 3,
+                requiredSuccess = 2,
+                pauseRequested = pauseRequested
+            )
         }
+        val step = MtuStep(mtu, result.first, "[$protocol $label] ${result.second}")
+        steps += step
+        observations[mtu] = result.first
+        withContext(Dispatchers.Main) { onStep(step) }
+        return result.first
     }
 
-    val initialBest = best ?: return MtuPathProbe(
+    // 先测常见值，绝大多数 1500/1492/1480 路径可快速完成，再进入小区间精查。
+    val commonCandidates = listOf(cappedMax, 1500, 1492, 1480, 1460, 1400, 1280, minimum)
+        .filter { it in minimum..cappedMax }
+        .distinct()
+        .sortedDescending()
+
+    var passedCommon: Int? = null
+    var nearestFailedAbove: Int? = null
+    for (candidate in commonCandidates) {
+        waitWhileMtuPaused(pauseRequested)
+        val ok = testCandidate(candidate, "快速")
+        if (ok) {
+            passedCommon = candidate
+            break
+        }
+        nearestFailedAbove = candidate
+    }
+
+    val initialPass = passedCommon ?: return MtuPathProbe(
         protocol = protocol,
         address = address,
         mtu = null,
@@ -9587,80 +9907,68 @@ private suspend fun probeMtuPath(
         error = "目标不响应或网络限制了大包探测"
     )
 
-    var refinedBest: Int = initialBest
-    val refineStart = maxOf(minimum, initialBest - 1)
-    val refineEnd = minOf(cappedMax, initialBest + 2)
-    for (candidate in refineStart..refineEnd) {
+    var best = initialPass
+    var low = initialPass + 1
+    var high = ((nearestFailedAbove ?: (cappedMax + 1)) - 1).coerceAtMost(cappedMax)
+    while (low <= high && currentCoroutineContext().isActive) {
         waitWhileMtuPaused(pauseRequested)
-        val (ok, detail, _) = runMtuCandidate(
-            address = address,
-            ipv6 = ipv6,
-            mtu = candidate,
-            timeoutMs = timeoutMs,
-            mode = MtuProbeMode.PMTU,
-            attempts = 3,
-            requiredSuccess = 2,
-            pauseRequested = pauseRequested
-        )
-        val step = MtuStep(candidate, ok, "[$protocol 边界复测] $detail")
-        steps += step
-        observations += candidate to ok
-        withContext(Dispatchers.Main) { onStep(step) }
-        if (ok) refinedBest = maxOf(refinedBest, candidate)
+        val mid = (low + high) / 2
+        if (testCandidate(mid, "精查")) {
+            best = mid
+            low = mid + 1
+        } else {
+            high = mid - 1
+        }
     }
 
-    val (confirmed, confirmDetail, _) = runMtuCandidate(
+    val confirm = runMtuCandidate(
         address = address,
         ipv6 = ipv6,
-        mtu = refinedBest,
+        mtu = best,
         timeoutMs = timeoutMs,
-        mode = MtuProbeMode.PMTU,
+        mode = effectiveMode,
         attempts = 5,
-        requiredSuccess = 3,
+        requiredSuccess = 4,
         pauseRequested = pauseRequested
     )
-    val confirmStep = MtuStep(refinedBest, confirmed, "[$protocol 最终确认] $confirmDetail")
+    val confirmStep = MtuStep(best, confirm.first, "[$protocol 最终确认] ${confirm.second}")
     steps += confirmStep
+    observations[best] = confirm.first
     withContext(Dispatchers.Main) { onStep(confirmStep) }
-    if (!confirmed) {
-        refinedBest = observations.filter { it.second }.maxOfOrNull { it.first } ?: initialBest
+
+    if (!confirm.first) {
+        best = observations.filterValues { it }.keys.maxOrNull() ?: initialPass
     }
 
-    val nextMtu = refinedBest + 1
-    val nextFailed = if (nextMtu <= cappedMax) {
-        val (nextOk, nextDetail, _) = runMtuCandidate(
-            address = address,
-            ipv6 = ipv6,
-            mtu = nextMtu,
-            timeoutMs = timeoutMs,
-            mode = MtuProbeMode.PMTU,
-            attempts = 3,
-            requiredSuccess = 2,
-            pauseRequested = pauseRequested
-        )
-        val nextStep = MtuStep(nextMtu, nextOk, "[$protocol 边界外确认] $nextDetail")
-        steps += nextStep
-        withContext(Dispatchers.Main) { onStep(nextStep) }
-        !nextOk
-    } else true
+    val nextMtu = best + 1
+    var nextFailed = true
+    if (nextMtu <= cappedMax) {
+        nextFailed = !testCandidate(nextMtu, "边界外", quick = false)
+    }
 
-    val sorted = observations.sortedBy { it.first }
+    val sorted = observations.toSortedMap()
     var seenFailure = false
     var nonMonotonic = false
-    sorted.forEach { (_, ok) ->
+    sorted.values.forEach { ok ->
         if (!ok) seenFailure = true else if (seenFailure) nonMonotonic = true
     }
     val confidence = when {
         nonMonotonic -> "低"
-        confirmed && nextFailed -> "高"
-        confirmed -> "中"
+        effectiveMode == MtuProbeMode.ICMP && confirm.first -> "中"
+        confirm.first && nextFailed -> "高"
+        confirm.first -> "中"
         else -> "低"
     }
-    val detail = buildString {
-        append("路径 MTU 约为 $refinedBest 字节 · 置信度$confidence")
-        if (nonMonotonic) append(" · 网络有波动，建议再测一次")
+    val modeText = when (effectiveMode) {
+        MtuProbeMode.PMTU -> "PMTU"
+        MtuProbeMode.ICMP -> "ICMP"
+        else -> effectiveMode.label
     }
-    return MtuPathProbe(protocol, address, refinedBest, steps, detail, confidence)
+    val detail = buildString {
+        append("$modeText 测得路径 MTU 约为 $best 字节 · 置信度$confidence")
+        if (nonMonotonic) append(" · 结果有波动，建议换目标再测")
+    }
+    return MtuPathProbe(protocol, address, best, steps, detail, confidence)
 }
 
 private fun analyzeMtu(mtu: Int?, ipv6: Boolean): String {
@@ -9678,6 +9986,7 @@ private suspend fun runMtuProbeLive(
     context: Context,
     hostInput: String,
     runMode: MtuRunMode,
+    probeMode: MtuProbeMode,
     timeoutMs: Int,
     pauseRequested: () -> Boolean,
     onStep: suspend (MtuStep) -> Unit
@@ -9692,32 +10001,75 @@ private suspend fun runMtuProbeLive(
         ok = local.first != null
     )
 
-    suspend fun probe(ipv6: Boolean): MtuPathProbe = probeMtuPath(
-        host = host,
-        ipv6 = ipv6,
-        localMtu = local.first,
-        timeoutMs = timeoutMs,
-        onStep = onStep,
-        pauseRequested = pauseRequested
-    )
+    val families = when (runMode) {
+        MtuRunMode.IPV4 -> listOf(false)
+        MtuRunMode.IPV6 -> listOf(true)
+        MtuRunMode.AUTO -> listOf(false, true)
+    }
 
     val pathResults = mutableListOf<MtuPathProbe>()
-    when (runMode) {
-        MtuRunMode.IPV4 -> pathResults += probe(false)
-        MtuRunMode.IPV6 -> pathResults += probe(true)
-        MtuRunMode.FAILOVER -> {
-            val ipv4 = probe(false)
-            pathResults += ipv4
-            if (ipv4.mtu == null) {
-                checkLines += MtuCheckLine(
-                    name = "故障转移",
-                    value = "转到 IPv6",
-                    detail = "IPv4 没有测出有效结果，已自动尝试 IPv6。",
-                    ok = true
-                )
-                pathResults += probe(true)
-            }
+    val tcpResults = mutableListOf<MtuTcpProbe>()
+
+    for (ipv6 in families) {
+        waitWhileMtuPaused(pauseRequested)
+        if (probeMode == MtuProbeMode.TCP) {
+            val tcp = runTcpBusinessMtuProbe(context, host, ipv6, timeoutMs)
+            tcpResults += tcp
+            checkLines += MtuCheckLine(
+                name = "${tcp.protocol} TCP",
+                value = if (tcp.connected) "连接正常" else "连接失败",
+                detail = tcp.detail,
+                ok = tcp.connected
+            )
+            checkLines += MtuCheckLine(
+                name = "${tcp.protocol} 建议 MSS",
+                value = tcp.mss?.let { "$it 字节" } ?: "—",
+                detail = if (tcp.mss != null) "按当前接口 MTU 估算，仅供配置参考。" else "TCP 未连接，无法给出建议值。",
+                ok = tcp.mss != null
+            )
+            continue
         }
+
+        val primaryMode = if (probeMode == MtuProbeMode.FAILOVER) MtuProbeMode.PMTU else probeMode
+        var path = probeMtuPath(
+            host = host,
+            ipv6 = ipv6,
+            localMtu = local.first,
+            timeoutMs = timeoutMs,
+            probeMode = primaryMode,
+            onStep = onStep,
+            pauseRequested = pauseRequested
+        )
+
+        if (probeMode == MtuProbeMode.FAILOVER && path.mtu == null) {
+            checkLines += MtuCheckLine(
+                name = "${path.protocol} 故障转移",
+                value = "改用 ICMP",
+                detail = "PMTU 没有得到稳定结果，已自动使用 ICMP 辅助探测。",
+                ok = true
+            )
+            path = probeMtuPath(
+                host = host,
+                ipv6 = ipv6,
+                localMtu = local.first,
+                timeoutMs = timeoutMs,
+                probeMode = MtuProbeMode.ICMP,
+                onStep = onStep,
+                pauseRequested = pauseRequested
+            )
+        }
+
+        if (probeMode == MtuProbeMode.FAILOVER && path.mtu == null) {
+            val tcp = runTcpBusinessMtuProbe(context, host, ipv6, timeoutMs)
+            tcpResults += tcp
+            checkLines += MtuCheckLine(
+                name = "${tcp.protocol} TCP辅助",
+                value = if (tcp.connected) "连接正常" else "连接失败",
+                detail = "大包探测失败，TCP 仅用于确认业务连通，不能替代准确路径 MTU。${tcp.detail}",
+                ok = tcp.connected
+            )
+        }
+        pathResults += path
     }
 
     pathResults.forEach { path ->
@@ -9737,9 +10089,9 @@ private suspend fun runMtuProbeLive(
             name = "${path.protocol} 建议 MSS",
             value = mss?.let { "$it 字节" } ?: "—",
             detail = if (mss != null) {
-                "按路径 MTU 扣除 ${if (ipv6) "IPv6+TCP 60" else "IPv4+TCP 40"} 字节计算，适合作为 TCP MSS 的建议值。"
+                "按路径 MTU 扣除 ${if (ipv6) "IPv6+TCP 60" else "IPv4+TCP 40"} 字节计算。"
             } else {
-                "路径 MTU 未测出，暂时无法给出 MSS 建议。"
+                "路径 MTU 未测出，暂时无法给出准确 MSS 建议。"
             },
             ok = mss != null
         )
@@ -9749,26 +10101,33 @@ private suspend fun runMtuProbeLive(
     val effectiveMtu = successfulPath?.mtu
     val effectiveIpv6 = successfulPath?.protocol == "IPv6"
     val suggestedMss = effectiveMtu?.let { (it - if (effectiveIpv6) 60 else 40).coerceAtLeast(0) }
-    val analysis = if (effectiveMtu != null && suggestedMss != null) {
-        "当前到目标的路径 MTU 约为 $effectiveMtu 字节，建议 TCP MSS 为 $suggestedMss 字节。"
-    } else {
-        "没有测出有效路径 MTU；可更换目标、切换协议或稍后再测。"
+        ?: tcpResults.firstOrNull { it.mss != null }?.mss
+    val analysis = when {
+        effectiveMtu != null && suggestedMss != null -> "当前到目标的路径 MTU 约为 $effectiveMtu 字节，建议 TCP MSS 为 $suggestedMss 字节。"
+        probeMode == MtuProbeMode.TCP && suggestedMss != null -> "TCP 连接正常；建议 MSS 为 $suggestedMss 字节，但该值来自本地接口估算，不是精确路径 MTU。"
+        else -> "没有测出有效路径 MTU；可更换目标、切换模式或稍后再测。"
     }
 
     MtuResult(
         target = host,
-        address = successfulPath?.address ?: pathResults.joinToString(" / ") { it.address }.ifBlank { "-" },
-        protocol = successfulPath?.protocol ?: runMode.label,
-        method = runMode.label,
+        address = successfulPath?.address
+            ?: tcpResults.firstOrNull { it.connected }?.address
+            ?: pathResults.joinToString(" / ") { it.address }.ifBlank { "-" },
+        protocol = when (runMode) {
+            MtuRunMode.IPV4 -> "IPv4"
+            MtuRunMode.IPV6 -> "IPv6"
+            MtuRunMode.AUTO -> "IPv4 + IPv6"
+        },
+        method = probeMode.label,
         mtu = effectiveMtu,
         steps = pathResults.flatMap { it.steps },
         analysis = analysis,
-        error = if (effectiveMtu == null) "未得到有效路径 MTU" else "",
+        error = if (effectiveMtu == null && tcpResults.none { it.connected }) "未得到有效路径 MTU" else "",
         localMtu = local.first,
         localDetail = local.second,
         tcpMss = suggestedMss,
         tcpMtu = null,
-        tcpDetail = "",
+        tcpDetail = tcpResults.joinToString("；") { it.detail },
         appLayerDetail = "",
         checkLines = checkLines
     )
@@ -10359,6 +10718,7 @@ private fun MtuToolPage(onBack: () -> Unit) {
     var host by remember { mutableStateOf("www.qq.com") }
     var timeoutMs by remember { mutableStateOf("1200") }
     var runMode by remember { mutableStateOf(MtuRunMode.IPV4) }
+    var probeMode by remember { mutableStateOf(MtuProbeMode.FAILOVER) }
     var running by remember { mutableStateOf(false) }
     var paused by remember { mutableStateOf(false) }
     var job by remember { mutableStateOf<Job?>(null) }
@@ -10386,6 +10746,15 @@ private fun MtuToolPage(onBack: () -> Unit) {
                         }
                     }
                 }
+                ConfigColumn("测试模式") {
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.fillMaxWidth()) {
+                        MtuProbeMode.values().forEach { mode ->
+                            MiniSelectPill(mode.label, probeMode == mode, Modifier.weight(1f)) {
+                                if (!running) probeMode = mode
+                            }
+                        }
+                    }
+                }
                 ConfigLongRow("单次等待") {
                     CleanField(
                         timeoutMs,
@@ -10396,10 +10765,15 @@ private fun MtuToolPage(onBack: () -> Unit) {
                     )
                 }
                 Text(
-                    when (runMode) {
-                        MtuRunMode.IPV4 -> "默认使用 IPv4 禁止分片探测，自动寻找可稳定通过的最大数据包，并计算建议 TCP MSS。"
-                        MtuRunMode.IPV6 -> "使用 IPv6 大包探测路径上限，并按 IPv6/TCP 头部计算建议 MSS。"
-                        MtuRunMode.FAILOVER -> "先测试 IPv4；如果 IPv4 无法得到有效结果，再自动转到 IPv6。"
+                    when (probeMode) {
+                        MtuProbeMode.FAILOVER -> "优先使用 PMTU 准确探测；若被网络限制，再自动改用 ICMP，最后用 TCP 只确认业务是否连通。"
+                        MtuProbeMode.PMTU -> "使用禁止分片/大包语义寻找准确路径 MTU，并计算建议 TCP MSS。"
+                        MtuProbeMode.ICMP -> "使用普通 ICMP 大包测试，速度较快，但结果可能受分片或回包策略影响。"
+                        MtuProbeMode.TCP -> "只检查 TCP 业务连通，并按本地接口 MTU 估算建议 MSS，不会冒充准确路径 MTU。"
+                    } + when (runMode) {
+                        MtuRunMode.IPV4 -> " 当前只测 IPv4。"
+                        MtuRunMode.IPV6 -> " 当前只测 IPv6。"
+                        MtuRunMode.AUTO -> " 当前会依次测试 IPv4 和 IPv6。"
                     },
                     color = Muted,
                     fontSize = 11.sp,
@@ -10422,6 +10796,7 @@ private fun MtuToolPage(onBack: () -> Unit) {
                                         context = context.applicationContext,
                                         hostInput = host,
                                         runMode = runMode,
+                                        probeMode = probeMode,
                                         timeoutMs = timeoutMs.safeInt(1200, 500, 10000),
                                         pauseRequested = { pauseFlag.get() }
                                     ) { step ->
@@ -11727,7 +12102,7 @@ private fun NetworkEnvironmentSettingsCard(
             SectionTitle("network_info", "网络信息", Purple)
             Spacer(Modifier.weight(1f))
             TextButton(onClick = onOpenNatDiagnostics) { Text("NAT诊断", fontSize = 12.sp) }
-            TextButton(onClick = onRefresh) { Text(if (publicIpLoading) "检测中" else "刷新", fontSize = 12.sp) }
+            TextButton(onClick = onRefresh) { Text("刷新", fontSize = 12.sp) }
             IconButton(onClick = { onExpandedChange(!expanded) }, modifier = Modifier.width(32.dp).height(32.dp)) {
                 Text(if (expanded) "⌃" else "⌄", color = TextDark, fontSize = 19.sp, fontWeight = FontWeight.Bold)
             }
@@ -11751,7 +12126,7 @@ private fun NetworkEnvironmentSettingsCard(
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
             InfoMetricTile("ipv4", "公网IPv4", if (maskPrivacy) maskIpText(publicIpResult.ipv4) else publicIpResult.ipv4, BlueSoft, Blue, Modifier.weight(1f), onClick = onCopyPublicIpv4)
-            val ipv6Display = if (publicIpResult.ipv6.isUsableIpText()) publicIpResult.ipv6 else probeInfo.ipv6Status
+            val ipv6Display = publicIpResult.ipv6
             InfoMetricTile("ipv6", "公网IPv6", if (maskPrivacy) maskIpText(ipv6Display) else ipv6Display, GreenSoft, Green, Modifier.weight(1f), onClick = onCopyPublicIpv6)
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {

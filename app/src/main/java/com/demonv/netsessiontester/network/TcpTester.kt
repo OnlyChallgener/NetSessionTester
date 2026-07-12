@@ -34,6 +34,7 @@ import java.net.Socket
 import java.net.SocketException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
+import java.io.File
 import java.util.Collections
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.floor
@@ -51,8 +52,28 @@ import kotlin.math.floor
 class TcpTester {
     private val socketLock = Mutex()
     private val releaseEpoch = AtomicLong(0L)
-    private val fdClipStart = 32_160
-    private val fdSafeStop = 32_360
+    private val fdReserve = 128
+    private val absoluteFdCeiling = 32_640
+
+    private fun readProcessFdSoftLimit(): Int {
+        return runCatching {
+            val text = File("/proc/self/limits").readText()
+            Regex("Max open files\\s+(\\d+)").find(text)?.groupValues?.getOrNull(1)?.toIntOrNull()
+        }.getOrNull()?.coerceAtLeast(1_024) ?: 32_768
+    }
+
+    private fun currentOpenFdCount(): Int = runCatching {
+        File("/proc/self/fd").list()?.size ?: 0
+    }.getOrDefault(0)
+
+    private fun calculateSafeSocketTarget(): Triple<Int, Int, Int> {
+        val softLimit = readProcessFdSoftLimit()
+        val baseline = currentOpenFdCount().coerceAtLeast(32)
+        val target = (softLimit - baseline - fdReserve)
+            .coerceAtMost(absoluteFdCeiling)
+            .coerceAtLeast(1_000)
+        return Triple(target, softLimit, baseline)
+    }
 
     private val heldSockets: MutableMap<IpProtocol, MutableList<Socket>> = mutableMapOf(
         IpProtocol.IPV4 to Collections.synchronizedList(mutableListOf()),
@@ -121,8 +142,10 @@ class TcpTester {
         val targetCps = config.batchSize.coerceIn(20, 2_000)
         val schedulerIntervalMs = config.intervalMs.coerceIn(20L, 1_000L)
         val maxPending = (targetCps * 4).coerceIn(1_000, 8_000)
+        val (fdSafeStop, fdSoftLimit, baselineFd) = calculateSafeSocketTarget()
+        val fdClipStart = (fdSafeStop - 1_500).coerceAtLeast(1_000)
         onLog(LogLine(level = LogLevel.SUCCESS, text = "${protocol.label} 解析成功：${addressText.joinToString(" / ")}"))
-        onLog(LogLine(level = LogLevel.INFO, text = "${protocol.label} 使用 test93 流水线固定CPS核心：目标 ${targetCps}/s，调度 ${schedulerIntervalMs}ms，pending≤$maxPending，多地址轮询，FD 32360。"))
+        onLog(LogLine(level = LogLevel.INFO, text = "${protocol.label} 安全FD策略：软上限 $fdSoftLimit，测试前占用 $baselineFd，预留 $fdReserve，目标活动上限 $fdSafeStop；接近上限自动降速。"))
 
         val pendingScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         val pending = ArrayDeque<Deferred<OpenResult>>()
@@ -141,6 +164,9 @@ class TcpTester {
         var tokenCarry = 0.0
         var addressOffset = 0
         var lastCps = 0
+        var consecutiveFailures = 0
+        var lastGrowthAt = startedAt
+        val recentOutcomes = ArrayDeque<Boolean>()
         var stats = ProtocolStats(protocol = protocol, phase = "建连中", resolvedAddresses = addressText, lastAdded = targetCps)
         onStats(stats)
 
@@ -171,15 +197,24 @@ class TcpTester {
                 if (result.discarded) continue
                 result.socket?.let { socket ->
                     sockets += socket
+                    recentOutcomes.addLast(true)
+                    while (recentOutcomes.size > 200) recentOutcomes.removeFirst()
+                    consecutiveFailures = 0
                     result.connectLatencyMs?.let { latency ->
                         totalConnectLatencyMs += latency.toLong().coerceAtLeast(0L)
                         connectLatencySamples++
                     }
                 }
-                result.error?.let { errors[it] = (errors[it] ?: 0) + 1 }
+                result.error?.let { error ->
+                    errors[error] = (errors[error] ?: 0) + 1
+                    recentOutcomes.addLast(false)
+                    while (recentOutcomes.size > 200) recentOutcomes.removeFirst()
+                    consecutiveFailures++
+                }
             }
             if (sockets.isNotEmpty()) {
                 totalSuccess += sockets.size
+                lastGrowthAt = System.currentTimeMillis()
                 addSuccessSockets(sockets)
             }
             val failureNow = errors.values.sum()
@@ -204,6 +239,14 @@ class TcpTester {
 
         fun totalAttemptsForUi(): Int = totalSuccess + totalFailure
 
+        fun adaptiveCpsForRemaining(remaining: Int): Int = when {
+            remaining <= 0 -> 0
+            remaining < 300 -> minOf(targetCps, 15)
+            remaining < 1_000 -> minOf(targetCps, 40)
+            remaining < 2_000 -> minOf(targetCps, 100)
+            else -> targetCps
+        }
+
         try {
             while (currentCoroutineContext().isActive && totalSuccess < config.successLimit) {
                 val loopStart = System.currentTimeMillis()
@@ -217,7 +260,19 @@ class TcpTester {
                     break
                 }
 
-                val stopReason = stopReasonByQualityOrFailure(
+                val nowForQuality = System.currentTimeMillis()
+                val recentFailureRate = if (recentOutcomes.isNotEmpty()) {
+                    recentOutcomes.count { !it }.toDouble() / recentOutcomes.size.toDouble()
+                } else 0.0
+                val noGrowthMs = nowForQuality - lastGrowthAt
+                val qualityStopReason = when {
+                    errors.containsKey("FD上限") -> "FD上限"
+                    consecutiveFailures >= 200 -> "连续失败上限"
+                    recentOutcomes.size >= 100 && recentFailureRate >= 0.80 && consecutiveFailures >= 50 && noGrowthMs >= 3_000L -> "平台确认"
+                    totalSuccess >= fdClipStart && noGrowthMs >= 3_000L && recentOutcomes.size >= 50 -> "平台确认"
+                    else -> null
+                }
+                val stopReason = qualityStopReason ?: stopReasonByQualityOrFailure(
                     success = totalSuccess,
                     failure = totalFailure,
                     launched = launchedAttempts,
@@ -234,7 +289,9 @@ class TcpTester {
                 val now = System.currentTimeMillis()
                 val elapsedTokenMs = (now - lastTokenAt).coerceAtLeast(0L)
                 lastTokenAt = now
-                tokenCarry += targetCps.toDouble() * elapsedTokenMs.toDouble() / 1000.0
+                val remainingFd = (fdSafeStop - totalSuccess - pending.size).coerceAtLeast(0)
+                val effectiveTargetCps = adaptiveCpsForRemaining(remainingFd)
+                tokenCarry += effectiveTargetCps.toDouble() * elapsedTokenMs.toDouble() / 1000.0
                 var toLaunch = floor(tokenCarry).toInt()
                 if (toLaunch > 0) tokenCarry -= toLaunch.toDouble()
 
@@ -285,21 +342,55 @@ class TcpTester {
             pendingScope.cancel()
         }
 
-        val finalElapsedMs = (System.currentTimeMillis() - startedAt).coerceAtLeast(1L)
+        val growthEndedAt = System.currentTimeMillis()
+        val finalElapsedMs = (growthEndedAt - startedAt).coerceAtLeast(1L)
         val averageCps = (totalSuccess * 1000L / finalElapsedMs).toInt().coerceAtLeast(0)
         val finalPeak = maxOf(maxStable, totalSuccess)
         val finalTotal = totalSuccess + totalFailure
-        val finalPhase = when {
+        val baseFinalPhase = when {
             finalPeak >= fdSafeStop || stats.phase == "FD上限" || errors.keys.any { it.contains("FD") } -> "FD上限"
+            stats.phase == "平台确认" -> "平台确认"
+            stats.phase == "连续失败上限" -> "连续失败上限"
             stats.phase == "低会话失败" -> "低会话失败"
             stats.phase == "失败上限" -> "失败上限"
             totalFailure > 0 -> "出现失败"
             totalSuccess >= config.successLimit -> "测试完成"
             else -> "测试完成"
         }
+
+        var stableActive = totalSuccess
+        if (config.keepConnectionsAfterStop && totalSuccess > 0 && currentCoroutineContext().isActive) {
+            val holdStartedAt = System.currentTimeMillis()
+            val holdDurationMs = 10_000L
+            while (currentCoroutineContext().isActive) {
+                val elapsed = System.currentTimeMillis() - holdStartedAt
+                stableActive = activeCount(protocol)
+                val seconds = (elapsed / 1_000L).coerceIn(0L, 10L)
+                onStats(
+                    stats.copy(
+                        phase = "保持验证 ${seconds}/10s",
+                        activeSessions = stableActive,
+                        totalSuccess = totalSuccess,
+                        totalFailure = totalFailure,
+                        totalAttempts = finalTotal,
+                        lastAdded = targetCps,
+                        cps = 0,
+                        maxStableSessions = finalPeak,
+                        averageConnectLatencyMs = if (connectLatencySamples > 0) (totalConnectLatencyMs / connectLatencySamples).toInt() else 0,
+                        errorSummary = errors.toMap()
+                    )
+                )
+                if (elapsed >= holdDurationMs) break
+                delay(500L)
+            }
+            val retention = if (totalSuccess > 0) stableActive * 100.0 / totalSuccess.toDouble() else 0.0
+            onLog(LogLine(level = LogLevel.INFO, text = "${protocol.label} 保持验证完成：开始 $totalSuccess，稳定 $stableActive，保持率 ${String.format("%.1f", retention)}%"))
+        }
+
+        val finalPhase = if (config.keepConnectionsAfterStop && totalSuccess > 0) "$baseFinalPhase · 已保持10s" else baseFinalPhase
         val finalStats = stats.copy(
             phase = finalPhase,
-            activeSessions = totalSuccess,
+            activeSessions = stableActive,
             totalFailure = totalFailure,
             totalAttempts = finalTotal,
             lastAdded = targetCps,
