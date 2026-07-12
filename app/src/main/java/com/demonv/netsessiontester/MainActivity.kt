@@ -222,6 +222,7 @@ import java.net.InetSocketAddress
 import java.net.NetworkInterface
 import java.net.Socket
 import java.net.URL
+import java.net.URLEncoder
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -1189,15 +1190,32 @@ private fun inferCarrierFromIpv6Prefix(ipv6: String): String {
     }
 }
 
+private data class CarrierCacheEntry(
+    val result: CarrierDetectionResult?,
+    val checkedAtMs: Long
+)
+
+private val carrierDetectionCache = mutableMapOf<String, CarrierCacheEntry>()
+private val carrierDetectionCacheLock = Any()
+
 private fun detectCarrierFromAsn(ip: String): CarrierDetectionResult? {
     val target = ip.trim()
     if (!target.isUsableIpText()) return null
-    return runCatching {
-        val conn = (URL("https://ipwho.is/$target?fields=success,connection").openConnection() as HttpURLConnection).apply {
+    val now = System.currentTimeMillis()
+    synchronized(carrierDetectionCacheLock) {
+        carrierDetectionCache[target]?.takeIf { now - it.checkedAtMs < 300_000L }?.let {
+            return it.result
+        }
+    }
+    val result = runCatching {
+        val encoded = URLEncoder.encode(target, Charsets.UTF_8.name())
+        val conn = (URL("https://ipwho.is/$encoded?fields=success,connection").openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
             connectTimeout = 1800
             readTimeout = 2200
+            useCaches = false
             setRequestProperty("Accept", "application/json")
+            setRequestProperty("Cache-Control", "no-cache")
             setRequestProperty("User-Agent", "NetSessionTester")
         }
         try {
@@ -1220,16 +1238,125 @@ private fun detectCarrierFromAsn(ip: String): CarrierDetectionResult? {
             conn.disconnect()
         }
     }.getOrNull()
+    synchronized(carrierDetectionCacheLock) {
+        carrierDetectionCache[target] = CarrierCacheEntry(result, now)
+        if (carrierDetectionCache.size > 16) {
+            carrierDetectionCache.entries.sortedBy { it.value.checkedAtMs }.take(carrierDetectionCache.size - 16).forEach {
+                carrierDetectionCache.remove(it.key)
+            }
+        }
+    }
+    return result
+}
+
+private data class VpnExitDisplay(
+    val ip: String,
+    val label: String,
+    val checkedAtMs: Long
+)
+
+@Volatile
+private var cachedVpnExitDisplay: VpnExitDisplay? = null
+
+private fun countryNameZh(code: String, fallback: String): String {
+    val normalized = code.trim().uppercase(Locale.US)
+    val fixed = when (normalized) {
+        "US" -> "美国"
+        "JP" -> "日本"
+        "SG" -> "新加坡"
+        "HK" -> "中国香港"
+        "MO" -> "中国澳门"
+        "TW" -> "中国台湾"
+        "GB" -> "英国"
+        "DE" -> "德国"
+        "FR" -> "法国"
+        "CA" -> "加拿大"
+        "AU" -> "澳大利亚"
+        "KR" -> "韩国"
+        "NL" -> "荷兰"
+        else -> ""
+    }
+    if (fixed.isNotBlank()) return fixed
+    val localized = runCatching {
+        Locale("", normalized).getDisplayCountry(Locale.SIMPLIFIED_CHINESE)
+    }.getOrDefault("").trim()
+    return localized.ifBlank { fallback.trim().ifBlank { "未知地区" } }
+}
+
+private fun vpnExitTypeFromOrganization(organization: String): String {
+    val text = organization.lowercase(Locale.US)
+    if (text.isBlank()) return "未知类型"
+    val hostingKeywords = listOf(
+        "amazon", "aws", "google cloud", "google llc", "microsoft", "azure",
+        "digitalocean", "vultr", "linode", "akamai", "ovh", "hetzner",
+        "oracle cloud", "alibaba cloud", "aliyun", "tencent cloud", "cloudflare",
+        "huawei cloud", "hosting", "hostinger", "datacenter", "data center",
+        "server", "colo", "colocation", "leaseweb", "rackspace", "choopa",
+        "contabo", "m247", "zenlayer", "cloud"
+    )
+    if (hostingKeywords.any { it in text }) return "机房"
+
+    val accessKeywords = listOf(
+        "telecom", "communications", "broadband", "fiber", "fibre", "cable",
+        "wireless", "mobile", "internet service", "isp", "residential",
+        "comcast", "verizon", "spectrum", "charter", "cox", "vodafone",
+        "telefonica", "orange", "deutsche telekom", "softbank", "kddi", "ntt",
+        "singtel", "starhub", "telstra", "unicom", "chinanet", "china mobile"
+    )
+    return if (accessKeywords.any { it in text }) "家庭地址" else "未知类型"
+}
+
+private fun detectVpnExitDisplay(ipv4: String, ipv6: String): String {
+    val target = ipv4.takeIf { it.isUsableIpText() }
+        ?: ipv6.takeIf { it.isUsableIpText() }
+        ?: return "VPN/代理"
+    val now = System.currentTimeMillis()
+    cachedVpnExitDisplay?.takeIf { it.ip == target && now - it.checkedAtMs < 60_000L }?.let {
+        return it.label
+    }
+
+    val detected = runCatching {
+        val encoded = URLEncoder.encode(target, Charsets.UTF_8.name())
+        val conn = (URL("https://ipwho.is/$encoded?fields=success,country,country_code,connection").openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = 1800
+            readTimeout = 2200
+            useCaches = false
+            setRequestProperty("Accept", "application/json")
+            setRequestProperty("Cache-Control", "no-cache")
+            setRequestProperty("User-Agent", "NetSessionTester")
+        }
+        try {
+            if (conn.responseCode !in 200..299) return@runCatching null
+            val body = conn.inputStream.bufferedReader().use { it.readText() }
+            val obj = JSONObject(body)
+            if (!obj.optBoolean("success", false)) return@runCatching null
+            val country = countryNameZh(obj.optString("country_code", ""), obj.optString("country", ""))
+            val connection = obj.optJSONObject("connection")
+            val organization = listOf(
+                connection?.optString("isp", "").orEmpty(),
+                connection?.optString("org", "").orEmpty(),
+                connection?.optString("asn", "").orEmpty()
+            ).filter { it.isNotBlank() }.joinToString(" ")
+            "$country · ${vpnExitTypeFromOrganization(organization)}"
+        } finally {
+            conn.disconnect()
+        }
+    }.getOrNull()
+
+    val label = detected ?: "VPN/代理"
+    cachedVpnExitDisplay = VpnExitDisplay(target, label, now)
+    return label
 }
 
 private fun displayCarrierFromEnv(env: NetworkEnvironment, ipv4: String, ipv6: String, full: Boolean): String {
     val prefixCarrier = inferCarrierFromIpv6Prefix(ipv6)
-    val asnCarrier = if (full && env.hasWifi && !env.hasVpn) {
+    val asnCarrier = if (env.hasWifi && !env.hasVpn) {
         detectCarrierFromAsn(ipv6).takeIf { it?.carrier != "未知" }
             ?: detectCarrierFromAsn(ipv4).takeIf { it?.carrier != "未知" }
     } else null
     return when {
-        env.hasVpn -> "VPN/代理"
+        env.hasVpn -> detectVpnExitDisplay(ipv4, ipv6)
         env.hasCellular && env.carrierName.isNotBlank() && env.carrierName != "未知" -> env.carrierName
         asnCarrier != null -> asnCarrier.carrier
         prefixCarrier != "未知" -> prefixCarrier
@@ -7362,10 +7489,41 @@ private fun CombinedSessionStatsCard(
         }
 
         Row(horizontalArrangement = Arrangement.spacedBy(5.dp), modifier = Modifier.fillMaxWidth()) {
-            SessionMetricTileCompact("活动", active.toString(), Blue, Modifier.weight(1f))
-            SessionMetricTileCompact("总计", attempts.toString(), Navy, Modifier.weight(1f))
-            SessionMetricTileCompact("CPS", "$targetCps/$actualCps", Blue, Modifier.weight(1f))
-            SessionMetricTileCompact("平均延迟", if (averageLatencyMs > 0) "${averageLatencyMs}ms" else "—", Purple, Modifier.weight(1f))
+            if (selectedView == SessionProtocolView.COMPARE) {
+                SessionCompareMetricTileCompact(
+                    label = "活动",
+                    ipv4Value = ipv4Stats.activeSessions.toString(),
+                    ipv6Value = ipv6Stats.activeSessions.toString(),
+                    color = Blue,
+                    modifier = Modifier.weight(1f)
+                )
+                SessionCompareMetricTileCompact(
+                    label = "总计",
+                    ipv4Value = ipv4Stats.totalAttempts.toString(),
+                    ipv6Value = ipv6Stats.totalAttempts.toString(),
+                    color = Navy,
+                    modifier = Modifier.weight(1f)
+                )
+                SessionCompareMetricTileCompact(
+                    label = "CPS",
+                    ipv4Value = "${ipv4Stats.lastAdded}/${ipv4Stats.cps}",
+                    ipv6Value = "${ipv6Stats.lastAdded}/${ipv6Stats.cps}",
+                    color = Blue,
+                    modifier = Modifier.weight(1f)
+                )
+                SessionCompareMetricTileCompact(
+                    label = "平均延迟",
+                    ipv4Value = ipv4Stats.averageConnectLatencyMs.takeIf { it > 0 }?.let { "${it}ms" } ?: "—",
+                    ipv6Value = ipv6Stats.averageConnectLatencyMs.takeIf { it > 0 }?.let { "${it}ms" } ?: "—",
+                    color = Purple,
+                    modifier = Modifier.weight(1f)
+                )
+            } else {
+                SessionMetricTileCompact("活动", active.toString(), Blue, Modifier.weight(1f))
+                SessionMetricTileCompact("总计", attempts.toString(), Navy, Modifier.weight(1f))
+                SessionMetricTileCompact("CPS", "$targetCps/$actualCps", Blue, Modifier.weight(1f))
+                SessionMetricTileCompact("平均延迟", if (averageLatencyMs > 0) "${averageLatencyMs}ms" else "—", Purple, Modifier.weight(1f))
+            }
         }
 
         SessionAddressRow(
@@ -7409,14 +7567,24 @@ private fun CombinedSessionStatsCard(
             }
         }
 
-        SessionResultSummaryCard(
-            peak = peak,
-            success = success,
-            failure = failure,
-            active = active,
-            attempts = attempts,
-            testActive = testActive
-        )
+        if (selectedView == SessionProtocolView.COMPARE) {
+            SessionCompareResultSummaryCard(
+                ipv4Stats = ipv4Stats,
+                ipv4Points = ipv4Points,
+                ipv6Stats = ipv6Stats,
+                ipv6Points = ipv6Points,
+                testActive = testActive
+            )
+        } else {
+            SessionResultSummaryCard(
+                peak = peak,
+                success = success,
+                failure = failure,
+                active = active,
+                attempts = attempts,
+                testActive = testActive
+            )
+        }
     }
 
     if (embedded) {
@@ -7425,6 +7593,8 @@ private fun CombinedSessionStatsCard(
         SoftCard(content = content)
     }
 }
+
+private val SessionMetricCompactHeight = 54.dp
 
 @Composable
 private fun SessionMetricTileCompact(
@@ -7435,7 +7605,7 @@ private fun SessionMetricTileCompact(
 ) {
     Column(
         modifier = modifier
-            .heightIn(min = 50.dp)
+            .height(SessionMetricCompactHeight)
             .background(Color(0xFFF8FAFC), ShapeM)
             .border(1.dp, Border.copy(alpha = 0.72f), ShapeM)
             .padding(horizontal = 4.dp, vertical = 5.dp),
@@ -7459,6 +7629,55 @@ private fun SessionMetricTileCompact(
             fontSize = 9.sp,
             lineHeight = 11.sp,
             fontWeight = FontWeight.Medium,
+            maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Clip
+        )
+    }
+}
+
+@Composable
+private fun SessionCompareMetricTileCompact(
+    label: String,
+    ipv4Value: String,
+    ipv6Value: String,
+    color: Color,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier
+            .height(SessionMetricCompactHeight)
+            .background(Color(0xFFF8FAFC), ShapeM)
+            .border(1.dp, Border.copy(alpha = 0.72f), ShapeM)
+            .padding(horizontal = 3.dp, vertical = 3.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Text(
+            label,
+            color = Muted,
+            fontSize = 8.sp,
+            lineHeight = 9.sp,
+            fontWeight = FontWeight.Medium,
+            maxLines = 1,
+            softWrap = false
+        )
+        Text(
+            "V4 $ipv4Value",
+            color = color,
+            fontSize = 9.sp,
+            lineHeight = 10.sp,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Clip
+        )
+        Text(
+            "V6 $ipv6Value",
+            color = if (color == Blue) Purple else color,
+            fontSize = 9.sp,
+            lineHeight = 10.sp,
+            fontWeight = FontWeight.Bold,
             maxLines = 1,
             softWrap = false,
             overflow = TextOverflow.Clip
@@ -7524,6 +7743,7 @@ private fun SessionResultSummaryCard(
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .height(SessionMetricCompactHeight)
             .background(Color(0xFFF8FAFC), ShapeM)
             .border(1.dp, Border.copy(alpha = 0.75f), ShapeM)
             .padding(horizontal = 3.dp, vertical = 5.dp),
@@ -7536,6 +7756,67 @@ private fun SessionResultSummaryCard(
         FloatingSummaryValue("失败", failure.toString(), ErrorRed, Modifier.weight(1f))
         FloatingSummaryDivider()
         FloatingSummaryValue(fourthLabel, fourthValue, Purple, Modifier.weight(1f))
+    }
+}
+
+@Composable
+private fun SessionCompareResultSummaryCard(
+    ipv4Stats: ProtocolStats,
+    ipv4Points: List<ChartPoint>,
+    ipv6Stats: ProtocolStats,
+    ipv6Points: List<ChartPoint>,
+    testActive: Boolean
+) {
+    fun rateText(stats: ProtocolStats, points: List<ChartPoint>): String {
+        return if (testActive) {
+            val peak = sessionPeakValue(stats, points)
+            if (peak > 0) String.format(Locale.US, "%.1f%%", stats.activeSessions.toDouble() * 100.0 / peak.toDouble()) else "—"
+        } else {
+            if (stats.totalAttempts > 0) String.format(Locale.US, "%.2f%%", stats.totalFailure.toDouble() * 100.0 / stats.totalAttempts.toDouble()) else "—"
+        }
+    }
+    val rateLabel = if (testActive) "保持率" else "失败率"
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(SessionMetricCompactHeight)
+            .background(Color(0xFFF8FAFC), ShapeM)
+            .border(1.dp, Border.copy(alpha = 0.75f), ShapeM)
+            .padding(horizontal = 3.dp, vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        FloatingCompareSummaryValue(
+            "峰值",
+            sessionPeakValue(ipv4Stats, ipv4Points).takeIf { it > 0 }?.toString() ?: "—",
+            sessionPeakValue(ipv6Stats, ipv6Points).takeIf { it > 0 }?.toString() ?: "—",
+            Blue,
+            Modifier.weight(1f)
+        )
+        FloatingSummaryDivider()
+        FloatingCompareSummaryValue("成功", ipv4Stats.totalSuccess.toString(), ipv6Stats.totalSuccess.toString(), Green, Modifier.weight(1f))
+        FloatingSummaryDivider()
+        FloatingCompareSummaryValue("失败", ipv4Stats.totalFailure.toString(), ipv6Stats.totalFailure.toString(), ErrorRed, Modifier.weight(1f))
+        FloatingSummaryDivider()
+        FloatingCompareSummaryValue(rateLabel, rateText(ipv4Stats, ipv4Points), rateText(ipv6Stats, ipv6Points), Purple, Modifier.weight(1f))
+    }
+}
+
+@Composable
+private fun FloatingCompareSummaryValue(
+    label: String,
+    ipv4Value: String,
+    ipv6Value: String,
+    color: Color,
+    modifier: Modifier
+) {
+    Column(
+        modifier = modifier,
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Text(label, color = Muted, fontSize = 7.5.sp, lineHeight = 8.sp, maxLines = 1, softWrap = false)
+        Text("V4 $ipv4Value", color = color, fontSize = 8.5.sp, lineHeight = 9.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
+        Text("V6 $ipv6Value", color = if (color == Blue) Purple else color, fontSize = 8.5.sp, lineHeight = 9.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
     }
 }
 
