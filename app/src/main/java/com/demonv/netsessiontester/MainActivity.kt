@@ -8760,7 +8760,7 @@ private suspend fun runTracketToolLive(
             host = host,
             includeIpv4 = true,
             includeIpv6 = true,
-            timeoutMs = timeout
+            timeoutMs = timeoutMs
         ).filterNot { it.isLoopbackAddress }
         val target = chooseToolTargetAddress(resolved, policy) ?: error("无法解析目标")
         val targetIp = target.hostAddress?.substringBefore('%') ?: host
