@@ -16,10 +16,12 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -37,6 +39,7 @@ import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 import java.io.File
 import java.util.Collections
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.floor
 
@@ -552,7 +555,9 @@ class TcpTester(context: Context) {
 
     suspend fun closeDetachedSockets(
         sockets: List<Socket>,
-        batchSize: Int = 3000,
+        batchSize: Int = 512,
+        workerCount: Int = 6,
+        progressIntervalMs: Long = 300L,
         onProgress: suspend (closed: Int, total: Int, elapsedMs: Long) -> Unit = { _, _, _ -> }
     ): Int = withContext(Dispatchers.IO) {
         val total = sockets.size
@@ -560,21 +565,49 @@ class TcpTester(context: Context) {
             onProgress(0, 0, 0L)
             return@withContext 0
         }
+
         val startedAt = System.currentTimeMillis()
-        var closed = 0
-        val actualBatchSize = batchSize.coerceAtLeast(1).coerceAtLeast(3000)
+        val actualChunkSize = batchSize.coerceIn(128, 512)
+        val actualWorkerCount = workerCount.coerceIn(2, 8).coerceAtMost(total)
+        val nextStart = AtomicInteger(0)
+        val closedCount = AtomicInteger(0)
+
         coroutineScope {
-            sockets.chunked(actualBatchSize).forEach { batch ->
-                batch.map { socket ->
-                    async(Dispatchers.IO) {
-                        fastClose(socket)
+            val reporter = launch(Dispatchers.Default) {
+                var lastReported = -1
+                while (currentCoroutineContext().isActive) {
+                    val done = closedCount.get().coerceAtMost(total)
+                    if (done != lastReported) {
+                        lastReported = done
+                        onProgress(done, total, System.currentTimeMillis() - startedAt)
                     }
-                }.awaitAll()
-                closed += batch.size
-                onProgress(closed.coerceAtMost(total), total, System.currentTimeMillis() - startedAt)
+                    if (done >= total) break
+                    delay(progressIntervalMs.coerceIn(100L, 1_000L))
+                }
             }
+
+            val workers = List(actualWorkerCount) {
+                launch(Dispatchers.IO) {
+                    while (currentCoroutineContext().isActive) {
+                        val startIndex = nextStart.getAndAdd(actualChunkSize)
+                        if (startIndex >= total) break
+                        val endIndex = minOf(startIndex + actualChunkSize, total)
+                        for (index in startIndex until endIndex) {
+                            fastClose(sockets[index])
+                            closedCount.incrementAndGet()
+                        }
+                        yield()
+                    }
+                }
+            }
+
+            workers.forEach { it.join() }
+            reporter.cancelAndJoin()
         }
-        closed
+
+        val finalClosed = closedCount.get().coerceAtMost(total)
+        onProgress(finalClosed, total, System.currentTimeMillis() - startedAt)
+        finalClosed
     }
 
     suspend fun release(protocol: IpProtocol? = null): Int {
