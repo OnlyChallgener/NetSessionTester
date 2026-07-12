@@ -146,13 +146,13 @@ class TcpTester(context: Context) {
         }
 
         val addressText = addresses.mapNotNull { it.hostAddress }.distinct()
-        val targetCps = config.batchSize.coerceIn(20, 2_000)
+        val targetCps = config.batchSize.coerceIn(1, 2_000)
         val schedulerIntervalMs = config.intervalMs.coerceIn(20L, 1_000L)
         val maxPending = (targetCps * 4).coerceIn(1_000, 8_000)
         val (fdSafeStop, fdSoftLimit, baselineFd) = calculateSafeSocketTarget()
         val fdClipStart = (fdSafeStop - 1_500).coerceAtLeast(1_000)
         onLog(LogLine(level = LogLevel.SUCCESS, text = "${protocol.label} 解析成功：${addressText.joinToString(" / ")}"))
-        onLog(LogLine(level = LogLevel.INFO, text = "${protocol.label} 安全FD策略：软上限 $fdSoftLimit，测试前占用 $baselineFd，预留 $fdReserve，目标活动上限 $fdSafeStop；接近上限自动降速。"))
+        onLog(LogLine(level = LogLevel.INFO, text = "${protocol.label} 安全FD策略：软上限 $fdSoftLimit，测试前占用 $baselineFd，预留 $fdReserve，目标活动上限 $fdSafeStop；活动达到 32000 后才分级降速试探FD上限。"))
 
         val pendingScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         val pending = ArrayDeque<Deferred<OpenResult>>()
@@ -246,12 +246,12 @@ class TcpTester(context: Context) {
 
         fun totalAttemptsForUi(): Int = totalSuccess + totalFailure
 
-        fun adaptiveCpsForRemaining(remaining: Int): Int = when {
+        fun adaptiveCpsForFdProbe(activeSessions: Int, remaining: Int): Int = when {
             remaining <= 0 -> 0
-            remaining < 300 -> minOf(targetCps, 15)
-            remaining < 1_000 -> minOf(targetCps, 40)
-            remaining < 2_000 -> minOf(targetCps, 100)
-            else -> targetCps
+            activeSessions < 32_000 -> targetCps
+            activeSessions < 32_200 -> minOf(targetCps, 100)
+            activeSessions < 32_400 -> minOf(targetCps, 50)
+            else -> minOf(targetCps, 20)
         }
 
         try {
@@ -297,7 +297,7 @@ class TcpTester(context: Context) {
                 val elapsedTokenMs = (now - lastTokenAt).coerceAtLeast(0L)
                 lastTokenAt = now
                 val remainingFd = (fdSafeStop - totalSuccess - pending.size).coerceAtLeast(0)
-                val effectiveTargetCps = adaptiveCpsForRemaining(remainingFd)
+                val effectiveTargetCps = adaptiveCpsForFdProbe(totalSuccess, remainingFd)
                 tokenCarry += effectiveTargetCps.toDouble() * elapsedTokenMs.toDouble() / 1000.0
                 var toLaunch = floor(tokenCarry).toInt()
                 if (toLaunch > 0) tokenCarry -= toLaunch.toDouble()
