@@ -1245,6 +1245,79 @@ private fun carrierFromIntelligence(result: IpIntelligenceResult): String {
     return knownChinaCarrierFromAsn(result.asnNumber)
 }
 
+private fun fetchIpApiIs(target: String): IpIntelligenceResult? {
+    val encoded = URLEncoder.encode(target, Charsets.UTF_8.name())
+    val conn = (URL("https://api.ipapi.is/?q=$encoded").openConnection() as HttpURLConnection).apply {
+        requestMethod = "GET"
+        connectTimeout = 1_200
+        readTimeout = 1_800
+        useCaches = false
+        setRequestProperty("Accept", "application/json")
+        setRequestProperty("Cache-Control", "no-cache")
+        setRequestProperty("User-Agent", "NetSessionTester")
+    }
+    return try {
+        if (conn.responseCode !in 200..299) return null
+        val body = conn.inputStream.bufferedReader().use { it.readText() }
+        val obj = JSONObject(body)
+        if (obj.has("error")) return null
+
+        val company = obj.optJSONObject("company")
+        val asn = obj.optJSONObject("asn")
+        val location = obj.optJSONObject("location")
+        IpIntelligenceResult(
+            ip = obj.optString("ip", target).ifBlank { target },
+            countryCode = location?.optString("country_code", "").orEmpty(),
+            countryName = location?.optString("country", "").orEmpty(),
+            companyName = company?.optString("name", "").orEmpty(),
+            companyType = company?.optString("type", "").orEmpty(),
+            asnNumber = asn?.optInt("asn", 0) ?: 0,
+            asnOrganization = asn?.optString("org", "").orEmpty(),
+            asnDescription = asn?.optString("descr", "").orEmpty(),
+            asnType = asn?.optString("type", "").orEmpty(),
+            isDatacenter = obj.optBoolean("is_datacenter", false),
+            isMobile = obj.optBoolean("is_mobile", false),
+            isVpn = obj.optBoolean("is_vpn", false),
+            isProxy = obj.optBoolean("is_proxy", false),
+            isTor = obj.optBoolean("is_tor", false),
+            source = "ipapi.is"
+        )
+    } finally {
+        conn.disconnect()
+    }
+}
+
+private fun fetchIpWhoIs(target: String): IpIntelligenceResult? {
+    val encoded = URLEncoder.encode(target, Charsets.UTF_8.name())
+    val conn = (URL("https://ipwho.is/$encoded?fields=success,country,country_code,connection").openConnection() as HttpURLConnection).apply {
+        requestMethod = "GET"
+        connectTimeout = 1_200
+        readTimeout = 1_800
+        useCaches = false
+        setRequestProperty("Accept", "application/json")
+        setRequestProperty("Cache-Control", "no-cache")
+        setRequestProperty("User-Agent", "NetSessionTester")
+    }
+    return try {
+        if (conn.responseCode !in 200..299) return null
+        val body = conn.inputStream.bufferedReader().use { it.readText() }
+        val obj = JSONObject(body)
+        if (!obj.optBoolean("success", false)) return null
+        val connection = obj.optJSONObject("connection")
+        IpIntelligenceResult(
+            ip = target,
+            countryCode = obj.optString("country_code", ""),
+            countryName = obj.optString("country", ""),
+            companyName = connection?.optString("isp", "").orEmpty(),
+            asnOrganization = connection?.optString("org", "").orEmpty(),
+            asnDescription = connection?.optString("asn", "").orEmpty(),
+            source = "ipwho.is"
+        )
+    } finally {
+        conn.disconnect()
+    }
+}
+
 private fun queryIpIntelligence(ip: String): IpIntelligenceResult? {
     val target = ip.trim()
     if (!target.isUsableIpText()) return null
@@ -1252,83 +1325,34 @@ private fun queryIpIntelligence(ip: String): IpIntelligenceResult? {
     val now = System.currentTimeMillis()
     synchronized(ipIntelligenceCacheLock) {
         ipIntelligenceCache[target]?.let { cached ->
-            val ttl = if (cached.result != null) 30 * 60_000L else 5 * 60_000L
+            val ttl = if (cached.result != null) 30 * 60_000L else 15_000L
             if (now - cached.checkedAtMs < ttl) return cached.result
         }
     }
 
-    val primary = runCatching {
-        val encoded = URLEncoder.encode(target, Charsets.UTF_8.name())
-        val conn = (URL("https://api.ipapi.is/?q=$encoded").openConnection() as HttpURLConnection).apply {
-            requestMethod = "GET"
-            connectTimeout = 1_800
-            readTimeout = 2_500
-            useCaches = false
-            setRequestProperty("Accept", "application/json")
-            setRequestProperty("Cache-Control", "no-cache")
-            setRequestProperty("User-Agent", "NetSessionTester")
-        }
-        try {
-            if (conn.responseCode !in 200..299) return@runCatching null
-            val body = conn.inputStream.bufferedReader().use { it.readText() }
-            val obj = JSONObject(body)
-            if (obj.has("error")) return@runCatching null
+    // 两个情报源并发查询，取第一个有效结果；整体最多等待约3.2秒。
+    // 避免国外线路不佳时串行超时累加到十几秒。
+    val executor = Executors.newFixedThreadPool(2)
+    val completion = ExecutorCompletionService<IpIntelligenceResult?>(executor)
+    completion.submit(Callable { runCatching { fetchIpApiIs(target) }.getOrNull() })
+    completion.submit(Callable { runCatching { fetchIpWhoIs(target) }.getOrNull() })
 
-            val company = obj.optJSONObject("company")
-            val asn = obj.optJSONObject("asn")
-            val location = obj.optJSONObject("location")
-            IpIntelligenceResult(
-                ip = obj.optString("ip", target).ifBlank { target },
-                countryCode = location?.optString("country_code", "").orEmpty(),
-                countryName = location?.optString("country", "").orEmpty(),
-                companyName = company?.optString("name", "").orEmpty(),
-                companyType = company?.optString("type", "").orEmpty(),
-                asnNumber = asn?.optInt("asn", 0) ?: 0,
-                asnOrganization = asn?.optString("org", "").orEmpty(),
-                asnDescription = asn?.optString("descr", "").orEmpty(),
-                asnType = asn?.optString("type", "").orEmpty(),
-                isDatacenter = obj.optBoolean("is_datacenter", false),
-                isMobile = obj.optBoolean("is_mobile", false),
-                isVpn = obj.optBoolean("is_vpn", false),
-                isProxy = obj.optBoolean("is_proxy", false),
-                isTor = obj.optBoolean("is_tor", false),
-                source = "ipapi.is"
-            )
-        } finally {
-            conn.disconnect()
+    var result: IpIntelligenceResult? = null
+    val deadlineNs = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(3_200L)
+    try {
+        for (index in 0 until 2) {
+            val remainingNs = deadlineNs - System.nanoTime()
+            if (remainingNs <= 0L) break
+            val future = completion.poll(remainingNs, TimeUnit.NANOSECONDS) ?: break
+            val candidate = runCatching { future.get() }.getOrNull()
+            if (candidate != null) {
+                result = candidate
+                break
+            }
         }
-    }.getOrNull()
-
-    val result = primary ?: runCatching {
-        val encoded = URLEncoder.encode(target, Charsets.UTF_8.name())
-        val conn = (URL("https://ipwho.is/$encoded?fields=success,country,country_code,connection").openConnection() as HttpURLConnection).apply {
-            requestMethod = "GET"
-            connectTimeout = 1_800
-            readTimeout = 2_500
-            useCaches = false
-            setRequestProperty("Accept", "application/json")
-            setRequestProperty("Cache-Control", "no-cache")
-            setRequestProperty("User-Agent", "NetSessionTester")
-        }
-        try {
-            if (conn.responseCode !in 200..299) return@runCatching null
-            val body = conn.inputStream.bufferedReader().use { it.readText() }
-            val obj = JSONObject(body)
-            if (!obj.optBoolean("success", false)) return@runCatching null
-            val connection = obj.optJSONObject("connection")
-            IpIntelligenceResult(
-                ip = target,
-                countryCode = obj.optString("country_code", ""),
-                countryName = obj.optString("country", ""),
-                companyName = connection?.optString("isp", "").orEmpty(),
-                asnOrganization = connection?.optString("org", "").orEmpty(),
-                asnDescription = connection?.optString("asn", "").orEmpty(),
-                source = "ipwho.is"
-            )
-        } finally {
-            conn.disconnect()
-        }
-    }.getOrNull()
+    } finally {
+        executor.shutdownNow()
+    }
 
     synchronized(ipIntelligenceCacheLock) {
         ipIntelligenceCache[target] = IpIntelligenceCacheEntry(result, now)
@@ -2965,6 +2989,7 @@ private fun NetSessionTesterApp() {
     var pingTargetHistory by remember { mutableStateOf<List<String>>(emptyList()) }
     var networkWatchJob by remember { mutableStateOf<Job?>(null) }
     var networkRefreshJob by remember { mutableStateOf<Job?>(null) }
+    var networkEventRefreshJob by remember { mutableStateOf<Job?>(null) }
     var networkRefreshGeneration by remember { mutableStateOf(0L) }
     var appInForeground by remember { mutableStateOf(true) }
     var testNetworkSignature by remember { mutableStateOf("") }
@@ -3032,6 +3057,7 @@ private fun NetSessionTesterApp() {
         onDispose {
             owner?.lifecycle?.removeObserver(observer)
             networkRefreshJob?.cancel()
+            networkEventRefreshJob?.cancel()
         }
     }
 
@@ -3124,12 +3150,29 @@ private fun NetSessionTesterApp() {
                 val result = withContext(Dispatchers.IO) {
                     runCatching { PublicIpDetector.detect(network) }.getOrElse { PublicIpResult() }
                 }
+                if (generation != networkRefreshGeneration) return@launch
+
+                val normalizedResult = result.copy(
+                    ipv4 = result.ipv4.takeIf { it.isUsableIpText() } ?: "待检测",
+                    ipv6 = result.ipv6.takeIf { it.isUsableIpText() } ?: "待检测"
+                )
+                // 公网出口先显示，运营商/出口类型随后异步补全，避免整张卡等待全部探测。
+                publicIpResult = normalizedResult
+                val currentEnv = detectNetworkEnvironment(appContext)
+                if (currentEnv.hasVpn) {
+                    val fastCarrier = withContext(Dispatchers.IO) {
+                        displayCarrierFromEnv(currentEnv, normalizedResult.ipv4, normalizedResult.ipv6, false)
+                    }
+                    if (generation != networkRefreshGeneration) return@launch
+                    networkProbeInfo = networkProbeInfo.copy(carrier = fastCarrier)
+                }
+
                 val freshProbe = runCatching {
                     detectNetworkProbe(
                         context = appContext,
                         network = network,
-                        publicIpResult = result,
-                        env = detectNetworkEnvironment(appContext),
+                        publicIpResult = normalizedResult,
+                        env = currentEnv,
                         targetHost = host.ifBlank { "www.baidu.com" },
                         targetPort = port.toIntOrNull() ?: 80
                     )
@@ -3150,11 +3193,6 @@ private fun NetSessionTesterApp() {
                     )
                 }
                 if (generation != networkRefreshGeneration) return@launch
-
-                publicIpResult = result.copy(
-                    ipv4 = result.ipv4.takeIf { it.isUsableIpText() } ?: "待检测",
-                    ipv6 = result.ipv6.takeIf { it.isUsableIpText() } ?: "待检测"
-                )
                 // 5 秒轻量刷新不能覆盖本次手动 NAT 诊断结果。
                 networkProbeInfo = if (natDiagnosticResult != null) {
                     freshProbe.copy(
@@ -3188,8 +3226,61 @@ private fun NetSessionTesterApp() {
         }
     }
 
+    fun scheduleNetworkEventRefresh() {
+        networkEventRefreshJob?.cancel()
+        networkEventRefreshJob = scope.launch {
+            // VPN/默认网络变化通常会连续触发多次回调，短暂防抖后只刷新一次。
+            delay(250L)
+            if (!settingsLoaded || !appInForeground || state.isAdding || finishInProgress) return@launch
+            val appContext = context.applicationContext
+            val signature = currentNetworkSignature(appContext)
+            val vpnActive = detectNetworkEnvironment(appContext).hasVpn
+            val shouldClearStaleExit = signature != lastNetworkInfoSignature || vpnActive
+            if (shouldClearStaleExit) {
+                networkRefreshGeneration += 1L
+                networkRefreshJob?.cancel()
+                publicIpLoading = false
+                publicIpResult = PublicIpResult()
+                networkProbeInfo = networkProbeInfo.copy(
+                    carrier = "待检测",
+                    ipv6Status = "待检测",
+                    dnsStatus = "待检测",
+                    priority = "待检测"
+                )
+                lastNetworkInfoSignature = signature
+            }
+            // 同一个 VPN Network 内切换节点时 network 对象可能不变，也必须绕过旧出口缓存。
+            PublicIpDetector.invalidate()
+            refreshPublicIp()
+        }
+    }
+
     fun refreshNetworkInfoLight() {
+        PublicIpDetector.invalidate()
         refreshPublicIp()
+    }
+
+    DisposableEffect(settingsLoaded, appInForeground, state.isAdding, finishInProgress) {
+        if (!settingsLoaded || !appInForeground || state.isAdding || finishInProgress) {
+            onDispose { }
+        } else {
+            val cm = context.applicationContext.getSystemService(ConnectivityManager::class.java)
+            val callback = object : ConnectivityManager.NetworkCallback() {
+                private fun trigger() {
+                    scope.launch { scheduleNetworkEventRefresh() }
+                }
+
+                override fun onAvailable(network: Network) = trigger()
+                override fun onLost(network: Network) = trigger()
+                override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) = trigger()
+                override fun onLinkPropertiesChanged(network: Network, linkProperties: LinkProperties) = trigger()
+            }
+            runCatching { cm?.registerDefaultNetworkCallback(callback) }
+            onDispose {
+                runCatching { cm?.unregisterNetworkCallback(callback) }
+                networkEventRefreshJob?.cancel()
+            }
+        }
     }
 
     LaunchedEffect(Unit) {
@@ -4083,7 +4174,7 @@ private fun NetSessionTesterApp() {
         var closed = 0
         try {
             closed = runCatching {
-                tester.closeDetachedSockets(snapshot, batchSize = 1000) { done, total, elapsedMs ->
+                tester.closeDetachedSockets(snapshot, batchSize = 512, workerCount = 6, progressIntervalMs = 300L) { done, total, elapsedMs ->
                     val elapsed = elapsedMs.coerceAtLeast(1L)
                     val speed = if (done <= 0) 0 else (done * 1000L / elapsed).toInt().coerceAtLeast(1)
                     state = state.copy(
