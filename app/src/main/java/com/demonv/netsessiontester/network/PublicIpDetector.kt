@@ -11,6 +11,9 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 import java.net.HttpURLConnection
+import java.net.Inet4Address
+import java.net.Inet6Address
+import java.net.InetAddress
 import java.net.SocketTimeoutException
 import java.net.URL
 
@@ -40,7 +43,8 @@ object PublicIpDetector {
 
     private val ipv6Sources = listOf(
         "https://api6.ipify.org?format=json",
-        "https://ipv6.icanhazip.com"
+        "https://ipv6.icanhazip.com",
+        "https://v6.ident.me"
     )
 
     private data class CacheEntry(
@@ -68,8 +72,8 @@ object PublicIpDetector {
         }?.let { return@withContext it.result }
 
         val result = coroutineScope {
-            val v4Deferred = async { detectFromSources(ipv4Sources, network, "IPv4") }
-            val v6Deferred = async { detectFromSources(ipv6Sources, network, "IPv6") }
+            val v4Deferred = async { detectFromSources(ipv4Sources, network, "IPv4", expectIpv6 = false) }
+            val v6Deferred = async { detectFromSources(ipv6Sources, network, "IPv6", expectIpv6 = true) }
             val v4 = v4Deferred.await()
             val v6 = v6Deferred.await()
             PublicIpResult(
@@ -86,7 +90,8 @@ object PublicIpDetector {
     private suspend fun detectFromSources(
         sources: List<String>,
         network: Network?,
-        familyLabel: String
+        familyLabel: String,
+        expectIpv6: Boolean
     ): Result<String> {
         return withTimeoutOrNull(FAMILY_TIMEOUT_MS) {
             supervisorScope {
@@ -101,7 +106,7 @@ object PublicIpDetector {
                 repeat(sources.size) {
                     val result = results.receive()
                     val ip = result.getOrNull()?.trim().orEmpty()
-                    if (ip.isUsablePublicIpText()) {
+                    if (ip.isUsablePublicIpText(expectIpv6)) {
                         jobs.forEach { it.cancel() }
                         results.close()
                         return@supervisorScope Result.success(ip)
@@ -113,12 +118,19 @@ object PublicIpDetector {
         } ?: Result.failure(SocketTimeoutException("$familyLabel 公网地址检测超时"))
     }
 
-    private fun String.isUsablePublicIpText(): Boolean {
-        val value = trim()
-        return value.isNotBlank() && value != "不可用" && value != "待检测" &&
-            (value.contains(':') || value.split('.').let { parts ->
-                parts.size == 4 && parts.all { it.toIntOrNull()?.let { n -> n in 0..255 } == true }
-            })
+    private fun String.isUsablePublicIpText(expectIpv6: Boolean): Boolean {
+        val value = trim().substringBefore('%')
+        if (value.isBlank() || value == "不可用" || value == "待检测") return false
+        val address = runCatching { InetAddress.getByName(value) }.getOrNull() ?: return false
+        if (expectIpv6 && address !is Inet6Address) return false
+        if (!expectIpv6 && address !is Inet4Address) return false
+        if (address.isAnyLocalAddress || address.isLoopbackAddress || address.isLinkLocalAddress ||
+            address.isSiteLocalAddress || address.isMulticastAddress) return false
+        if (address is Inet6Address) {
+            val first = address.address.firstOrNull()?.toInt()?.and(0xFF) ?: return false
+            if ((first and 0xFE) == 0xFC) return false // fc00::/7 ULA
+        }
+        return true
     }
 
     private fun fetchIp(url: String, network: Network?): String {
