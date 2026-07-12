@@ -1442,7 +1442,7 @@ private fun organizationLooksLikeAccessIsp(text: String): Boolean {
     return keywords.any { it in value }
 }
 
-private fun vpnExitTypeFromIntelligence(result: IpIntelligenceResult): String {
+private fun vpnExitTypeFromIntelligence(result: IpIntelligenceResult): String? {
     val orgText = listOf(result.companyName, result.asnOrganization, result.asnDescription)
         .filter { it.isNotBlank() }
         .joinToString(" ")
@@ -1455,7 +1455,7 @@ private fun vpnExitTypeFromIntelligence(result: IpIntelligenceResult): String {
         result.isDatacenter || typeText == "hosting" || organizationLooksLikeHosting(orgText) -> "机房"
         result.isMobile -> "移动网络"
         typeText == "isp" || organizationLooksLikeAccessIsp(orgText) -> "家庭地址"
-        else -> "未知类型"
+        else -> null
     }
 }
 
@@ -1473,7 +1473,8 @@ private fun detectVpnExitDisplay(ipv4: String, ipv6: String): String {
     val intelligence = queryIpIntelligence(target)
     val label = if (intelligence != null) {
         val country = countryNameZh(intelligence.countryCode, intelligence.countryName)
-        "$country · ${vpnExitTypeFromIntelligence(intelligence)}"
+        val exitType = vpnExitTypeFromIntelligence(intelligence)
+        if (exitType.isNullOrBlank()) country else "$country · $exitType"
     } else {
         "VPN/代理"
     }
@@ -3156,15 +3157,19 @@ private fun NetSessionTesterApp() {
                     ipv4 = result.ipv4.takeIf { it.isUsableIpText() } ?: "待检测",
                     ipv6 = result.ipv6.takeIf { it.isUsableIpText() } ?: "待检测"
                 )
-                // 公网出口先显示，运营商/出口类型随后异步补全，避免整张卡等待全部探测。
-                publicIpResult = normalizedResult
+                // 公网出口先显示，运营商/出口类型随后异步补全。数据未变化时不写 Compose 状态，避免 VPN 模式下每轮刷新闪动。
+                if (publicIpResult != normalizedResult) {
+                    publicIpResult = normalizedResult
+                }
                 val currentEnv = detectNetworkEnvironment(appContext)
                 if (currentEnv.hasVpn) {
                     val fastCarrier = withContext(Dispatchers.IO) {
                         displayCarrierFromEnv(currentEnv, normalizedResult.ipv4, normalizedResult.ipv6, false)
                     }
                     if (generation != networkRefreshGeneration) return@launch
-                    networkProbeInfo = networkProbeInfo.copy(carrier = fastCarrier)
+                    if (networkProbeInfo.carrier != fastCarrier) {
+                        networkProbeInfo = networkProbeInfo.copy(carrier = fastCarrier)
+                    }
                 }
 
                 val freshProbe = runCatching {
@@ -3194,7 +3199,7 @@ private fun NetSessionTesterApp() {
                 }
                 if (generation != networkRefreshGeneration) return@launch
                 // 5 秒轻量刷新不能覆盖本次手动 NAT 诊断结果。
-                networkProbeInfo = if (natDiagnosticResult != null) {
+                val mergedProbe = if (natDiagnosticResult != null) {
                     freshProbe.copy(
                         natType = networkProbeInfo.natType,
                         portText = networkProbeInfo.portText,
@@ -3213,6 +3218,9 @@ private fun NetSessionTesterApp() {
                         confidence = "待检测",
                         refreshMode = "待检测"
                     )
+                }
+                if (networkProbeInfo != mergedProbe) {
+                    networkProbeInfo = mergedProbe
                 }
                 lastNetworkInfoSignature = currentNetworkSignature(appContext)
             } catch (_: CancellationException) {
@@ -3235,22 +3243,19 @@ private fun NetSessionTesterApp() {
             val appContext = context.applicationContext
             val signature = currentNetworkSignature(appContext)
             val vpnActive = detectNetworkEnvironment(appContext).hasVpn
-            val shouldClearStaleExit = signature != lastNetworkInfoSignature || vpnActive
-            if (shouldClearStaleExit) {
+            val signatureChanged = signature != lastNetworkInfoSignature
+            if (signatureChanged) {
+                // 仅使旧查询失效，不先清空可见数据；新结果相同则整个刷新过程保持静默。
                 networkRefreshGeneration += 1L
                 networkRefreshJob?.cancel()
                 publicIpLoading = false
-                publicIpResult = PublicIpResult()
-                networkProbeInfo = networkProbeInfo.copy(
-                    carrier = "待检测",
-                    ipv6Status = "待检测",
-                    dnsStatus = "待检测",
-                    priority = "待检测"
-                )
                 lastNetworkInfoSignature = signature
             }
-            // 同一个 VPN Network 内切换节点时 network 对象可能不变，也必须绕过旧出口缓存。
-            PublicIpDetector.invalidate()
+            // 同一个 VPN Network 内切换节点时 Network 对象可能不变，因此仍强制复查公网 IP；
+            // 出口 IP 未变化时后续状态比较不会触发重绘。
+            if (signatureChanged || vpnActive) {
+                PublicIpDetector.invalidate()
+            }
             refreshPublicIp()
         }
     }
