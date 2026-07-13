@@ -3152,11 +3152,13 @@ private fun NetSessionTesterApp() {
         if (!appInForeground || !state.releaseUi.visible || releaseRunId == 0L || releaseRunId == lastAutoLocatedReleaseRunId) {
             return@LaunchedEffect
         }
-        showRunLogDetail = false
-        appToolPage = AppToolPage.NONE
-        selectedTab = MainTab.TEST
-        sessionCardExpanded = true
+        // A running test must not take navigation ownership away from the user.
+        // Auto-focus the release card only when the test page is already visible.
         lastAutoLocatedReleaseRunId = releaseRunId
+        if (showRunLogDetail || appToolPage != AppToolPage.NONE || selectedTab != MainTab.TEST) {
+            return@LaunchedEffect
+        }
+        sessionCardExpanded = true
         pendingReleaseFocusRunId = releaseRunId
     }
 
@@ -3796,11 +3798,6 @@ private fun NetSessionTesterApp() {
         if (!freezeSessionUi && previousV6 != state.ipv6Stats) recordChartPoint(state.ipv6Stats)
         if (previousPhase != state.runPhase && state.runPhase in listOf(RunPhase.Finished, RunPhase.Failed)) {
             refreshHistory()
-        }
-        if (state.isAdding || state.runPhase == RunPhase.Releasing) {
-            showRunLogDetail = false
-            appToolPage = AppToolPage.NONE
-            selectedTab = MainTab.TEST
         }
     }
 

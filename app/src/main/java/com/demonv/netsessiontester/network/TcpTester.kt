@@ -313,10 +313,15 @@ class TcpTester(context: Context) {
                 if (toLaunch > 0) tokenCarry -= toLaunch.toDouble()
 
                 if (toLaunch > 0) {
-                    val remainingSuccess = (config.successLimit - totalSuccess).coerceAtLeast(0)
+                    // Treat every in-flight attempt as a possible success and a possible failure.
+                    // This keeps a slow batch from overshooting a small success target or
+                    // reporting hundreds of failures after the failure guard has been reached.
+                    val remainingSuccess = (config.successLimit - totalSuccess - pending.size).coerceAtLeast(0)
+                    val failureLimit = effectiveFailureLimit(maxStable, config.failureLimit)
+                    val remainingFailure = (failureLimit - totalFailure - pending.size).coerceAtLeast(0)
                     val pendingRoom = (maxPending - pending.size).coerceAtLeast(0)
                     val fdRoom = if (maxStable >= fdClipStart || totalSuccess >= fdClipStart) pendingFdBudget() else pendingFdBudget().coerceAtMost(maxPending)
-                    toLaunch = minOf(toLaunch, remainingSuccess, pendingRoom, fdRoom)
+                    toLaunch = minOf(toLaunch, remainingSuccess, remainingFailure, pendingRoom, fdRoom)
                     val timeout = effectiveTimeoutMs(config.timeoutMs, maxStable)
                     repeat(toLaunch.coerceAtLeast(0)) { launchOne(timeout) }
                 }
@@ -389,10 +394,12 @@ class TcpTester(context: Context) {
             currentCoroutineContext().isActive &&
             holdDurationMs > 0L
         ) {
-            val holdStartedAt = System.currentTimeMillis()
+            val holdStartedAt = SystemClock.elapsedRealtime()
+            val holdDeadlineAt = holdStartedAt + holdDurationMs
             val totalHoldSeconds = (holdDurationMs / 1_000L).coerceAtLeast(1L)
             while (currentCoroutineContext().isActive) {
-                val elapsed = System.currentTimeMillis() - holdStartedAt
+                val now = SystemClock.elapsedRealtime()
+                val elapsed = (now - holdStartedAt).coerceAtLeast(0L)
                 stableActive = activeCount(protocol)
                 val seconds = (elapsed / 1_000L).coerceIn(0L, totalHoldSeconds)
                 onStats(
@@ -409,8 +416,9 @@ class TcpTester(context: Context) {
                         errorSummary = errors.toMap()
                     )
                 )
-                if (elapsed >= holdDurationMs) break
-                delay(500L)
+                val remaining = holdDeadlineAt - SystemClock.elapsedRealtime()
+                if (remaining <= 0L) break
+                delay(minOf(500L, remaining))
             }
             val retention = if (totalSuccess > 0) stableActive * 100.0 / totalSuccess.toDouble() else 0.0
             onLog(LogLine(level = LogLevel.INFO, text = "${protocol.label} 保持验证完成：开始 $totalSuccess，稳定 $stableActive，保持率 ${String.format("%.1f", retention)}%"))
@@ -459,9 +467,12 @@ class TcpTester(context: Context) {
             if (rate < 0.60f) return "低会话失败"
         }
 
-        val limit = minOf(userFailureLimit.coerceAtLeast(1), failureLimitFor(peak))
+        val limit = effectiveFailureLimit(peak, userFailureLimit)
         return if (failure >= limit) "失败上限" else null
     }
+
+    private fun effectiveFailureLimit(peak: Int, userFailureLimit: Int): Int =
+        minOf(userFailureLimit.coerceAtLeast(1), failureLimitFor(peak))
 
     private fun failureLimitFor(peak: Int): Int = when {
         peak < 1_000 -> 120
