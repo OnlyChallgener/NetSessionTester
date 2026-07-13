@@ -201,8 +201,14 @@ class TcpTester(context: Context) {
                 if (!job.isCompleted) continue
                 iterator.remove()
                 drained++
-                val result = runCatching { job.await() }.getOrElse { error ->
-                    if (error is CancellationException) OpenResult(discarded = true) else OpenResult(error = classifyError(error))
+                val result = try {
+                    job.await()
+                } catch (_: CancellationException) {
+                    OpenResult(discarded = true)
+                } catch (error: Error) {
+                    throw error
+                } catch (error: Throwable) {
+                    OpenResult(error = classifyError(error))
                 }
                 if (result.discarded) continue
                 result.socket?.let { socket ->
@@ -474,23 +480,30 @@ class TcpTester(context: Context) {
     }
 
     private fun openOne(address: InetAddress, port: Int, timeoutMs: Int, expectedEpoch: Long): OpenResult {
+        var socket: Socket? = null
         return try {
             if (releaseEpoch.get() != expectedEpoch) return OpenResult(discarded = true)
-            val socket = Socket()
-            socket.keepAlive = true
-            socket.tcpNoDelay = true
+            val candidate = Socket()
+            socket = candidate
+            candidate.keepAlive = true
+            candidate.tcpNoDelay = true
             val connectStartedAt = System.nanoTime()
-            socket.connect(InetSocketAddress(address, port), timeoutMs)
+            candidate.connect(InetSocketAddress(address, port), timeoutMs)
             val connectLatencyMs = ((System.nanoTime() - connectStartedAt) / 1_000_000L).toInt().coerceAtLeast(1)
             if (releaseEpoch.get() != expectedEpoch) {
-                fastClose(socket)
+                fastClose(candidate)
                 OpenResult(discarded = true)
             } else {
-                OpenResult(socket = socket, connectLatencyMs = connectLatencyMs)
+                OpenResult(socket = candidate, connectLatencyMs = connectLatencyMs)
             }
         } catch (e: CancellationException) {
+            socket?.let(::fastClose)
+            throw e
+        } catch (e: Error) {
+            socket?.let(::fastClose)
             throw e
         } catch (e: Throwable) {
+            socket?.let(::fastClose)
             OpenResult(error = classifyError(e))
         }
     }

@@ -27,6 +27,7 @@ import android.provider.MediaStore
 import android.provider.Settings
 import android.telephony.TelephonyManager
 import android.widget.Toast
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -68,7 +69,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
@@ -85,20 +85,15 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material.icons.Icons
@@ -107,7 +102,6 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Assessment
-import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.OpenInNew
@@ -132,6 +126,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -140,6 +135,7 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.geometry.Offset
@@ -190,7 +186,6 @@ import com.demonv.netsessiontester.model.RunPhase
 import com.demonv.netsessiontester.model.SessionConfig
 import com.demonv.netsessiontester.model.SessionSummary
 import com.demonv.netsessiontester.model.TestMode
-import com.demonv.netsessiontester.network.TcpTester
 import com.demonv.netsessiontester.network.PublicIpDetector
 import com.demonv.netsessiontester.network.PublicIpResult
 import com.demonv.netsessiontester.network.NetworkDnsResolver
@@ -205,6 +200,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.flow.first
 import org.json.JSONObject
 import org.json.JSONArray
 import java.io.BufferedInputStream
@@ -266,20 +262,6 @@ private enum class SessionProtocolView(val label: String) {
     COMPARE("对比")
 }
 
-private enum class FinishReason(val label: String, val saveHistory: Boolean) {
-    Completed("测试完成", true),
-    FailureLimit("失败上限", true),
-    NoGrowth("无增长确认", true),
-    ConsecutiveFailure("连续失败", true),
-    FdLimit("FD上限", true),
-    ManualStop("手动停止", true),
-    ForceRelease("强制释放", false),
-    NetworkChange("网络环境变化", true),
-    DnsFail("解析失败", false),
-    Interrupted("测试中断", true),
-    ServiceDestroyed("服务销毁保护", true)
-}
-
 private data class ChartPoint(
     val protocol: IpProtocol,
     val elapsedSec: Int,
@@ -291,7 +273,7 @@ private data class ChartPoint(
     val timeEpochMs: Long = System.currentTimeMillis()
 )
 
-private data class PingPoint(
+internal data class PingPoint(
     val elapsedSec: Int,
     val latencyMs: Int?,
     val lossCount: Int = 0,
@@ -342,7 +324,7 @@ private fun compactSessionPointsForRender(points: List<ChartPoint>): List<ChartP
         .flatMap { downsampleForRender(it.sortedBy { point -> point.elapsedSec }, (MAX_RENDER_SESSION_POINTS / 2).coerceAtLeast(1)) }
         .sortedWith(compareBy<ChartPoint> { it.protocol.ordinal }.thenBy { it.elapsedSec })
 
-private enum class PingProtocolMode(val label: String) {
+internal enum class PingProtocolMode(val label: String) {
     AUTO("自动"), IPV4("IPv4"), IPV6("IPv6")
 }
 
@@ -389,7 +371,7 @@ private val DefaultPingTimeoutPresets = listOf(
     PingTimeoutPreset("3000", "3000")
 )
 
-private data class PingLogEntry(
+internal data class PingLogEntry(
     val timeEpochMs: Long = System.currentTimeMillis(),
     val target: String,
     val protocol: String,
@@ -405,7 +387,7 @@ private data class PingLogEntry(
             .format(Instant.ofEpochMilli(timeEpochMs))
 }
 
-private class RttJitterWindow(private val maxSize: Int = 50) {
+internal class RttJitterWindow(private val maxSize: Int = 50) {
     private val values = ArrayDeque<Double>()
 
     fun reset() {
@@ -433,7 +415,7 @@ private class RttJitterWindow(private val maxSize: Int = 50) {
     }
 }
 
-private fun trimPingLogSessions(
+internal fun trimPingLogSessions(
     logs: List<PingLogEntry>,
     maxSessions: Int = 12,
     maxEntriesPerSession: Int = 6000
@@ -453,7 +435,7 @@ private fun trimPingLogSessions(
         .sortedBy { it.timeEpochMs }
 }
 
-private fun savePingLogs(context: Context, logs: List<PingLogEntry>) {
+internal fun savePingLogs(context: Context, logs: List<PingLogEntry>) {
     runCatching {
         val arr = JSONArray()
         trimPingLogSessions(logs).forEach { item ->
@@ -2690,25 +2672,25 @@ private fun normalizeNetworkTargetInput(raw: String, defaultHost: String = "223.
     return NormalizedNetworkTarget(normalizedHost, parsedPort)
 }
 
-private data class ResolvedPingTarget(
+internal data class ResolvedPingTarget(
     val address: String,
     val protocol: PingProtocolMode,
     val displayProtocol: String,
     val error: String? = null
 )
 
-private data class PingCommandResult(
+internal data class PingCommandResult(
     val latencyMs: Int?,
     val failure: String? = null
 )
 
-private data class PingStreamEvent(
+internal data class PingStreamEvent(
     val latencyMs: Int?,
     val failure: String? = null,
     val timeEpochMs: Long = System.currentTimeMillis()
 )
 
-private suspend fun resolvePingTarget(host: String, protocol: PingProtocolMode): ResolvedPingTarget = withContext(Dispatchers.IO) {
+internal suspend fun resolvePingTarget(host: String, protocol: PingProtocolMode): ResolvedPingTarget = withContext(Dispatchers.IO) {
     val target = normalizeNetworkTargetInput(host, "223.5.5.5").host
     runCatching {
         if (looksLikeIpv4Literal(target)) {
@@ -2757,7 +2739,7 @@ private suspend fun resolvePingTarget(host: String, protocol: PingProtocolMode):
 }
 
 
-private data class TcpPingProbe(val port: Int, val latencyMs: Int)
+internal data class TcpPingProbe(val port: Int, val latencyMs: Int)
 
 private val TCP_PING_PROBE_PORTS = listOf(80, 443, 22, 8080, 8443, 8000, 5000, 5001)
 
@@ -2772,7 +2754,7 @@ private suspend fun tcpSocketProbe(address: String, port: Int, timeoutMs: Int): 
     }.getOrNull()
 }
 
-private suspend fun findTcpPingPort(address: String, timeoutMs: Int): TcpPingProbe? = withContext(Dispatchers.IO) {
+internal suspend fun findTcpPingPort(address: String, timeoutMs: Int): TcpPingProbe? = withContext(Dispatchers.IO) {
     val probeTimeout = timeoutMs.coerceIn(180, 650)
     for (port in TCP_PING_PROBE_PORTS) {
         val probe = tcpSocketProbe(address, port, probeTimeout)
@@ -2781,7 +2763,7 @@ private suspend fun findTcpPingPort(address: String, timeoutMs: Int): TcpPingPro
     null
 }
 
-private suspend fun tcpSocketPingResolved(address: String, port: Int, timeoutMs: Int): PingCommandResult = withContext(Dispatchers.IO) {
+internal suspend fun tcpSocketPingResolved(address: String, port: Int, timeoutMs: Int): PingCommandResult = withContext(Dispatchers.IO) {
     runCatching {
         val startedAt = System.nanoTime()
         Socket().use { socket ->
@@ -2801,18 +2783,28 @@ private suspend fun tcpSocketPingResolved(address: String, port: Int, timeoutMs:
     }
 }
 
-private suspend fun icmpPingResolved(address: String, timeoutMs: Int, protocol: PingProtocolMode): PingCommandResult = withContext(Dispatchers.IO) {
+internal suspend fun icmpPingResolved(address: String, timeoutMs: Int, protocol: PingProtocolMode): PingCommandResult = withContext(Dispatchers.IO) {
     val timeoutSec = ((timeoutMs.coerceIn(300, 10_000) + 999) / 1000).coerceAtLeast(1)
-    fun runCommand(command: List<String>): PingCommandResult {
-        return runCatching {
+    suspend fun runCommand(command: List<String>): PingCommandResult {
+        var process: Process? = null
+        return try {
             val startedAt = System.nanoTime()
-            val process = ProcessBuilder(command).redirectErrorStream(true).start()
-            val finished = process.waitFor((timeoutMs + 900).toLong(), TimeUnit.MILLISECONDS)
-            if (!finished) {
-                process.destroyForcibly()
-                return@runCatching PingCommandResult(null, "超时")
+            val activeProcess = ProcessBuilder(command).redirectErrorStream(true).start()
+            process = activeProcess
+            val deadline = SystemClock.elapsedRealtime() + timeoutMs + 900L
+            var finished = false
+            while (currentCoroutineContext().isActive && SystemClock.elapsedRealtime() < deadline) {
+                if (activeProcess.waitFor(50L, TimeUnit.MILLISECONDS)) {
+                    finished = true
+                    break
+                }
             }
-            val output = process.inputStream.bufferedReader().use { it.readText() }
+            currentCoroutineContext().ensureActive()
+            if (!finished) {
+                activeProcess.destroyForcibly()
+                return PingCommandResult(null, "超时")
+            }
+            val output = activeProcess.inputStream.bufferedReader().use { it.readText() }
             val parsed = Regex("time[=<]([0-9.]+)\\s*ms")
                 .find(output)
                 ?.groupValues
@@ -2822,13 +2814,20 @@ private suspend fun icmpPingResolved(address: String, timeoutMs: Int, protocol: 
                 ?.coerceAtLeast(1)
             when {
                 parsed != null -> PingCommandResult(parsed, null)
-                process.exitValue() == 0 -> PingCommandResult(((System.nanoTime() - startedAt) / 1_000_000L).toInt().coerceAtLeast(1), null)
+                activeProcess.exitValue() == 0 -> PingCommandResult(((System.nanoTime() - startedAt) / 1_000_000L).toInt().coerceAtLeast(1), null)
                 output.contains("unknown host", ignoreCase = true) -> PingCommandResult(null, "解析失败")
                 output.contains("unreachable", ignoreCase = true) -> PingCommandResult(null, "不可达")
                 else -> PingCommandResult(null, "超时")
             }
-        }.getOrElse {
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Error) {
+            throw error
+        } catch (_: Throwable) {
             PingCommandResult(null, "命令失败")
+        } finally {
+            runCatching { process?.destroy() }
+            runCatching { process?.destroyForcibly() }
         }
     }
     when (protocol) {
@@ -2841,7 +2840,7 @@ private suspend fun icmpPingResolved(address: String, timeoutMs: Int, protocol: 
     }
 }
 
-private suspend fun streamIcmpPingResolved(
+internal suspend fun streamIcmpPingResolved(
     address: String,
     timeoutMs: Int,
     protocol: PingProtocolMode,
@@ -2870,7 +2869,7 @@ private suspend fun streamIcmpPingResolved(
                 val line = reader.readLine() ?: break
                 val lower = line.lowercase()
                 if (lower.contains("unknown host") || lower.contains("bad address")) {
-                    withContext(Dispatchers.Main) { onEvent(PingStreamEvent(null, "解析失败")) }
+                    onEvent(PingStreamEvent(null, "解析失败"))
                     emitted++
                     break
                 }
@@ -2883,12 +2882,12 @@ private suspend fun streamIcmpPingResolved(
                     val seq = seqRegex.find(line)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: (lastSeq + 1)
                     if (seq > lastSeq + 1) {
                         repeat((seq - lastSeq - 1).coerceAtMost(maxCount - emitted)) {
-                            withContext(Dispatchers.Main) { onEvent(PingStreamEvent(null, "超时")) }
+                            onEvent(PingStreamEvent(null, "超时"))
                             emitted++
                         }
                     }
                     lastSeq = seq.coerceAtLeast(lastSeq)
-                    withContext(Dispatchers.Main) { onEvent(PingStreamEvent(time, null)) }
+                    onEvent(PingStreamEvent(time, null))
                     emitted++
                     if (emitted >= maxCount) break
                 }
@@ -2898,12 +2897,16 @@ private suspend fun streamIcmpPingResolved(
                 process!!.waitFor(waitMs, TimeUnit.MILLISECONDS)
                 if (sawPingLine && emitted < maxCount) {
                     repeat((maxCount - emitted).coerceAtMost(500)) {
-                        withContext(Dispatchers.Main) { onEvent(PingStreamEvent(null, "超时")) }
+                        onEvent(PingStreamEvent(null, "超时"))
                         emitted++
                     }
                 }
             }
             Pair(emitted, sawPingLine || emitted > 0)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Error) {
+            throw error
         } catch (_: Throwable) {
             Pair(emitted, false)
         } finally {
@@ -2929,7 +2932,7 @@ private fun recommendedPingTimeoutMsForInterval(intervalMs: Long): Int = when {
     else -> 3000
 }
 
-private fun pingMaxInflight(intervalMs: Long, timeoutMs: Int): Int {
+internal fun pingMaxInflight(intervalMs: Long, timeoutMs: Int): Int {
     val byWindow = ((timeoutMs + intervalMs - 1L) / intervalMs).toInt().coerceAtLeast(1)
     return byWindow.coerceIn(3, 16)
 }
@@ -2959,7 +2962,9 @@ private fun NetSessionTesterApp() {
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
     NetworkDnsResolver.install(context.applicationContext)
-    val tester = remember { TcpTester(context.applicationContext) }
+    AppTestRuntime.initialize(context.applicationContext)
+    val runtimeConnectionState by AppTestRuntime.connectionState.collectAsState()
+    val runtimePingState by AppTestRuntime.pingState.collectAsState()
     val historyStore = remember { HistoryStore(context.applicationContext) }
     val logStore = remember { LogStore(context.applicationContext) }
     val settingsStore = remember { SettingsStore(context.applicationContext) }
@@ -2972,8 +2977,34 @@ private fun NetSessionTesterApp() {
     var settingsNetworkFocusRequest by remember { mutableStateOf(0) }
     var sessionCardExpanded by remember { mutableStateOf(false) }
     var networkInfoExpanded by rememberSaveable { mutableStateOf(false) }
-    var runningJob by remember { mutableStateOf<Job?>(null) }
-    var state by remember { mutableStateOf(AppUiState()) }
+    val restoredReleaseUi = remember {
+        val snapshot = AppTestRuntime.releaseUiSnapshot
+        val completionStillVisible = !snapshot.finished ||
+            snapshot.finishedAtEpochMs <= 0L ||
+            System.currentTimeMillis() - snapshot.finishedAtEpochMs < 10_000L
+        if (snapshot.visible && completionStillVisible) {
+            snapshot
+        } else {
+            ReleaseUiState().also { AppTestRuntime.releaseUiSnapshot = it }
+        }
+    }
+    var state by remember {
+        mutableStateOf(
+            runtimeConnectionState.ui.takeIf { runtimeConnectionState.revision > 0L } ?: AppUiState(
+                runPhase = when {
+                    !restoredReleaseUi.visible -> RunPhase.Idle
+                    restoredReleaseUi.finished -> RunPhase.Finished
+                    else -> RunPhase.Releasing
+                },
+                status = when {
+                    !restoredReleaseUi.visible -> "待测试"
+                    restoredReleaseUi.finished -> "已释放"
+                    else -> "正在释放"
+                },
+                releaseUi = restoredReleaseUi
+            )
+        )
+    }
     var pendingCsv by remember { mutableStateOf<String?>(null) }
     var settingsLoaded by remember { mutableStateOf(false) }
 
@@ -3004,7 +3035,6 @@ private fun NetSessionTesterApp() {
     var ipv6ConnectivityVerified by remember { mutableStateOf(false) }
     var publicIpv6FailureStreak by remember { mutableStateOf(0) }
     var networkProbeInfo by remember { mutableStateOf(NetworkProbeInfo()) }
-    var manualStopRequested by remember { mutableStateOf(false) }
     var currentTestConfig by remember { mutableStateOf<SessionConfig?>(null) }
     var currentStartedAt by remember { mutableStateOf(0L) }
     var chartMode by remember { mutableStateOf(ChartMode.GROWTH) }
@@ -3015,7 +3045,6 @@ private fun NetSessionTesterApp() {
     var displayPingPoints by remember { mutableStateOf<List<PingPoint>>(emptyList()) }
     var displayPingJitterMs by remember { mutableStateOf<Double?>(null) }
     var displayPingLogCount by remember { mutableStateOf(0) }
-    var pingJob by remember { mutableStateOf<Job?>(null) }
     var pingLogSaveJob by remember { mutableStateOf<Job?>(null) }
     var pingIntervalLabel by remember { mutableStateOf("停止") }
     var pingActiveTargetLabel by remember { mutableStateOf("") }
@@ -3028,15 +3057,13 @@ private fun NetSessionTesterApp() {
     var pingLogs by remember { mutableStateOf<List<PingLogEntry>>(emptyList()) }
     var hostHistory by remember { mutableStateOf<List<String>>(emptyList()) }
     var pingTargetHistory by remember { mutableStateOf<List<String>>(emptyList()) }
-    var networkWatchJob by remember { mutableStateOf<Job?>(null) }
     var networkRefreshJob by remember { mutableStateOf<Job?>(null) }
     var networkEventRefreshJob by remember { mutableStateOf<Job?>(null) }
     var networkRefreshGeneration by remember { mutableStateOf(0L) }
     var appInForeground by remember { mutableStateOf(true) }
-    var testNetworkSignature by remember { mutableStateOf("") }
     var lastNetworkInfoSignature by remember { mutableStateOf("") }
-    var activeRunId by remember { mutableStateOf(0L) }
-    var finishInProgress by remember { mutableStateOf(false) }
+    var pendingReleaseFocusRunId by remember { mutableStateOf(0L) }
+    var lastAutoLocatedReleaseRunId by remember { mutableStateOf(0L) }
 
     var detailTitle by remember { mutableStateOf<String?>(null) }
     var detailLines by remember { mutableStateOf<List<String>>(emptyList()) }
@@ -3087,12 +3114,38 @@ private fun NetSessionTesterApp() {
     }
 
     LaunchedEffect(state.releaseUi.visible, state.releaseUi.finished, state.releaseUi.elapsedMs) {
+        if (runtimeConnectionState.revision > 0L) return@LaunchedEffect
         if (!state.releaseUi.visible || !state.releaseUi.finished) return@LaunchedEffect
         val completedSnapshot = state.releaseUi
-        delay(10_000L)
+        val remainingVisibleMs = completedSnapshot.finishedAtEpochMs
+            .takeIf { it > 0L }
+            ?.let { finishedAt -> (10_000L - (System.currentTimeMillis() - finishedAt)).coerceAtLeast(0L) }
+            ?: 10_000L
+        delay(remainingVisibleMs)
         if (state.releaseUi == completedSnapshot) {
             state = state.copy(releaseUi = ReleaseUiState())
+            AppTestRuntime.releaseUiSnapshot = ReleaseUiState()
         }
+    }
+
+    LaunchedEffect(Unit) {
+        if (runtimeConnectionState.ui.isAdding || runtimeConnectionState.ui.runPhase == RunPhase.Releasing || runtimePingState.running) {
+            showRunLogDetail = false
+            appToolPage = AppToolPage.NONE
+            selectedTab = MainTab.TEST
+        }
+    }
+
+    LaunchedEffect(state.releaseUi.visible, state.releaseUi.runId, appInForeground) {
+        val releaseRunId = state.releaseUi.runId
+        if (!appInForeground || !state.releaseUi.visible || releaseRunId == 0L || releaseRunId == lastAutoLocatedReleaseRunId) {
+            return@LaunchedEffect
+        }
+        showRunLogDetail = false
+        appToolPage = AppToolPage.NONE
+        selectedTab = MainTab.TEST
+        sessionCardExpanded = true
+        pendingReleaseFocusRunId = releaseRunId
     }
 
     DisposableEffect(context) {
@@ -3212,7 +3265,15 @@ private fun NetSessionTesterApp() {
             }
             try {
                 val result = withContext(Dispatchers.IO) {
-                    runCatching { PublicIpDetector.detect(network) }.getOrElse { PublicIpResult() }
+                    try {
+                        PublicIpDetector.detect(network)
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (error: Error) {
+                        throw error
+                    } catch (_: Throwable) {
+                        PublicIpResult()
+                    }
                 }
                 if (generation != networkRefreshGeneration) return@launch
 
@@ -3333,7 +3394,7 @@ private fun NetSessionTesterApp() {
         networkEventRefreshJob = scope.launch {
             // VPN/默认网络变化通常会连续触发多次回调，短暂防抖后只刷新一次。
             delay(250L)
-            if (!settingsLoaded || !appInForeground || state.isAdding || finishInProgress) return@launch
+            if (!settingsLoaded || !appInForeground || state.isAdding || state.runPhase == RunPhase.Releasing) return@launch
             val appContext = context.applicationContext
             val signature = currentNetworkSignature(appContext)
             val vpnActive = detectNetworkEnvironment(appContext).hasVpn
@@ -3364,8 +3425,8 @@ private fun NetSessionTesterApp() {
         refreshPublicIp()
     }
 
-    DisposableEffect(settingsLoaded, appInForeground, state.isAdding, finishInProgress) {
-        if (!settingsLoaded || !appInForeground || state.isAdding || finishInProgress) {
+    DisposableEffect(settingsLoaded, appInForeground, state.isAdding, state.runPhase) {
+        if (!settingsLoaded || !appInForeground || state.isAdding || state.runPhase == RunPhase.Releasing) {
             onDispose { }
         } else {
             val cm = context.applicationContext.getSystemService(ConnectivityManager::class.java)
@@ -3445,13 +3506,13 @@ private fun NetSessionTesterApp() {
         }
     }
 
-    LaunchedEffect(settingsLoaded, appInForeground, state.isAdding, finishInProgress) {
+    LaunchedEffect(settingsLoaded, appInForeground, state.isAdding, state.runPhase) {
         if (!settingsLoaded || !appInForeground) return@LaunchedEffect
         // 进入前台立即刷新；连接数压测/释放阶段暂停轻量刷新，避免额外占用 FD。
-        if (!state.isAdding && !finishInProgress) refreshPublicIp()
+        if (!state.isAdding && state.runPhase != RunPhase.Releasing) refreshPublicIp()
         while (appInForeground) {
             delay(5_000L)
-            if (!state.isAdding && !finishInProgress) refreshPublicIp()
+            if (!state.isAdding && state.runPhase != RunPhase.Releasing) refreshPublicIp()
         }
     }
 
@@ -3704,38 +3765,6 @@ private fun NetSessionTesterApp() {
         lastChartSampleAt = lastChartSampleAt + (stats.protocol to now)
     }
 
-    fun appendPingBucket(bucketElapsedMs: Long, samples: List<Int?>) {
-        val valid = samples.mapNotNull { it }
-        val avg = valid.takeIf { it.isNotEmpty() }?.average()?.roundToInt()
-        val min = valid.minOrNull()
-        val max = valid.maxOrNull()
-        val lossCount = samples.count { it == null }
-        val highLatency = valid.any { it >= 100 }
-        val sec = (bucketElapsedMs / 1_000L).toInt().coerceAtLeast(0)
-        pingPoints = (pingPoints.filterNot { it.elapsedMs == bucketElapsedMs } + PingPoint(
-            elapsedSec = sec,
-            latencyMs = avg,
-            lossCount = lossCount,
-            highLatency = highLatency,
-            sampleCount = samples.size.coerceAtLeast(1),
-            elapsedMs = bucketElapsedMs,
-            minLatencyMs = min,
-            maxLatencyMs = max
-        ))
-            .sortedBy { it.elapsedMs }
-            .takeLast(2400)
-    }
-
-    fun appendPingSecond(sec: Int, samples: List<Int?>) {
-        appendPingBucket(sec * 1_000L, samples)
-    }
-
-    fun alignPingWithSessionEnd() {
-        // 不再把最后一个真实点复制到测试结束时间。
-        // 复制点会造成“没有丢包但后半段变虚线”和右侧异常连接。
-        // 图表的 X 轴由真实样本范围决定，结束时间只用于文字统计。
-    }
-
     fun safePingIntervalMs(): Long = pingIntervalSetting.toLongOrNull()?.coerceIn(30L, 60_000L) ?: 1_000L
 
     fun safePingTimeoutMs(): Int = pingTimeoutSetting.toIntOrNull()?.coerceIn(300, 10_000) ?: 1_000
@@ -3746,313 +3775,58 @@ private fun NetSessionTesterApp() {
         return clean.toIntOrNull()?.coerceIn(1, 100_000)
     }
 
-    fun appendPingLog(entry: PingLogEntry) {
-        val next = trimPingLogSessions(pingLogs + entry)
-        pingLogs = next
-        displayPingLogCount = next.size
-        persistPingLogs(next)
-    }
-
-    fun appendPingLogs(entries: List<PingLogEntry>) {
-        if (entries.isEmpty()) return
-        val next = trimPingLogSessions(pingLogs + entries)
-        pingLogs = next
-        displayPingLogCount = next.size
-        persistPingLogs(next)
-    }
-
-    fun appendPingPoint(sec: Int, latencyMs: Int?) {
-        val ms = sec * 1_000L
-        pingPoints = (pingPoints.filterNot { it.elapsedMs == ms } + PingPoint(
-            elapsedSec = sec,
-            latencyMs = latencyMs,
-            lossCount = if (latencyMs == null) 1 else 0,
-            highLatency = (latencyMs ?: 0) >= 100,
-            elapsedMs = ms,
-            minLatencyMs = latencyMs,
-            maxLatencyMs = latencyMs
-        ))
-            .sortedBy { it.elapsedMs }
-            .takeLast(2400)
-    }
-
     fun startPingMonitor(reset: Boolean = false, targetOverride: String? = null) {
         val rawTarget = targetOverride?.trim()?.takeIf { it.isNotBlank() } ?: pingTarget.trim().ifBlank { host.ifBlank { "223.5.5.5" } }
         val normalizedTarget = normalizeNetworkTargetInput(rawTarget, "223.5.5.5")
         if (normalizedTarget.error != null) {
-            pingRunning = false
-            pingIntervalLabel = normalizedTarget.error
-            pingActiveTargetLabel = rawTarget
             scope.launch { snackbarHostState.showSnackbar(normalizedTarget.error) }
             return
         }
+        ensureNotificationPermission()
         val target = normalizedTarget.host
-        val interval = safePingIntervalMs()
-        val timeout = safePingTimeoutMs()
-        val maxCount = safePingCount()
-        val requestedProtocol = pingProtocolSetting
-        val sessionId = System.currentTimeMillis()
-        pingJob?.cancel()
-        activePingSessionId = sessionId
-        if (reset) {
-            pingPoints = emptyList()
-            pingJitterMs = null
-            pingSessionStartedAt = 0L
-            pingSessionEndedAt = 0L
-            pingDurationTick = sessionId
-        }
-        pingRunning = true
-        pingIntervalLabel = "准备中"
-        pingActiveTargetLabel = target
         pingTargetHistory = rememberTargetHistoryItem(context.applicationContext, "ping_target_history_v1", target)
-        appendPingLog(PingLogEntry(
-            timeEpochMs = sessionId,
-            target = target,
-            protocol = requestedProtocol.label,
-            latencyMs = null,
-            status = "开始",
-            note = "间隔${interval}ms · 超时${timeout}ms",
-            sessionId = sessionId
-        ))
-        pingJob = scope.launch {
-            val resolved = resolvePingTarget(target, requestedProtocol)
-            if (resolved.error != null) {
-                pingRunning = false
-                pingIntervalLabel = resolved.error
-                pingActiveTargetLabel = "$target · ${resolved.displayProtocol}"
-                appendPingLog(PingLogEntry(target = target, protocol = resolved.displayProtocol, latencyMs = null, status = resolved.error, note = "未开始", sessionId = sessionId))
-                return@launch
-            }
-            pingIntervalLabel = "${resolved.displayProtocol} · ${interval}ms"
-            pingActiveTargetLabel = "$target · ${resolved.displayProtocol}"
-            var startedAt = sessionId
-            var sent = 0
-            val highFrequency = interval < 200L
-            val bucketSizeMs = if (highFrequency) 250L else 1_000L
-            var currentBucketMs = 0L
-            val bucketSamples = mutableListOf<Int?>()
-            val pendingLogs = mutableListOf<PingLogEntry>()
-            val jitterWindow = RttJitterWindow(maxSize = 50)
-            var consecutiveLossStartedAt = 0L
-            var autoInterruptedByLoss = false
-
-            fun markOfficialStart() {
-                val official = System.currentTimeMillis()
-                startedAt = official
-                currentBucketMs = 0L
-                pingSessionStartedAt = official
-                pingSessionEndedAt = 0L
-                pingDurationTick = official
-            }
-
-            fun flushBucket(bucketMs: Long) {
-                if (activePingSessionId != sessionId) {
-                    bucketSamples.clear()
-                    pendingLogs.clear()
-                    return
-                }
-                if (bucketSamples.isNotEmpty()) {
-                    appendPingBucket(bucketMs, bucketSamples.toList())
-                    bucketSamples.clear()
-                }
-                if (pendingLogs.isNotEmpty()) {
-                    appendPingLogs(pendingLogs.toList())
-                    pendingLogs.clear()
-                }
-            }
-
-            fun handlePingResult(latency: Int?, failure: String?, eventTime: Long = System.currentTimeMillis()) {
-                if (activePingSessionId != sessionId) return
-                val elapsedMs = (eventTime - startedAt).coerceAtLeast(0L)
-                val bucketMs = (elapsedMs / bucketSizeMs) * bucketSizeMs
-                if (bucketMs != currentBucketMs) {
-                    flushBucket(currentBucketMs)
-                    currentBucketMs = bucketMs
-                }
-                sent++
-                if (latency != null) {
-                    jitterWindow.onSuccess(latency.toDouble())
-                    pingJitterMs = jitterWindow.currentJitterMs()
-                }
-                bucketSamples.add(latency)
-                if (latency == null) {
-                    if (consecutiveLossStartedAt == 0L) consecutiveLossStartedAt = eventTime
-                    if (!autoInterruptedByLoss && eventTime - consecutiveLossStartedAt >= 5_000L) {
-                        autoInterruptedByLoss = true
-                        pendingLogs.add(PingLogEntry(
-                            timeEpochMs = eventTime,
-                            target = target,
-                            protocol = resolved.displayProtocol,
-                            latencyMs = null,
-                            status = "中断",
-                            note = "连续5秒100%丢包，已自动停止并保存记录",
-                            sessionId = sessionId,
-                            elapsedMs = elapsedMs
-                        ))
-                        pingJob?.cancel(CancellationException("连续5秒100%丢包"))
-                    }
-                } else {
-                    consecutiveLossStartedAt = 0L
-                }
-                val status = when {
-                    latency == null -> failure ?: "超时"
-                    latency >= 100 -> "高延迟"
-                    else -> "成功"
-                }
-                pendingLogs.add(PingLogEntry(
-                    timeEpochMs = eventTime,
-                    target = target,
-                    protocol = resolved.displayProtocol,
-                    latencyMs = latency,
-                    status = status,
-                    note = if (latency == null) (failure ?: "timeout") else "",
-                    sessionId = sessionId,
-                    elapsedMs = elapsedMs
-                ))
-            }
-
-            try {
-                val finiteCount = maxCount
-                if (interval < 200L) {
-                    val tcpProbe = findTcpPingPort(resolved.address, timeout)
-                    if (tcpProbe != null) {
-                        val tcpProtocol = "${resolved.displayProtocol} · TCP:${tcpProbe.port}"
-                        pingIntervalLabel = "TCP高频${interval}ms"
-                        pingActiveTargetLabel = "$target · $tcpProtocol"
-                        pendingLogs.add(PingLogEntry(
-                            target = target,
-                            protocol = tcpProtocol,
-                            latencyMs = tcpProbe.latencyMs,
-                            status = "TCP高频",
-                            note = "普通APP无法使用ICMP Raw Socket，已用TCP Socket高频探测",
-                            sessionId = sessionId
-                        ))
-                        markOfficialStart()
-                        var scheduled = 0
-                        var inFlight = 0
-                        var nextTick = SystemClock.elapsedRealtime()
-                        val tcpTimeout = timeout.coerceIn(180, 5_000)
-                        val maxInFlight = pingMaxInflight(interval, tcpTimeout)
-                        var skippedByInflight = 0
-                        val finiteJobs = mutableListOf<Job>()
-                        while (currentCoroutineContext().isActive && (finiteCount == null || scheduled < finiteCount)) {
-                            val waitMs = nextTick - SystemClock.elapsedRealtime()
-                            if (waitMs > 0L) delay(waitMs)
-                            nextTick += interval
-                            if (inFlight >= maxInFlight) {
-                                skippedByInflight++
-                                if (skippedByInflight == 1 || skippedByInflight % 50 == 0) {
-                                    pendingLogs.add(PingLogEntry(target = target, protocol = tcpProtocol, latencyMs = null, status = "跳过", note = "并发已满：${maxInFlight}，主动跳过，不计入丢包", sessionId = sessionId))
-                                }
-                                continue
-                            }
-                            scheduled++
-                            inFlight++
-                            val job = launch {
-                                try {
-                                    val result = tcpSocketPingResolved(resolved.address, tcpProbe.port, tcpTimeout)
-                                    handlePingResult(result.latencyMs, result.failure, System.currentTimeMillis())
-                                } finally {
-                                    inFlight = (inFlight - 1).coerceAtLeast(0)
-                                }
-                            }
-                            if (finiteCount != null) finiteJobs.add(job)
-                        }
-                        finiteJobs.forEach { it.join() }
-                    } else {
-                        pingIntervalLabel = "ICMP高频${interval}ms"
-                        markOfficialStart()
-                        pendingLogs.add(PingLogEntry(
-                            target = target,
-                            protocol = resolved.displayProtocol,
-                            latencyMs = null,
-                            status = "TCP端口未发现",
-                            note = "已回退系统ping流式探测；实际频率受Android ping命令限制",
-                            sessionId = sessionId
-                        ))
-                        while (currentCoroutineContext().isActive && (finiteCount == null || sent < finiteCount)) {
-                            val remaining = finiteCount?.let { (it - sent).coerceAtLeast(0) } ?: 20_000
-                            if (remaining <= 0) break
-                            val chunk = remaining.coerceAtMost(20_000)
-                            val before = sent
-                            val streamed = streamIcmpPingResolved(resolved.address, timeout, resolved.protocol, interval, chunk) { event ->
-                                handlePingResult(event.latencyMs, event.failure, event.timeEpochMs)
-                            }
-                            if (streamed <= 0 || sent == before) {
-                                pendingLogs.add(PingLogEntry(
-                                    target = target,
-                                    protocol = resolved.displayProtocol,
-                                    latencyMs = null,
-                                    status = "高频受限",
-                                    note = "系统ping不支持该频率，已降级串行ICMP",
-                                    sessionId = sessionId
-                                ))
-                                val loopStart = System.currentTimeMillis()
-                                val result = icmpPingResolved(resolved.address, timeout, resolved.protocol)
-                                handlePingResult(result.latencyMs, result.failure, System.currentTimeMillis())
-                                val cost = System.currentTimeMillis() - loopStart
-                                delay((interval - cost).coerceAtLeast(0L))
-                            }
-                        }
-                    }
-                } else {
-                    markOfficialStart()
-                    while (currentCoroutineContext().isActive && (maxCount == null || sent < maxCount)) {
-                        val loopStart = System.currentTimeMillis()
-                        val result = icmpPingResolved(resolved.address, timeout, resolved.protocol)
-                        handlePingResult(result.latencyMs, result.failure, System.currentTimeMillis())
-                        val cost = System.currentTimeMillis() - loopStart
-                        delay((interval - cost).coerceAtLeast(0L))
-                    }
-                }
-            } finally {
-                if (activePingSessionId == sessionId) {
-                    flushBucket(currentBucketMs)
-                    pingRunning = false
-                    pingSessionEndedAt = System.currentTimeMillis()
-                    pingDurationTick = pingSessionEndedAt
-                    pingIntervalLabel = if (sent > 0) "已停止 · ${sent}次" else "停止"
-                    appendPingLog(PingLogEntry(target = target, protocol = resolved.displayProtocol, latencyMs = null, status = "停止", note = "共${sent}次 · 时长${formatPingDuration((pingSessionEndedAt - startedAt).coerceAtLeast(0L))}", sessionId = sessionId, elapsedMs = (pingSessionEndedAt - startedAt).coerceAtLeast(0L)))
-                }
-            }
+        if (targetOverride != null) {
+            AppTestRuntime.restartPingForConnection(
+                target = target,
+                intervalMs = safePingIntervalMs(),
+                timeoutMs = safePingTimeoutMs(),
+                maxCount = safePingCount(),
+                protocol = pingProtocolSetting,
+                existingLogs = pingLogs
+            )
+        } else if (!AppTestRuntime.startPing(
+                target = target,
+                intervalMs = safePingIntervalMs(),
+                timeoutMs = safePingTimeoutMs(),
+                maxCount = safePingCount(),
+                protocol = pingProtocolSetting,
+                existingLogs = pingLogs,
+                reset = reset
+            )) {
+            scope.launch { snackbarHostState.showSnackbar("Ping 已在后台运行") }
         }
+    }
+
+    LaunchedEffect(runtimePingState.revision) {
+        if (runtimePingState.revision <= 0L) return@LaunchedEffect
+        pingRunning = runtimePingState.running
+        activePingSessionId = runtimePingState.sessionId
+        pingActiveTargetLabel = runtimePingState.target
+        pingIntervalLabel = runtimePingState.intervalLabel
+        pingSessionStartedAt = runtimePingState.startedAtEpochMs
+        pingSessionEndedAt = runtimePingState.endedAtEpochMs
+        pingDurationTick = if (runtimePingState.running) System.currentTimeMillis() else runtimePingState.endedAtEpochMs
+        pingPoints = runtimePingState.points
+        pingLogs = runtimePingState.logs
+        pingJitterMs = runtimePingState.jitterMs
     }
 
     fun stopPingMonitor(reason: String = "手动停止") {
-        val wasRunning = pingRunning
-        val sessionId = activePingSessionId
-        val stoppedAt = System.currentTimeMillis()
-        pingJob?.cancel()
-        pingJob = null
-        pingRunning = false
-        pingSessionEndedAt = stoppedAt
-        pingDurationTick = pingSessionEndedAt
-        pingIntervalLabel = if (reason == "手动停止") "已停止" else "已中断"
-        if (wasRunning && reason != "手动停止" && sessionId != 0L) {
-            appendPingLog(PingLogEntry(
-                timeEpochMs = stoppedAt,
-                target = pingTarget.ifBlank { pingActiveTargetLabel.ifBlank { "Ping" } },
-                protocol = pingProtocolSetting.label,
-                latencyMs = null,
-                status = "中断",
-                note = reason,
-                sessionId = sessionId
-            ))
-        }
+        AppTestRuntime.stopPing(reason)
     }
 
     fun clearPingData() {
-        pingPoints = emptyList()
-        displayPingPoints = emptyList()
-        pingLogs = emptyList()
-        displayPingLogCount = 0
-        pingJitterMs = null
-        displayPingJitterMs = null
-        pingSessionStartedAt = 0L
-        pingSessionEndedAt = 0L
-        pingDurationTick = System.currentTimeMillis()
-        persistPingLogs(emptyList())
-        pingIntervalLabel = if (pingRunning) "${pingProtocolSetting.label} · ${safePingIntervalMs()}ms" else "停止"
+        AppTestRuntime.clearPing()
     }
 
     fun deletePingLogSession(sessionId: Long) {
@@ -4061,22 +3835,6 @@ private fun NetSessionTesterApp() {
         displayPingLogCount = next.size
         persistPingLogs(next)
         scope.launch { snackbarHostState.showSnackbar("已删除 1 条 Ping 历史") }
-    }
-
-    DisposableEffect(context, pingRunning, state.isAdding) {
-        val lifecycleOwner = context as? LifecycleOwner
-        if (lifecycleOwner == null) {
-            onDispose { }
-        } else {
-            val observer = LifecycleEventObserver { _, event ->
-                if (event == Lifecycle.Event.ON_STOP && pingRunning && !state.isAdding) {
-                    // 准确优先：普通 Ping 测试退后台/锁屏后不伪装连续数据，直接中断并保存部分记录。
-                    stopPingMonitor("APP进入后台/锁屏，准确优先已中断；后台区间不计入统计")
-                }
-            }
-            lifecycleOwner.lifecycle.addObserver(observer)
-            onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
-        }
     }
 
     fun ensureNotificationPermission() {
@@ -4116,7 +3874,7 @@ private fun NetSessionTesterApp() {
         val target = host.ifBlank { "www.baidu.com" }
         scope.launch {
             appendLog(LogLine(level = LogLevel.INFO, text = "开始解析：$target"))
-            val result = tester.resolveHost(target)
+            val result = AppTestRuntime.resolveHost(target)
             state = state.copy(resolveResult = result)
             if (result.error != null) {
                 appendLog(LogLine(level = LogLevel.ERROR, text = "解析失败：${result.error}"))
@@ -4127,377 +3885,27 @@ private fun NetSessionTesterApp() {
         }
     }
 
-    fun hasFdLimit(stats: ProtocolStats?): Boolean {
-        if (stats == null) return false
-        return stats.phase.contains("FD", ignoreCase = true) ||
-            stats.errorSummary.keys.any { it.contains("FD", ignoreCase = true) }
-    }
-
-    fun hasFdLimit(summary: SessionSummary?): Boolean {
-        if (summary == null) return false
-        return hasFdLimit(summary.ipv4Stats) || hasFdLimit(summary.ipv6Stats)
-    }
-
-    suspend fun appendHistorySafely(summary: SessionSummary) {
-        // 注意：统一收尾函数会先 detach/清空 heldSockets，再调用这里。
-        // 保存历史失败不能影响释放状态。
-        runCatching {
-            historyStore.append(summary)
-            historyStore.trim(100)
-        }.onFailure { error ->
-            appendLog(LogLine(level = LogLevel.ERROR, text = "保存历史失败：${error.message ?: error.javaClass.simpleName}"))
-        }
-    }
-
-    fun stoppedStatsForNetworkChange(current: ProtocolStats, reason: String): ProtocolStats {
-        return current.copy(
-            phase = reason,
-            errorSummary = current.errorSummary + (reason to 1)
-        )
-    }
-
-    fun buildNetworkInterruptedSummary(reason: String): SessionSummary? {
-        val config = currentTestConfig ?: buildConfig() ?: return null
-        val ipv4 = when (config.mode) {
-            TestMode.IPV4_ONLY -> stoppedStatsForNetworkChange(state.ipv4Stats, reason)
-            TestMode.IPV4_THEN_IPV6 -> if (state.ipv4Stats.totalAttempts > 0) stoppedStatsForNetworkChange(state.ipv4Stats, reason) else null
-            TestMode.IPV6_ONLY -> null
-        }
-        val ipv6 = when (config.mode) {
-            TestMode.IPV6_ONLY -> stoppedStatsForNetworkChange(state.ipv6Stats, reason)
-            TestMode.IPV4_THEN_IPV6 -> if (state.ipv6Stats.totalAttempts > 0) stoppedStatsForNetworkChange(state.ipv6Stats, reason) else null
-            TestMode.IPV4_ONLY -> null
-        }
-        return SessionSummary(
-            startedAtEpochMs = if (currentStartedAt > 0L) currentStartedAt else System.currentTimeMillis(),
-            host = config.host,
-            port = config.port,
-            mode = config.mode,
-            ipv4Stats = ipv4,
-            ipv6Stats = ipv6
-        )
-    }
-
-    fun stoppedStatsFor(protocol: IpProtocol, current: ProtocolStats, reason: String = "手动停止"): ProtocolStats {
-        return current.copy(
-            phase = reason,
-            errorSummary = current.errorSummary + (reason to 1)
-        )
-    }
-
-    fun buildStoppedSummary(reason: String): SessionSummary? {
-        val config = currentTestConfig ?: buildConfig() ?: return null
-        val ipv4 = when (config.mode) {
-            TestMode.IPV4_ONLY -> stoppedStatsFor(IpProtocol.IPV4, state.ipv4Stats, reason)
-            TestMode.IPV4_THEN_IPV6 -> if (state.ipv4Stats.totalAttempts > 0) stoppedStatsFor(IpProtocol.IPV4, state.ipv4Stats, reason) else null
-            TestMode.IPV6_ONLY -> null
-        }
-        val ipv6 = when (config.mode) {
-            TestMode.IPV6_ONLY -> stoppedStatsFor(IpProtocol.IPV6, state.ipv6Stats, reason)
-            TestMode.IPV4_THEN_IPV6 -> if (state.ipv6Stats.totalAttempts > 0) stoppedStatsFor(IpProtocol.IPV6, state.ipv6Stats, reason) else null
-            TestMode.IPV4_ONLY -> null
-        }
-        return SessionSummary(
-            startedAtEpochMs = if (currentStartedAt > 0L) currentStartedAt else System.currentTimeMillis(),
-            host = config.host,
-            port = config.port,
-            mode = config.mode,
-            ipv4Stats = ipv4,
-            ipv6Stats = ipv6
-        )
-    }
-
-    fun finishReasonFor(summary: SessionSummary?, config: SessionConfig?): FinishReason {
-        if (summary == null) return FinishReason.Interrupted
-        if (hasFdLimit(summary)) return FinishReason.FdLimit
-        val stats = listOfNotNull(summary.ipv4Stats, summary.ipv6Stats)
-        if (stats.isNotEmpty() && stats.all { it.phase == "解析失败" || it.errorSummary.keys.any { key -> key.contains("DNS") } }) {
-            return FinishReason.DnsFail
-        }
-        if (stats.any { it.phase.contains("无增长") }) return FinishReason.NoGrowth
-        if (stats.any { it.phase.contains("连续失败") }) return FinishReason.ConsecutiveFailure
-        if (stats.any { it.phase.contains("失败上限") }) return FinishReason.FailureLimit
-        return FinishReason.Completed
-    }
-
-    suspend fun releaseAndFinalize(
-        reason: FinishReason,
-        summary: SessionSummary?,
-        saveHistory: Boolean = reason.saveHistory,
-        cancelRunningJob: Boolean = true,
-        toast: Boolean = true
-    ) {
-        if (finishInProgress && reason != FinishReason.ForceRelease) return
-        finishInProgress = true
-        manualStopRequested = true
-
-        val currentJob = currentCoroutineContext()[Job]
-        if (cancelRunningJob && runningJob != currentJob) {
-            runningJob?.cancel()
-            runningJob = null
-        }
-        alignPingWithSessionEnd()
-        if (pingJob != currentJob) pingJob?.cancel()
-        pingJob = null
-        pingIntervalLabel = "AUTO"
-        if (networkWatchJob != currentJob) networkWatchJob?.cancel()
-        networkWatchJob = null
-        activeRunId = 0L
-        currentStartedAt = 0L
-
-        val snapshot = tester.detachForRelease()
-        val finalStatus = if (reason == FinishReason.ForceRelease) "已释放" else "${reason.label} · 已释放"
-        val releaseStatus = if (reason == FinishReason.ForceRelease) "正在释放" else "${reason.label} · 正在释放"
-        val baseIpv4 = summary?.ipv4Stats ?: state.ipv4Stats
-        val baseIpv6 = summary?.ipv6Stats ?: state.ipv6Stats
-        val releaseStart = System.currentTimeMillis()
-        var lastReleaseLogAt = 0L
-
-        state = state.copy(
-            isAdding = false,
-            runPhase = RunPhase.Releasing,
-            status = releaseStatus,
-            summary = summary ?: state.summary,
-            error = null,
-            releaseUi = ReleaseUiState(
-                visible = true,
-                total = snapshot.size,
-                closed = 0,
-                speedPerSecond = 0,
-                elapsedMs = 0L,
-                message = if (snapshot.isEmpty()) "没有需要释放的连接" else "正在关闭 Socket 连接，请勿退出页面"
-            )
-        )
-
-        appendLog(LogLine(level = LogLevel.WARN, text = "${reason.label}：已停止新增，开始释放 ${snapshot.size} 条 socket"))
-        updateForegroundNotice(context, "正在释放连接 0/${snapshot.size}")
-        // 先让 Releasing 状态和释放进度卡片完成一次渲染，再开始批量 close。
-        // 避免停止瞬间和 IPv4->IPv6 切换时出现 UI 短时卡顿/假死感。
-        delay(80L)
-
-        var closed = 0
-        try {
-            closed = runCatching {
-                tester.closeDetachedSockets(snapshot, batchSize = 512, workerCount = 6, progressIntervalMs = 300L) { done, total, elapsedMs ->
-                    val elapsed = elapsedMs.coerceAtLeast(1L)
-                    val speed = if (done <= 0) 0 else (done * 1000L / elapsed).toInt().coerceAtLeast(1)
-                    state = state.copy(
-                        releaseUi = ReleaseUiState(
-                            visible = true,
-                            total = total,
-                            closed = done,
-                            speedPerSecond = speed,
-                            elapsedMs = elapsedMs,
-                            message = if (done >= total) "释放完成，正在更新界面状态" else "正在关闭 Socket 连接，请勿退出页面",
-                            finished = done >= total
-                        )
-                    )
-                    val now = System.currentTimeMillis()
-                    if (now - lastReleaseLogAt >= 1_000L || done >= total) {
-                        lastReleaseLogAt = now
-                        val percent = if (total <= 0) 100 else (done * 100 / total).coerceIn(0, 100)
-                        appendLog(LogLine(level = LogLevel.STAT, text = "释放进度：$done/$total，$percent%，速度约 ${speed}/秒"))
-                        updateForegroundNotice(context, "正在释放连接 $done/$total｜$percent%")
-                    }
-                }
-            }.getOrElse { error ->
-                appendLog(LogLine(level = LogLevel.ERROR, text = "${reason.label}：close 异常：${error.message ?: error.javaClass.simpleName}"))
-                0
-            }
-
-            appendLog(LogLine(level = LogLevel.WARN, text = "${reason.label}：close 完成：$closed 条，耗时 ${((System.currentTimeMillis() - releaseStart) / 1000f).let { String.format("%.1f", it) }} 秒"))
-
-            if (saveHistory && summary != null) {
-                appendHistorySafely(summary)
-                refreshHistory()
-            }
-        } finally {
-            val releaseElapsedMs = System.currentTimeMillis() - releaseStart
-            val failed = reason != FinishReason.Completed && reason != FinishReason.ForceRelease
-            state = state.copy(
-                isAdding = false,
-                runPhase = if (failed) RunPhase.Failed else RunPhase.Finished,
-                status = finalStatus,
-                summary = summary ?: state.summary,
-                error = if (failed) reason.label else null,
-                releaseUi = state.releaseUi.copy(
-                    visible = true,
-                    closed = state.releaseUi.total.takeIf { it > 0 } ?: closed,
-                    elapsedMs = releaseElapsedMs,
-                    finished = true,
-                    message = "释放完成"
-                ),
-                ipv4Stats = baseIpv4.copy(activeSessions = 0, phase = if (baseIpv4.totalAttempts > 0) "已释放" else baseIpv4.phase),
-                ipv6Stats = baseIpv6.copy(activeSessions = 0, phase = if (baseIpv6.totalAttempts > 0) "已释放" else baseIpv6.phase)
-            )
-            notifyLocalReleased(if (reason == FinishReason.ForceRelease) "本机已释放" else "${reason.label}，本机已释放")
-            // 释放完成通知统一走底部白色浮层，避免同时出现系统 Toast 和黑色 Snackbar。
-            stopForegroundNotice(context)
-            finishInProgress = false
-        }
-    }
-
-    suspend fun interruptForNetworkChange(reason: String = "网络环境变化") {
-        if (!state.isAdding) return
-        val summary = buildNetworkInterruptedSummary(reason)
-        appendLog(LogLine(level = LogLevel.ERROR, text = "$reason，已中断测试并保存历史。"))
-        releaseAndFinalize(
-            reason = FinishReason.NetworkChange,
-            summary = summary,
-            saveHistory = true,
-            cancelRunningJob = true
-        )
-    }
-
-    fun startNetworkWatch(startedAt: Long, signature: String) {
-        networkWatchJob?.cancel()
-        networkWatchJob = scope.launch {
-            delay(1500L)
-            var consecutiveChanged = 0
-            while (currentStartedAt == startedAt && state.isAdding) {
-                val now = currentNetworkSignature(context)
-                if (now != signature) {
-                    consecutiveChanged++
-                    if (consecutiveChanged >= 2) {
-                        interruptForNetworkChange("网络环境变化")
-                        break
-                    }
-                } else {
-                    consecutiveChanged = 0
-                }
-                delay(1000L)
-            }
-        }
-    }
-
     fun startTest() {
         val config = buildConfig() ?: return
         hostHistory = rememberTargetHistoryItem(context.applicationContext, "tcp_target_history_v1", config.host)
         ensureNotificationPermission()
-        runningJob?.cancel()
         selectedTab = MainTab.TEST
-        startForegroundNotice(context, "建连中：${config.mode.label}，目标 ${config.successLimit}")
-        val startedAt = System.currentTimeMillis()
-        currentStartedAt = startedAt
-        activeRunId = startedAt
         currentTestConfig = config
-        testNetworkSignature = currentNetworkSignature(context)
+        currentStartedAt = System.currentTimeMillis()
         resetCurrentCharts()
-        // 性能发布版：测试开始时不再触发公网/IP/STUN刷新，避免抢占网络与 IO。
-        manualStopRequested = false
-        state = state.copy(
-            isAdding = true,
-            runPhase = RunPhase.Running,
-            status = "建连中",
-            releaseUi = ReleaseUiState(),
-            ipv4Stats = ProtocolStats(IpProtocol.IPV4),
-            ipv6Stats = ProtocolStats(IpProtocol.IPV6),
-            summary = null,
-            error = null
-        )
-        appendLog(LogLine(level = LogLevel.INFO, text = "目标：${config.host}:${config.port} | 模式：${config.mode.label} | 目标CPS：${config.batchSize}/s | 调度间隔：${config.intervalMs}ms | 固定CPS核心"))
-        // 连接数测试优先级高于 Ping：开始连接数测试时自动停止旧 Ping，并重新开始一轮同步 Ping 监测。
-        if (pingEnabled) startPingMonitor(reset = true, targetOverride = config.host)
-        startNetworkWatch(startedAt, testNetworkSignature)
-
-        runningJob = scope.launch {
-            var summary: SessionSummary? = null
-            var completedNormally = false
-            var failureMsg: String? = null
-            try {
-                val oldClosed = tester.release()
-                if (oldClosed > 0) {
-                    appendLog(LogLine(level = LogLevel.WARN, text = "开始新测试前释放旧连接：$oldClosed 条"))
-                }
-                val pair = tester.runSessionHoldTest(
-                    rawConfig = config,
-                    onStats = statsHandler@ { stats ->
-                        if (activeRunId != startedAt || !state.isAdding) return@statsHandler
-                        recordChartPoint(stats)
-                        val nextPhase = if (stats.phase.contains("无增长") || stats.phase.contains("确认")) RunPhase.TopConfirm else RunPhase.Running
-                        state = when (stats.protocol) {
-                            IpProtocol.IPV4 -> state.copy(ipv4Stats = stats, status = "${stats.protocol.label} ${stats.phase}", runPhase = nextPhase)
-                            IpProtocol.IPV6 -> state.copy(ipv6Stats = stats, status = "${stats.protocol.label} ${stats.phase}", runPhase = nextPhase)
-                        }
-                        updateForegroundNotice(context, "${stats.protocol.label} ${stats.phase}｜活动 ${stats.activeSessions}｜失败 ${stats.totalFailure}")
-                    },
-                    onLog = { line -> appendLog(line) }
-                )
-                summary = SessionSummary(
-                    startedAtEpochMs = startedAt,
-                    host = config.host,
-                    port = config.port,
-                    mode = config.mode,
-                    ipv4Stats = when (config.mode) {
-                        TestMode.IPV4_ONLY -> pair.first ?: state.ipv4Stats
-                        TestMode.IPV4_THEN_IPV6 -> pair.first ?: state.ipv4Stats
-                        TestMode.IPV6_ONLY -> null
-                    },
-                    ipv6Stats = when (config.mode) {
-                        TestMode.IPV6_ONLY -> pair.second ?: state.ipv6Stats
-                        TestMode.IPV4_THEN_IPV6 -> pair.second ?: state.ipv6Stats
-                        TestMode.IPV4_ONLY -> null
-                    }
-                )
-                completedNormally = true
-            } catch (error: Throwable) {
-                if (error is kotlinx.coroutines.CancellationException) throw error
-                if (!manualStopRequested) {
-                    failureMsg = error.message ?: error.javaClass.simpleName
-                    appendLog(LogLine(level = LogLevel.ERROR, text = "测试中断：$failureMsg"))
-                }
-            } finally {
-                alignPingWithSessionEnd()
-                pingJob?.cancel()
-                pingJob = null
-                pingIntervalLabel = "AUTO"
-                networkWatchJob?.cancel()
-                networkWatchJob = null
-                if (!manualStopRequested) {
-                    val finalSummary = summary
-                    val finalReason = finishReasonFor(finalSummary, config).let { reason ->
-                        if (!completedNormally && reason == FinishReason.Completed) FinishReason.Interrupted else reason
-                    }
-                    scope.launch {
-                        releaseAndFinalize(
-                            reason = finalReason,
-                            summary = finalSummary,
-                            saveHistory = finalReason.saveHistory,
-                            cancelRunningJob = false,
-                            toast = true
-                        )
-                    }
-                }
-                runningJob = null
-            }
+        val started = AppTestRuntime.startConnection(config, state.logs)
+        if (started && pingEnabled) startPingMonitor(reset = true, targetOverride = config.host)
+        if (!started) {
+            scope.launch { snackbarHostState.showSnackbar("已有后台测试正在运行，请先停止当前任务") }
         }
     }
 
     fun stopAdding() {
-        val summary = buildStoppedSummary("手动停止")
-        appendLog(LogLine(level = LogLevel.WARN, text = "手动停止；统一收尾，先释放再保存历史。"))
-        scope.launch {
-            releaseAndFinalize(
-                reason = FinishReason.ManualStop,
-                summary = summary,
-                saveHistory = true,
-                cancelRunningJob = true
-            )
-        }
+        AppTestRuntime.stopConnection("手动停止")
     }
 
     fun releaseAll() {
-        val wasRunning = state.isAdding
-        val summary = if (wasRunning) buildStoppedSummary("强制释放") else null
-        appendLog(LogLine(level = LogLevel.WARN, text = "强制释放；统一收尾，立即清空 UI 状态和连接。"))
-        scope.launch {
-            releaseAndFinalize(
-                reason = FinishReason.ForceRelease,
-                summary = summary,
-                saveHistory = false,
-                cancelRunningJob = true
-            )
-        }
+        AppTestRuntime.stopConnection("强制释放", force = true)
     }
 
     fun exportLogs() {
@@ -4860,6 +4268,11 @@ private fun NetSessionTesterApp() {
                 MainTab.TEST -> TestPage(
                     listState = testListState,
                     pingFocusRequest = testPingFocusRequest,
+                    releaseFocusRunId = pendingReleaseFocusRunId,
+                    onReleaseFocusHandled = { handledRunId ->
+                        if (pendingReleaseFocusRunId == handledRunId) pendingReleaseFocusRunId = 0L
+                        lastAutoLocatedReleaseRunId = handledRunId
+                    },
                     sessionExpanded = sessionCardExpanded,
                     onSessionExpandedChange = { sessionCardExpanded = it },
                     mode = mode,
@@ -6028,6 +5441,8 @@ private fun SettingsPage(
 private fun TestPage(
     listState: LazyListState,
     pingFocusRequest: Int,
+    releaseFocusRunId: Long,
+    onReleaseFocusHandled: (Long) -> Unit,
     sessionExpanded: Boolean,
     onSessionExpandedChange: (Boolean) -> Unit,
     mode: TestMode,
@@ -6119,6 +5534,40 @@ private fun TestPage(
         if (pingFocusRequest <= 0) return@LaunchedEffect
         val pingIndex = visibleOrder.indexOf("ping")
         if (pingIndex >= 0) listState.animateScrollToItem(pingIndex + 1)
+    }
+
+    LaunchedEffect(runtimeConnectionState.revision) {
+        if (runtimeConnectionState.revision <= 0L) return@LaunchedEffect
+        val previousPhase = state.runPhase
+        val previousV4 = state.ipv4Stats
+        val previousV6 = state.ipv6Stats
+        currentTestConfig = runtimeConnectionState.config
+        currentStartedAt = runtimeConnectionState.startedAtEpochMs
+        state = runtimeConnectionState.ui.copy(
+            resolveResult = state.resolveResult,
+            history = state.history
+        )
+        if (previousV4 != state.ipv4Stats) recordChartPoint(state.ipv4Stats)
+        if (previousV6 != state.ipv6Stats) recordChartPoint(state.ipv6Stats)
+        if (previousPhase != state.runPhase && state.runPhase in listOf(RunPhase.Finished, RunPhase.Failed)) {
+            refreshHistory()
+        }
+        if (state.isAdding || state.runPhase == RunPhase.Releasing) {
+            showRunLogDetail = false
+            appToolPage = AppToolPage.NONE
+            selectedTab = MainTab.TEST
+        }
+    }
+
+    LaunchedEffect(releaseFocusRunId, visibleOrder) {
+        if (releaseFocusRunId == 0L) return@LaunchedEffect
+        val releaseIndex = visibleOrder.indexOf("release")
+        if (releaseIndex < 0) return@LaunchedEffect
+        val targetIndex = releaseIndex + 1 // Page title is the first LazyColumn item.
+        snapshotFlow { listState.layoutInfo.totalItemsCount }
+            .first { itemCount -> itemCount > targetIndex }
+        listState.animateScrollToItem(targetIndex)
+        onReleaseFocusHandled(releaseFocusRunId)
     }
 
     LazyColumn(
@@ -9426,6 +8875,8 @@ private suspend fun runTracketToolLive(
     } catch (e: CancellationException) {
         withContext(Dispatchers.Main) { onEvent("路由追踪已停止") }
         throw e
+    } catch (error: Error) {
+        throw error
     } catch (e: Throwable) {
         val msg = e.message ?: "追踪失败"
         withContext(Dispatchers.Main) { onHop("错误：$msg") }
@@ -10381,7 +9832,8 @@ private data class RoamingWifiSample(
     val ssid: String = "未知",
     val unavailableReason: String? = null,
     val candidateBssid: String? = null,
-    val candidateRssi: Int? = null
+    val candidateRssi: Int? = null,
+    val segmentId: Int = 0
 )
 
 private data class RoamingPingSample(
@@ -10391,7 +9843,8 @@ private data class RoamingPingSample(
     val completedElapsedMs: Long,
     val attempted: Boolean,
     val latencyMs: Int?,
-    val failureReason: String? = null
+    val failureReason: String? = null,
+    val segmentId: Int = 0
 )
 
 private data class RoamingSwitchEvent(
@@ -11158,13 +10611,18 @@ private fun readWifiSnapshot(context: Context): WifiSnapshot {
     }.getOrElse { WifiSnapshot(null, null, null, "未知", null, "系统限制：无法读取当前 Wi-Fi 信息") }
 }
 
-private fun readRoamingWifiSample(context: Context, runStartNanos: Long): RoamingWifiSample {
+private fun readRoamingWifiSample(
+    context: Context,
+    runStartNanos: Long,
+    pausedDurationMs: Long = 0L,
+    segmentId: Int = 0
+): RoamingWifiSample {
     val capturedNanos = SystemClock.elapsedRealtimeNanos()
     val snapshot = readWifiSnapshot(context)
     return RoamingWifiSample(
         timeText = SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()).format(Date()),
         elapsedRealtimeNanos = capturedNanos,
-        elapsedMs = ((capturedNanos - runStartNanos) / 1_000_000L).coerceAtLeast(0L),
+        elapsedMs = (((capturedNanos - runStartNanos) / 1_000_000L) - pausedDurationMs).coerceAtLeast(0L),
         bssid = snapshot.bssid,
         rssi = snapshot.rssi,
         frequencyMhz = snapshot.frequencyMhz,
@@ -11173,7 +10631,8 @@ private fun readRoamingWifiSample(context: Context, runStartNanos: Long): Roamin
         ssid = snapshot.ssid,
         unavailableReason = snapshot.unavailableReason,
         candidateBssid = snapshot.candidateBssid,
-        candidateRssi = snapshot.candidateRssi
+        candidateRssi = snapshot.candidateRssi,
+        segmentId = segmentId
     )
 }
 
@@ -11221,6 +10680,13 @@ private fun buildRoamingSwitchEvents(
     wifiSamples: List<RoamingWifiSample>,
     pingSamples: List<RoamingPingSample>
 ): List<RoamingSwitchEvent> {
+    val segmentGroups = wifiSamples.groupBy { it.segmentId }.values
+    if (segmentGroups.size > 1) {
+        return segmentGroups.flatMap { segment ->
+            val segmentId = segment.firstOrNull()?.segmentId ?: 0
+            buildRoamingSwitchEvents(segment, pingSamples.filter { it.segmentId == segmentId })
+        }
+    }
     val validSamples = wifiSamples.filter { isUsableWifiBssid(it.bssid) }
     if (validSamples.size < 2) return emptyList()
 
@@ -11352,7 +10818,7 @@ private fun buildStickyApEvents(
             if (existingStart == null) {
                 start = sample
                 last = sample
-            } else if (existingStart.bssid.equals(sample.bssid, ignoreCase = true)) {
+            } else if (existingStart.segmentId == sample.segmentId && existingStart.bssid.equals(sample.bssid, ignoreCase = true)) {
                 last = sample
             } else {
                 flush()
@@ -11488,6 +10954,7 @@ private fun computeRoamingQuality(
 }
 
 private fun buildRoamingHistoryRecord(
+    recordId: Long = System.currentTimeMillis(),
     targetMode: RoamingTargetMode,
     externalTarget: String,
     wifiSamples: List<RoamingWifiSample>,
@@ -11506,7 +10973,7 @@ private fun buildRoamingHistoryRecord(
     val networkLines = networkEvents.map { "${it.timeText}  ${it.label}" }
     val trueLossCount = pingSamples.count { it.attempted && it.latencyMs == null }
     return RoamingHistoryRecord(
-        id = System.currentTimeMillis(),
+        id = recordId,
         timeText = SimpleDateFormat("MM-dd HH:mm:ss", Locale.getDefault()).format(Date()),
         targetText = targetText,
         durationText = roamingDurationText(wifiSamples, pingSamples),
@@ -11586,6 +11053,22 @@ private fun writeRoamingHistory(context: Context, records: List<RoamingHistoryRe
         )
     }
     context.getSharedPreferences("net_tools_history", Context.MODE_PRIVATE).edit().putString("roaming_history_v1", arr.toString()).apply()
+}
+
+private fun recoverInterruptedRoamingCheckpoint(context: Context) {
+    val prefs = context.getSharedPreferences("roaming_runtime_checkpoint", Context.MODE_PRIVATE)
+    val runId = prefs.getLong("run_id", 0L)
+    val backgroundWallMs = prefs.getLong("background_wall_ms", 0L)
+    if (runId == 0L || backgroundWallMs == 0L) return
+    val elapsed = (System.currentTimeMillis() - backgroundWallMs).coerceAtLeast(0L)
+    val reason = if (elapsed > 10_000L) "进入后台超过10秒" else "Activity重建，后台漫游任务已安全结束"
+    val updated = loadRoamingHistory(context).map { record ->
+        if (record.id == runId && record.networkEventLines.none { it.contains(reason) }) {
+            record.copy(networkEventLines = record.networkEventLines + reason)
+        } else record
+    }
+    writeRoamingHistory(context, updated)
+    prefs.edit().clear().apply()
 }
 
 private fun roamingPingAxisMax(values: List<Int>): Int {
@@ -11806,13 +11289,23 @@ private fun RoamingToolPage(onBack: () -> Unit) {
     var customPingTimeout by remember { mutableStateOf(false) }
     var networkLostAtMs by remember { mutableStateOf<Long?>(null) }
     var running by remember { mutableStateOf(false) }
+    var pausedForBackground by remember { mutableStateOf(false) }
+    var backgroundAtElapsedMs by remember { mutableStateOf<Long?>(null) }
+    var totalPausedMs by remember { mutableStateOf(0L) }
+    var roamingSegmentId by remember { mutableStateOf(0) }
+    var backgroundTimeoutJob by remember { mutableStateOf<Job?>(null) }
     var job by remember { mutableStateOf<Job?>(null) }
+    val rawWifiSamples = remember { mutableListOf<RoamingWifiSample>() }
+    val rawPingSamples = remember { mutableListOf<RoamingPingSample>() }
     val wifiSamples = remember { mutableStateListOf<RoamingWifiSample>() }
     val pingSamples = remember { mutableStateListOf<RoamingPingSample>() }
     var networkEvents by remember { mutableStateOf<List<RoamingNetworkEvent>>(emptyList()) }
     var runStartMs by remember { mutableStateOf<Long?>(null) }
     var savedRunId by remember { mutableStateOf<Long?>(null) }
-    var history by remember { mutableStateOf(loadRoamingHistory(context.applicationContext)) }
+    var history by remember {
+        recoverInterruptedRoamingCheckpoint(context.applicationContext)
+        mutableStateOf(loadRoamingHistory(context.applicationContext))
+    }
     var showHistory by remember { mutableStateOf(false) }
     var expandedHistoryIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
     var lastCapabilitySignature by remember { mutableStateOf("") }
@@ -11824,7 +11317,8 @@ private fun RoamingToolPage(onBack: () -> Unit) {
 
     fun appendNetworkEvent(label: String) {
         val now = SystemClock.elapsedRealtime()
-        val elapsed = runStartMs?.let { ((now - it) / 1000L).toInt().coerceAtLeast(0) } ?: 0
+        val currentPauseMs = backgroundAtElapsedMs?.let { (now - it).coerceAtLeast(0L) } ?: 0L
+        val elapsed = runStartMs?.let { ((now - it - totalPausedMs - currentPauseMs) / 1000L).toInt().coerceAtLeast(0) } ?: 0
         // 事件去重：ConnectivityManager 可能连续回调完全相同的能力/链路内容，避免事件区刷屏。
         val last = networkEvents.lastOrNull()
         if (last?.label == label) return
@@ -11835,22 +11329,45 @@ private fun RoamingToolPage(onBack: () -> Unit) {
         )).takeLast(40)
     }
 
-    fun saveCurrentRunIfNeeded() {
+    fun saveCurrentRunIfNeeded(finalSave: Boolean = true) {
         val runId = runStartMs ?: return
-        if (savedRunId == runId || (wifiSamples.isEmpty() && pingSamples.isEmpty())) return
-        val events = buildRoamingSwitchEvents(wifiSamples, pingSamples)
-        val record = buildRoamingHistoryRecord(targetMode, externalTarget, wifiSamples, pingSamples, events, networkEvents)
+        if ((finalSave && savedRunId == runId) || (rawWifiSamples.isEmpty() && rawPingSamples.isEmpty())) return
+        val events = buildRoamingSwitchEvents(rawWifiSamples, rawPingSamples)
+        val record = buildRoamingHistoryRecord(
+            recordId = runId,
+            targetMode = targetMode,
+            externalTarget = externalTarget,
+            wifiSamples = rawWifiSamples,
+            pingSamples = rawPingSamples,
+            events = events,
+            networkEvents = networkEvents
+        )
         saveRoamingHistory(context.applicationContext, record)
         history = loadRoamingHistory(context.applicationContext)
-        savedRunId = runId
+        if (finalSave) savedRunId = runId
     }
 
     fun stop(reason: String = "手动停止") {
         job?.cancel()
         job = null
+        backgroundTimeoutJob?.cancel()
+        backgroundTimeoutJob = null
         if (running && reason != "手动停止") appendNetworkEvent("网络事件：$reason")
         if (running) saveCurrentRunIfNeeded()
         running = false
+        pausedForBackground = false
+        backgroundAtElapsedMs = null
+        context.applicationContext.getSharedPreferences("roaming_runtime_checkpoint", Context.MODE_PRIVATE).edit().clear().apply()
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            backgroundTimeoutJob?.cancel()
+            if (running) {
+                saveCurrentRunIfNeeded(finalSave = true)
+                job?.cancel()
+            }
+        }
     }
 
     DisposableEffect(running, runStartMs) {
@@ -11861,6 +11378,7 @@ private fun RoamingToolPage(onBack: () -> Unit) {
             val callback = object : ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: Network) {
                     scope.launch {
+                        if (pausedForBackground) return@launch
                         val lostAt = networkLostAtMs
                         networkLostAtMs = null
                         if (lostAt != null) {
@@ -11874,6 +11392,7 @@ private fun RoamingToolPage(onBack: () -> Unit) {
 
                 override fun onLost(network: Network) {
                     scope.launch {
+                        if (pausedForBackground) return@launch
                         val lostAt = SystemClock.elapsedRealtime()
                         networkLostAtMs = lostAt
                         appendNetworkEvent("网络事件：网络丢失/可能切换，等待 ${ROAMING_NETWORK_LOST_GRACE_MS / 1000}s 恢复")
@@ -11886,6 +11405,7 @@ private fun RoamingToolPage(onBack: () -> Unit) {
                 }
 
                 override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
+                    if (pausedForBackground) return
                     val transport = when {
                         networkCapabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "WiFi"
                         networkCapabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "蜂窝"
@@ -11905,6 +11425,7 @@ private fun RoamingToolPage(onBack: () -> Unit) {
                 }
 
                 override fun onLinkPropertiesChanged(network: Network, linkProperties: LinkProperties) {
+                    if (pausedForBackground) return
                     val dnsCount = linkProperties.dnsServers.size
                     val iface = linkProperties.interfaceName ?: "未知接口"
                     val mtu = linkProperties.mtu.takeIf { it > 0 }
@@ -11928,12 +11449,54 @@ private fun RoamingToolPage(onBack: () -> Unit) {
             onDispose { }
         } else {
             val observer = LifecycleEventObserver { _, event ->
-                if (event == Lifecycle.Event.ON_STOP && running) {
-                    stop("APP进入后台/锁屏，漫游测试已中断并保存")
+                when (event) {
+                    Lifecycle.Event.ON_STOP -> if (running && !pausedForBackground) {
+                        val backgroundAt = SystemClock.elapsedRealtime()
+                        backgroundAtElapsedMs = backgroundAt
+                        pausedForBackground = true
+                        appendNetworkEvent("APP进入后台/锁屏，采样与辅助 Ping 已暂停")
+                        saveCurrentRunIfNeeded(finalSave = false)
+                        context.applicationContext.getSharedPreferences("roaming_runtime_checkpoint", Context.MODE_PRIVATE).edit()
+                            .putLong("run_id", runStartMs ?: 0L)
+                            .putLong("background_wall_ms", System.currentTimeMillis())
+                            .apply()
+                        backgroundTimeoutJob?.cancel()
+                        backgroundTimeoutJob = scope.launch {
+                            delay(10_000L)
+                            if (running && pausedForBackground && backgroundAtElapsedMs == backgroundAt) {
+                                stop("进入后台超过10秒")
+                            }
+                        }
+                    }
+                    Lifecycle.Event.ON_START -> if (running && pausedForBackground) {
+                        val backgroundAt = backgroundAtElapsedMs ?: SystemClock.elapsedRealtime()
+                        val pausedMs = (SystemClock.elapsedRealtime() - backgroundAt).coerceAtLeast(0L)
+                        if (pausedMs > 10_000L) {
+                            stop("进入后台超过10秒")
+                        } else {
+                            backgroundTimeoutJob?.cancel()
+                            backgroundTimeoutJob = null
+                            totalPausedMs += pausedMs
+                            roamingSegmentId += 1
+                            pausedForBackground = false
+                            backgroundAtElapsedMs = null
+                            appendNetworkEvent("返回前台，重新建立 Wi-Fi 基线并开始新片段；后台 ${pausedMs}ms 不计入统计")
+                            context.applicationContext.getSharedPreferences("roaming_runtime_checkpoint", Context.MODE_PRIVATE).edit().clear().apply()
+                        }
+                    }
+                    else -> Unit
                 }
             }
             lifecycleOwner.lifecycle.addObserver(observer)
             onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+        }
+    }
+
+    DisposableEffect(running, context) {
+        val activity = context as? ComponentActivity
+        if (running) activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        onDispose {
+            activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         }
     }
 
@@ -12046,11 +11609,17 @@ private fun RoamingToolPage(onBack: () -> Unit) {
                                 }
                                 wifiSamples.clear()
                                 pingSamples.clear()
+                                rawWifiSamples.clear()
+                                rawPingSamples.clear()
                                 networkEvents = emptyList()
                                 val startNanos = SystemClock.elapsedRealtimeNanos()
                                 val startElapsedMs = SystemClock.elapsedRealtime()
                                 runStartMs = startElapsedMs
                                 savedRunId = null
+                                pausedForBackground = false
+                                backgroundAtElapsedMs = null
+                                totalPausedMs = 0L
+                                roamingSegmentId = 0
                                 running = true
                                 appendNetworkEvent("开始监听网络事件")
                                 val interval = pingIntervalMs.safeInt(500, 100, 10_000)
@@ -12064,52 +11633,94 @@ private fun RoamingToolPage(onBack: () -> Unit) {
                                 job = scope.launch {
                                     launch {
                                         while (currentCoroutineContext().isActive) {
+                                            if (pausedForBackground) {
+                                                delay(500L)
+                                                continue
+                                            }
+                                            wifiSamples.clear()
+                                            wifiSamples.addAll(downsampleRoamingSignalForDisplay(rawWifiSamples, bucketMs = 500L).takeLast(4_000))
+                                            pingSamples.clear()
+                                            pingSamples.addAll(rawPingSamples.takeLast(4_000))
+                                            delay(500L)
+                                        }
+                                    }
+                                    launch {
+                                        while (currentCoroutineContext().isActive) {
+                                            if (pausedForBackground) {
+                                                delay(50L)
+                                                continue
+                                            }
                                             val tickAt = SystemClock.elapsedRealtime()
-                                            wifiSamples.add(readRoamingWifiSample(context.applicationContext, startNanos))
-                                            if (wifiSamples.size > 72_000) wifiSamples.removeAt(0)
+                                            rawWifiSamples.add(readRoamingWifiSample(context.applicationContext, startNanos, totalPausedMs, roamingSegmentId))
+                                            if (rawWifiSamples.size > 72_000) rawWifiSamples.removeAt(0)
                                             val spent = SystemClock.elapsedRealtime() - tickAt
                                             delay((ROAMING_WIFI_SAMPLE_INTERVAL_MS - spent).coerceAtLeast(1L))
                                         }
                                     }
                                     if (activeMode != RoamingTargetMode.EXTERNAL) launch {
                                         while (currentCoroutineContext().isActive) {
+                                            if (pausedForBackground) {
+                                                delay(50L)
+                                                continue
+                                            }
                                             val tickClock = SystemClock.elapsedRealtime()
-                                            val tickAt = (tickClock - startElapsedMs).coerceAtLeast(0L)
+                                            val segmentAtStart = roamingSegmentId
+                                            val tickAt = (tickClock - startElapsedMs - totalPausedMs).coerceAtLeast(0L)
                                             val gateway = if (isWifiNetworkReady(context.applicationContext, requireValidated = false)) readGatewayAddress(context.applicationContext) else null
                                             if (!gateway.isNullOrBlank()) {
                                                 val result = pingForRoaming(gateway, timeout)
-                                                pingSamples.add(RoamingPingSample(
+                                                if (pausedForBackground || roamingSegmentId != segmentAtStart) continue
+                                                rawPingSamples.add(RoamingPingSample(
                                                     timeText = SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()).format(Date()),
                                                     target = RoamingPingTarget.GATEWAY,
                                                     startedElapsedMs = tickAt,
-                                                    completedElapsedMs = (SystemClock.elapsedRealtime() - startElapsedMs).coerceAtLeast(tickAt),
+                                                    completedElapsedMs = (SystemClock.elapsedRealtime() - startElapsedMs - totalPausedMs).coerceAtLeast(tickAt),
                                                     attempted = true,
                                                     latencyMs = result.latencyMs,
-                                                    failureReason = result.failure
+                                                    failureReason = result.failure,
+                                                    segmentId = segmentAtStart
                                                 ))
-                                                if (pingSamples.size > 10_000) pingSamples.removeAt(0)
+                                                if (rawPingSamples.size > 10_000) rawPingSamples.removeAt(0)
                                             }
                                             delay((interval - (SystemClock.elapsedRealtime() - tickClock)).coerceAtLeast(1L))
                                         }
                                     }
                                     if (activeMode != RoamingTargetMode.GATEWAY) launch {
                                         while (currentCoroutineContext().isActive) {
+                                            if (pausedForBackground) {
+                                                delay(50L)
+                                                continue
+                                            }
                                             val tickClock = SystemClock.elapsedRealtime()
-                                            val tickAt = (tickClock - startElapsedMs).coerceAtLeast(0L)
+                                            val segmentAtStart = roamingSegmentId
+                                            val tickAt = (tickClock - startElapsedMs - totalPausedMs).coerceAtLeast(0L)
                                             if (isWifiNetworkReady(context.applicationContext, requireValidated = true)) {
                                                 val result = pingForRoaming(activeExternalTarget, timeout)
-                                                pingSamples.add(RoamingPingSample(
+                                                if (pausedForBackground || roamingSegmentId != segmentAtStart) continue
+                                                rawPingSamples.add(RoamingPingSample(
                                                     timeText = SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()).format(Date()),
                                                     target = RoamingPingTarget.EXTERNAL,
                                                     startedElapsedMs = tickAt,
-                                                    completedElapsedMs = (SystemClock.elapsedRealtime() - startElapsedMs).coerceAtLeast(tickAt),
+                                                    completedElapsedMs = (SystemClock.elapsedRealtime() - startElapsedMs - totalPausedMs).coerceAtLeast(tickAt),
                                                     attempted = true,
                                                     latencyMs = result.latencyMs,
-                                                    failureReason = result.failure
+                                                    failureReason = result.failure,
+                                                    segmentId = segmentAtStart
                                                 ))
-                                                if (pingSamples.size > 10_000) pingSamples.removeAt(0)
+                                                if (rawPingSamples.size > 10_000) rawPingSamples.removeAt(0)
                                             }
                                             delay((interval - (SystemClock.elapsedRealtime() - tickClock)).coerceAtLeast(1L))
+                                        }
+                                    }
+                                }
+                                job?.invokeOnCompletion { error ->
+                                    if (error != null) {
+                                        scope.launch {
+                                            if (running && !pausedForBackground) {
+                                                appendNetworkEvent("漫游任务异常结束：${error.message ?: error.javaClass.simpleName}")
+                                                saveCurrentRunIfNeeded(finalSave = true)
+                                                running = false
+                                            }
                                         }
                                     }
                                 }
@@ -12427,14 +12038,17 @@ private fun RoamingPingCanvas(
         }
         fun y(v: Int) = bottom - (v.coerceIn(0, axisMax) / axisMax.toFloat()) * h
         fun drawLatencyLine(target: RoamingPingTarget, color: Color) {
-            val path = Path()
-            var started = false
-            plot.filter { it.target == target }.forEach { sample ->
-                val latency = sample.latencyMs ?: return@forEach
-                if (!started) { path.moveTo(x(sample.startedElapsedMs), y(latency)); started = true }
-                else path.lineTo(x(sample.startedElapsedMs), y(latency))
+            plot.filter { it.target == target }.groupBy { it.segmentId }.values.forEach { segment ->
+                val path = Path()
+                var started = false
+                segment.forEach { sample ->
+                    sample.latencyMs?.let { latency ->
+                        if (!started) { path.moveTo(x(sample.startedElapsedMs), y(latency)); started = true }
+                        else path.lineTo(x(sample.startedElapsedMs), y(latency))
+                    }
+                }
+                if (started) drawPath(path, color, style = Stroke(width = 3f, cap = StrokeCap.Round))
             }
-            drawPath(path, color, style = Stroke(width = 3f, cap = StrokeCap.Round))
         }
         drawLatencyLine(RoamingPingTarget.GATEWAY, Blue)
         drawLatencyLine(RoamingPingTarget.EXTERNAL, Purple)
@@ -12524,6 +12138,7 @@ private fun RoamingSignalCanvas(
                 moveTo(x(before.elapsedMs), yRssi(beforeRssi))
                 lineTo(x(after.elapsedMs), yRssi(afterRssi))
             }
+            if (before.segmentId != after.segmentId) return@forEach
             val switched = !beforeBssid.equals(afterBssid, ignoreCase = true)
             drawPath(
                 segment,
@@ -14172,27 +13787,6 @@ private fun BottomNav(selectedTab: MainTab, onSelect: (MainTab) -> Unit) {
         }
     }
 }
-
-private fun startForegroundNotice(context: Context, text: String) {
-    val intent = Intent(context, TestForegroundService::class.java)
-        .setAction(TestForegroundService.ACTION_START)
-        .putExtra(TestForegroundService.EXTRA_TEXT, text)
-    ContextCompat.startForegroundService(context, intent)
-}
-
-private fun updateForegroundNotice(context: Context, text: String) {
-    val intent = Intent(context, TestForegroundService::class.java)
-        .setAction(TestForegroundService.ACTION_UPDATE)
-        .putExtra(TestForegroundService.EXTRA_TEXT, text)
-    ContextCompat.startForegroundService(context, intent)
-}
-
-private fun stopForegroundNotice(context: Context) {
-    val intent = Intent(context, TestForegroundService::class.java)
-        .setAction(TestForegroundService.ACTION_STOP)
-    runCatching { context.startService(intent) }
-}
-
 
 private fun compactLogText(text: String): String {
     return text

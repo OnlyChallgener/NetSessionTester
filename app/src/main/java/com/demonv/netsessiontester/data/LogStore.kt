@@ -12,29 +12,33 @@ class LogStore(private val context: Context) {
     private val file: File get() = File(context.filesDir, "run_logs_v6.jsonl")
 
     suspend fun append(line: LogLine) = withContext(Dispatchers.IO) {
-        file.appendText(line.toJson().toString() + "\n")
-        trimIfNeeded()
+        synchronized(fileLock) {
+            file.appendText(line.toJson().toString() + "\n")
+            trimIfNeeded()
+        }
     }
 
     suspend fun load(limit: Int = 500): List<LogLine> = withContext(Dispatchers.IO) {
-        if (!file.exists()) return@withContext emptyList()
-        file.readLines().takeLast(limit).mapNotNull { raw ->
-            runCatching { JSONObject(raw).toLogLine() }.getOrNull()
+        synchronized(fileLock) {
+            if (!file.exists()) return@synchronized emptyList()
+            file.readLines().takeLast(limit).mapNotNull { raw ->
+                runCatching { JSONObject(raw).toLogLine() }.getOrNull()
+            }
         }
     }
 
     suspend fun clear() = withContext(Dispatchers.IO) {
-        if (file.exists()) file.delete()
+        synchronized(fileLock) { if (file.exists()) file.delete() }
     }
 
     fun clearNow() {
-        if (file.exists()) file.delete()
+        synchronized(fileLock) { if (file.exists()) file.delete() }
     }
 
-    fun sizeKb(): Int {
-        if (!file.exists()) return 0
+    fun sizeKb(): Int = synchronized(fileLock) {
+        if (!file.exists()) return@synchronized 0
         val kb = (file.length() + 1023L) / 1024L
-        return kb.coerceAtLeast(0L).toInt()
+        kb.coerceAtLeast(0L).toInt()
     }
 
     private fun trimIfNeeded(maxLines: Int = 500) {
@@ -55,4 +59,8 @@ class LogStore(private val context: Context) {
         level = runCatching { LogLevel.valueOf(optString("level", LogLevel.INFO.name)) }.getOrDefault(LogLevel.INFO),
         text = optString("text", "")
     )
+
+    private companion object {
+        val fileLock = Any()
+    }
 }

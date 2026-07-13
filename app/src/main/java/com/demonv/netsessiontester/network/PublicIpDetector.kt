@@ -137,12 +137,18 @@ object PublicIpDetector {
                 val jobs = sources.map { url ->
                     launch(Dispatchers.IO) {
                         results.trySend(
-                            runCatching {
-                                fetchIp(
+                            try {
+                                Result.success(fetchIp(
                                     url = url,
                                     network = network,
                                     expectIpv6 = expectIpv6
-                                )
+                                ))
+                            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                                throw cancelled
+                            } catch (error: Error) {
+                                throw error
+                            } catch (error: Throwable) {
+                                Result.failure(error)
                             }
                         )
                     }

@@ -28,45 +28,47 @@ class HistoryStore(private val context: Context) {
     private val zone: ZoneId get() = ZoneId.systemDefault()
 
     suspend fun append(summary: SessionSummary) = withContext(Dispatchers.IO) {
-        file.appendText(summary.toJson().toString() + "\n")
-        trimByPeriodLimits()
+        synchronized(fileLock) {
+            file.appendText(summary.toJson().toString() + "\n")
+            trimByPeriodLimits()
+        }
     }
 
     suspend fun clear() = withContext(Dispatchers.IO) {
-        if (file.exists()) file.delete()
+        synchronized(fileLock) { if (file.exists()) file.delete() }
     }
 
     suspend fun load(limit: Int = 30): List<SessionSummary> = withContext(Dispatchers.IO) {
-        loadAllInternal()
-            .sortedByDescending { it.startedAtEpochMs }
-            .take(limit.coerceIn(10, 100))
+        synchronized(fileLock) { loadAllInternal().sortedByDescending { it.startedAtEpochMs }.take(limit.coerceIn(10, 100)) }
     }
 
     suspend fun load(period: String, limit: Int = 30): List<SessionSummary> = withContext(Dispatchers.IO) {
-        loadAllInternal()
-            .filterByPeriod(period)
-            .sortedByDescending { it.startedAtEpochMs }
-            .take(limit.coerceIn(10, 100))
+        synchronized(fileLock) { loadAllInternal().filterByPeriod(period).sortedByDescending { it.startedAtEpochMs }.take(limit.coerceIn(10, 100)) }
     }
 
     suspend fun loadAll(): List<SessionSummary> = withContext(Dispatchers.IO) {
-        loadAllInternal().sortedByDescending { it.startedAtEpochMs }
+        synchronized(fileLock) { loadAllInternal().sortedByDescending { it.startedAtEpochMs } }
     }
 
     suspend fun updateRemark(id: String, remark: String) = withContext(Dispatchers.IO) {
-        val all = loadAllInternal()
-        val updated = all.map { item ->
-            if (item.id == id) item.copy(remark = remark.take(120)) else item
+        synchronized(fileLock) {
+            val all = loadAllInternal()
+            val updated = all.map { item ->
+                if (item.id == id) item.copy(remark = remark.take(120)) else item
+            }
+            writeAll(updated)
         }
-        writeAll(updated)
     }
 
     suspend fun delete(id: String) = withContext(Dispatchers.IO) {
-        val updated = loadAllInternal().filterNot { it.id == id }
-        writeAll(updated)
+        synchronized(fileLock) {
+            val updated = loadAllInternal().filterNot { it.id == id }
+            writeAll(updated)
+        }
     }
 
     suspend fun counts(): HistoryCounts = withContext(Dispatchers.IO) {
+        synchronized(fileLock) {
         val all = loadAllInternal()
         val today = LocalDate.now(zone)
         val yesterday = today.minusDays(1)
@@ -91,21 +93,22 @@ class HistoryStore(private val context: Context) {
             total = all.size,
             sizeKb = sizeKb()
         )
+        }
     }
 
     suspend fun trim(limit: Int) = withContext(Dispatchers.IO) {
-        trimByPeriodLimits()
+        synchronized(fileLock) { trimByPeriodLimits() }
     }
 
-    fun sizeKb(): Int {
-        if (!file.exists()) return 0
+    fun sizeKb(): Int = synchronized(fileLock) {
+        if (!file.exists()) return@synchronized 0
         val kb = (file.length() + 1023L) / 1024L
-        return kb.coerceAtLeast(0L).toInt()
+        kb.coerceAtLeast(0L).toInt()
     }
 
-    fun count(): Int {
-        if (!file.exists()) return 0
-        return file.useLines { lines -> lines.count() }
+    fun count(): Int = synchronized(fileLock) {
+        if (!file.exists()) return@synchronized 0
+        file.useLines { lines -> lines.count() }
     }
 
 
@@ -232,5 +235,9 @@ class HistoryStore(private val context: Context) {
             averageConnectLatencyMs = optInt("avgConnectLatencyMs"),
             errorSummary = errors
         )
+    }
+
+    private companion object {
+        val fileLock = Any()
     }
 }

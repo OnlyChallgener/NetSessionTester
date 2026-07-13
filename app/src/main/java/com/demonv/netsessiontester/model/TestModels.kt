@@ -25,13 +25,15 @@ enum class RunPhase(val label: String) {
 }
 
 data class ReleaseUiState(
+    val runId: Long = 0L,
     val visible: Boolean = false,
     val total: Int = 0,
     val closed: Int = 0,
     val speedPerSecond: Int = 0,
     val elapsedMs: Long = 0L,
     val message: String = "",
-    val finished: Boolean = false
+    val finished: Boolean = false,
+    val finishedAtEpochMs: Long = 0L
 ) {
     val progress: Float
         get() = if (total <= 0) 1f else (closed.toFloat() / total.toFloat()).coerceIn(0f, 1f)
