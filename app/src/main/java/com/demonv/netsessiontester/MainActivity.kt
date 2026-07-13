@@ -2695,6 +2695,8 @@ internal data class PingStreamEvent(
     val timeEpochMs: Long = System.currentTimeMillis()
 )
 
+internal const val PING_STREAM_STALL_REASON = "连续5秒无Ping输出"
+
 internal suspend fun resolvePingTarget(host: String, protocol: PingProtocolMode): ResolvedPingTarget = withContext(Dispatchers.IO) {
     val target = normalizeNetworkTargetInput(host, "223.5.5.5").host
     runCatching {
@@ -2865,13 +2867,29 @@ internal suspend fun streamIcmpPingResolved(
         var emitted = 0
         var lastSeq = 0
         var sawPingLine = false
+        var lastOutputAt = SystemClock.elapsedRealtime()
         val seqRegex = Regex("(?:icmp_)?seq[= ](\\d+)")
         val timeRegex = Regex("time[=<]([0-9.]+)\\s*ms")
         return try {
             process = ProcessBuilder(command).redirectErrorStream(true).start()
             val reader = process!!.inputStream.bufferedReader()
             while (currentCoroutineContext().isActive) {
+                if (!reader.ready()) {
+                    if (process?.isAlive != true) break
+                    if (SystemClock.elapsedRealtime() - lastOutputAt >= PING_STREAM_STALL_TIMEOUT_MS) {
+                        onEvent(PingStreamEvent(null, PING_STREAM_STALL_REASON))
+                        emitted++
+                        runCatching { process?.destroy() }
+                        if (process?.waitFor(200L, TimeUnit.MILLISECONDS) == false) {
+                            runCatching { process?.destroyForcibly() }
+                        }
+                        break
+                    }
+                    delay(PING_STREAM_READ_POLL_MS)
+                    continue
+                }
                 val line = reader.readLine() ?: break
+                lastOutputAt = SystemClock.elapsedRealtime()
                 val lower = line.lowercase()
                 if (lower.contains("unknown host") || lower.contains("bad address")) {
                     onEvent(PingStreamEvent(null, "解析失败"))
@@ -2899,7 +2917,17 @@ internal suspend fun streamIcmpPingResolved(
             }
             if (currentCoroutineContext().isActive) {
                 val waitMs = (timeoutMs + intervalMs + 1500L).coerceAtMost(12_000L)
-                process!!.waitFor(waitMs, TimeUnit.MILLISECONDS)
+                val waitDeadline = SystemClock.elapsedRealtime() + waitMs
+                while (process?.isAlive == true && currentCoroutineContext().isActive && SystemClock.elapsedRealtime() < waitDeadline) {
+                    if (process?.waitFor(50L, TimeUnit.MILLISECONDS) == true) break
+                }
+                currentCoroutineContext().ensureActive()
+                if (process?.isAlive == true) {
+                    runCatching { process?.destroy() }
+                    if (process?.waitFor(200L, TimeUnit.MILLISECONDS) == false) {
+                        runCatching { process?.destroyForcibly() }
+                    }
+                }
                 if (sawPingLine && emitted < maxCount) {
                     repeat((maxCount - emitted).coerceAtMost(500)) {
                         onEvent(PingStreamEvent(null, "超时"))
@@ -2927,6 +2955,9 @@ internal suspend fun streamIcmpPingResolved(
         runStream(listOf("ping", "-6", "-i", intervalSec, "-c", maxCount.toString(), "-W", timeoutSec.toString(), address)).first
     }
 }
+
+private const val PING_STREAM_STALL_TIMEOUT_MS = 5_000L
+private const val PING_STREAM_READ_POLL_MS = 25L
 
 private fun recommendedPingTimeoutMsForInterval(intervalMs: Long): Int = when {
     intervalMs <= 30L -> 300

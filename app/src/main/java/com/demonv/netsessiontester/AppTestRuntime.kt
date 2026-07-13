@@ -669,10 +669,22 @@ object AppTestRuntime {
             sent.incrementAndGet()
             if (latency == null) {
                 lost.incrementAndGet()
-                if (consecutiveLossStartedAt == 0L) consecutiveLossStartedAt = SystemClock.elapsedRealtime()
-                if (!autoStop && SystemClock.elapsedRealtime() - consecutiveLossStartedAt >= 5_000L) {
+                val failureObservedAt = SystemClock.elapsedRealtime()
+                if (consecutiveLossStartedAt == 0L) {
+                    consecutiveLossStartedAt = if (failure == PING_STREAM_STALL_REASON) {
+                        failureObservedAt - 5_000L
+                    } else {
+                        failureObservedAt
+                    }
+                }
+                if (!autoStop && failureObservedAt - consecutiveLossStartedAt >= 5_000L) {
                     autoStop = true
-                    pendingLogs += PingLogEntry(target = target, protocol = resolved.displayProtocol, latencyMs = null, status = "中断", note = "连续5秒100%丢包，已自动停止并保存记录", sessionId = sessionId, elapsedMs = elapsed)
+                    val stopNote = if (failure == PING_STREAM_STALL_REASON) {
+                        "连续5秒没有收到Ping进程输出，已结束假运行并保存记录"
+                    } else {
+                        "连续5秒100%丢包，已自动停止并保存记录"
+                    }
+                    pendingLogs += PingLogEntry(target = target, protocol = resolved.displayProtocol, latencyMs = null, status = "中断", note = stopNote, sessionId = sessionId, elapsedMs = elapsed)
                     pingJob?.cancel(CancellationException("连续5秒100%丢包"))
                 }
             } else {
