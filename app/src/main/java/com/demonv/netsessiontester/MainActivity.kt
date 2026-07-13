@@ -50,7 +50,10 @@ import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.calculateCentroid
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -135,9 +138,11 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.composed
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
@@ -7652,16 +7657,39 @@ private fun CombinedSessionGrowthChart(series: List<SessionChartSeries>) {
         }.filter { it.points.isNotEmpty() }
     }
     val allPoints = remember(renderedSeries) { renderedSeries.flatMap { it.points }.sortedBy { it.elapsedSec } }
-    val minX = 0
+    val fullMinX = 0
     val maxXRaw = allPoints.maxOfOrNull { it.elapsedSec } ?: 1
-    val maxX = maxOf(1, maxXRaw)
+    val fullMaxX = maxOf(1, maxXRaw)
+    val fullSpanX = (fullMaxX - fullMinX).coerceAtLeast(1)
+    var zoomSpanX by remember { mutableStateOf<Int?>(null) }
+    var viewEndX by remember { mutableStateOf(fullMaxX) }
+    var chartWidthPx by remember { mutableStateOf(1f) }
+    val spanX = (zoomSpanX ?: fullSpanX).coerceIn(1, fullSpanX)
+    val minViewEndX = fullMinX + spanX
+    val maxViewEndX = fullMaxX.coerceAtLeast(minViewEndX)
+    val effectiveViewEndX = viewEndX.coerceIn(minViewEndX, maxViewEndX)
+    val minX = effectiveViewEndX - spanX
+    val maxX = effectiveViewEndX
+    val visibleSeries = remember(renderedSeries, minX, maxX) {
+        renderedSeries.map { item -> item.copy(points = item.points.filter { it.elapsedSec in minX..maxX }) }
+    }
+    val visiblePoints = remember(visibleSeries) { visibleSeries.flatMap { it.points }.sortedBy { it.elapsedSec } }
     val maxSessionY = remember(allPoints) { sessionYAxisMax(allPoints.maxOfOrNull { it.active } ?: 0) }
     val step = chartXAxisStep(maxX - minX)
     val yLabels = remember(maxSessionY) { axisLabels(maxSessionY) }
     val xLabels = remember(minX, maxX, step) { timeLabels(minX, maxX, step) }
-    val stageRanges = remember(allPoints, minX, maxX) { buildSessionStageRanges(allPoints, minX, maxX) }
-    val failSummary = remember(allPoints) { failureIntervalSummary(allPoints) }
+    val stageRanges = remember(visiblePoints, minX, maxX) { buildSessionStageRanges(visiblePoints, minX, maxX) }
+    val failSummary = remember(visiblePoints) { failureIntervalSummary(visiblePoints) }
     val latest = allPoints.lastOrNull()
+
+    LaunchedEffect(allPoints.firstOrNull()?.elapsedSec, allPoints.firstOrNull()?.protocol) {
+        zoomSpanX = null
+        viewEndX = fullMaxX
+    }
+    LaunchedEffect(fullMaxX, spanX) {
+        if (zoomSpanX == null) viewEndX = fullMaxX
+        else viewEndX = viewEndX.coerceIn(fullMinX + spanX, fullMaxX.coerceAtLeast(fullMinX + spanX))
+    }
 
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -7697,6 +7725,26 @@ private fun CombinedSessionGrowthChart(series: List<SessionChartSeries>) {
                     .height(163.dp)
                     .background(Color(0xFFF8FAFC), ShapeS)
                     .padding(6.dp)
+                    .onSizeChanged { chartWidthPx = it.width.toFloat().coerceAtLeast(1f) }
+                    .chartGestureModifier(
+                        onHorizontalPan = { dragAmount ->
+                            val deltaX = (dragAmount / chartWidthPx.coerceAtLeast(1f) * spanX).toInt()
+                            viewEndX = (viewEndX - deltaX).coerceIn(minViewEndX, maxViewEndX)
+                        },
+                        onPinchTransform = { centroidX, panX, zoom ->
+                            val width = chartWidthPx.coerceAtLeast(1f)
+                            val focalRatio = (centroidX / width).coerceIn(0f, 1f)
+                            val focalX = minX + (spanX * focalRatio).toInt()
+                            val newSpan = (spanX / zoom.coerceIn(0.25f, 4f)).toInt().coerceIn(1, fullSpanX)
+                            zoomSpanX = newSpan
+                            val newEnd = focalX + (newSpan * (1f - focalRatio)).toInt() - (panX / width * newSpan).toInt()
+                            viewEndX = newEnd.coerceIn(fullMinX + newSpan, fullMaxX.coerceAtLeast(fullMinX + newSpan))
+                        },
+                        onDoubleTap = {
+                            zoomSpanX = null
+                            viewEndX = fullMaxX
+                        }
+                    )
             ) {
                 val w = size.width
                 val h = size.height
@@ -7719,8 +7767,8 @@ private fun CombinedSessionGrowthChart(series: List<SessionChartSeries>) {
                     drawLine(Border.copy(alpha = 0.55f), Offset(0f, y), Offset(w, y), strokeWidth = 1f)
                 }
 
-                renderedSeries.forEach { item ->
-                    val ordered = item.points.sortedBy { it.elapsedSec }
+                visibleSeries.forEach { item ->
+                    val ordered = item.points
                     if (ordered.size > 1) {
                         val path = Path()
                         ordered.forEachIndexed { index, point ->
@@ -7735,8 +7783,8 @@ private fun CombinedSessionGrowthChart(series: List<SessionChartSeries>) {
                     }
                 }
 
-                val maxFailureDelta = renderedSeries.maxOfOrNull { item ->
-                    val ordered = item.points.sortedBy { it.elapsedSec }
+                val maxFailureDelta = visibleSeries.maxOfOrNull { item ->
+                    val ordered = item.points
                     var previous = ordered.firstOrNull()?.failure ?: 0
                     var maxDelta = 0
                     ordered.drop(1).forEach { point ->
@@ -7746,13 +7794,13 @@ private fun CombinedSessionGrowthChart(series: List<SessionChartSeries>) {
                     maxDelta
                 }?.coerceAtLeast(1) ?: 1
 
-                renderedSeries.forEachIndexed { seriesIndex, item ->
-                    val ordered = item.points.sortedBy { it.elapsedSec }
+                visibleSeries.forEachIndexed { seriesIndex, item ->
+                    val ordered = item.points
                     var previousFailure = ordered.firstOrNull()?.failure ?: 0
                     ordered.drop(1).forEach { point ->
                         val delta = (point.failure - previousFailure).coerceAtLeast(0)
                         if (delta > 0) {
-                            val xOffset = if (renderedSeries.size > 1) (seriesIndex * 3f - 1.5f) else 0f
+                            val xOffset = if (visibleSeries.size > 1) (seriesIndex * 3f - 1.5f) else 0f
                             val barHeight = (6f + 20f * delta.toFloat() / maxFailureDelta.toFloat()).coerceIn(7f, 26f)
                             val x = xOfSec(point.elapsedSec) + xOffset
                             drawLine(
@@ -12795,6 +12843,98 @@ private fun InfoMetricTile(
 }
 
 
+private enum class ChartGestureMode { Undecided, VerticalScroll, HorizontalPan, PinchZoom, Finished }
+
+private fun Modifier.chartGestureModifier(
+    onHorizontalPan: (Float) -> Unit,
+    onPinchTransform: (centroidX: Float, panX: Float, zoom: Float) -> Unit,
+    onTap: ((Offset) -> Unit)? = null,
+    onDoubleTap: (() -> Unit)? = null
+): Modifier = composed {
+    val currentHorizontalPan by rememberUpdatedState(onHorizontalPan)
+    val currentPinchTransform by rememberUpdatedState(onPinchTransform)
+    val currentTap by rememberUpdatedState(onTap)
+    val currentDoubleTap by rememberUpdatedState(onDoubleTap)
+
+    pointerInput(Unit) {
+        var lastTapAt = 0L
+        var lastTapPosition = Offset.Unspecified
+        awaitEachGesture {
+            var event = awaitPointerEvent()
+            while (event.changes.none { it.pressed }) event = awaitPointerEvent()
+
+            val down = event.changes.first { it.pressed }
+            val downPosition = down.position
+            var lastPosition = downPosition
+            var upPosition = downPosition
+            var totalDx = 0f
+            var totalDy = 0f
+            var mode = ChartGestureMode.Undecided
+            var hadMultiplePointers = false
+
+            while (event.changes.any { it.pressed }) {
+                val pressed = event.changes.filter { it.pressed }
+                if (pressed.size >= 2) {
+                    hadMultiplePointers = true
+                    mode = ChartGestureMode.PinchZoom
+                    val zoom = event.calculateZoom()
+                    val pan = event.calculatePan()
+                    val centroid = event.calculateCentroid(useCurrent = true)
+                    if (zoom != 1f || pan.x != 0f) {
+                        currentPinchTransform(centroid.x, pan.x, zoom)
+                    }
+                    event.changes.forEach { change ->
+                        if (change.pressed) change.consume()
+                    }
+                } else if (hadMultiplePointers) {
+                    // A pinch stays a pinch until every pointer is up; do not turn the remaining finger into a pan.
+                    mode = ChartGestureMode.Finished
+                } else {
+                    val change = pressed.firstOrNull()
+                    if (change != null) {
+                        val delta = change.position - lastPosition
+                        lastPosition = change.position
+                        upPosition = change.position
+                        totalDx += delta.x
+                        totalDy += delta.y
+                        if (mode == ChartGestureMode.Undecided &&
+                            kotlin.math.hypot(totalDx.toDouble(), totalDy.toDouble()) > viewConfiguration.touchSlop.toDouble()
+                        ) {
+                            mode = if (kotlin.math.abs(totalDx) > kotlin.math.abs(totalDy) * 1.2f) {
+                                ChartGestureMode.HorizontalPan
+                            } else {
+                                ChartGestureMode.VerticalScroll
+                            }
+                        }
+                        if (mode == ChartGestureMode.HorizontalPan) {
+                            currentHorizontalPan(delta.x)
+                            change.consume()
+                        }
+                    }
+                }
+                event = awaitPointerEvent()
+            }
+
+            if (mode == ChartGestureMode.Undecided && !hadMultiplePointers) {
+                val tapAt = event.changes.maxOfOrNull { it.uptimeMillis } ?: down.uptimeMillis
+                val isDoubleTap = lastTapAt > 0L &&
+                    tapAt - lastTapAt in viewConfiguration.doubleTapMinTimeMillis..viewConfiguration.doubleTapTimeoutMillis &&
+                    lastTapPosition.isSpecified &&
+                    (upPosition - lastTapPosition).getDistance() <= viewConfiguration.doubleTapSlop
+                if (isDoubleTap) {
+                    currentDoubleTap?.invoke()
+                    lastTapAt = 0L
+                    lastTapPosition = Offset.Unspecified
+                } else {
+                    currentTap?.invoke(upPosition)
+                    lastTapAt = tapAt
+                    lastTapPosition = upPosition
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun PingCompactChartCard(
     pingPoints: List<PingPoint>,
@@ -13026,55 +13166,51 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
                 modifier = Modifier
                     .fillMaxSize()
                     .onSizeChanged { chartWidthPx = it.width.toFloat().coerceAtLeast(1f) }
-                    .pointerInput(visible, viewStartMs, effectiveViewEndMs, windowSpanMs, latestMs) {
-                        detectTapGestures(
-                            onDoubleTap = {
-                                if (running) autoFollow = true
-                                else {
-                                    stoppedZoomSpanMs = fullSpanMs
-                                    viewEndMs = latestMs.coerceAtLeast(fullSpanMs)
-                                }
-                            },
-                            onTap = { offset ->
-                                val left = 82f
-                                val right = size.width - 34f
-                                val plotW = (right - left).coerceAtLeast(1f)
-                                val x = offset.x.coerceIn(left, right)
-                                val targetMs = viewStartMs + (((x - left) / plotW) * windowSpanMs).toLong()
-                                selectedPoint = visible.minByOrNull { kotlin.math.abs(it.elapsedMs - targetMs) }
-                            }
-                        )
-                    }
-                    .pointerInput(latestMs, earliestMs, windowSpanMs, chartWidthPx, running) {
-                        detectHorizontalDragGestures { _, dragAmount ->
-                            val left = 82f
-                            val rightPad = 34f
-                            val plotW = (chartWidthPx - left - rightPad).coerceAtLeast(1f)
+                    .chartGestureModifier(
+                        onHorizontalPan = { dragAmount ->
+                            val plotW = (chartWidthPx - 82f - 34f).coerceAtLeast(1f)
                             val deltaMs = (dragAmount / plotW * windowSpanMs).toLong()
                             autoFollow = false
                             val minEnd = (earliestMs + windowSpanMs).coerceAtLeast(windowSpanMs)
                             val maxEnd = latestMs.coerceAtLeast(minEnd)
                             viewEndMs = (viewEndMs - deltaMs).coerceIn(minEnd, maxEnd)
-                        }
-                    }
-                    .pointerInput(running, fullSpanMs, windowSpanMs, latestMs, chartWidthPx) {
-                        if (!running) {
-                            detectTransformGestures { centroid, pan, zoom, _ ->
-                                val left = 82f
-                                val rightPad = 34f
-                                val plotW = (chartWidthPx - left - rightPad).coerceAtLeast(1f)
-                                val focalRatio = ((centroid.x - left) / plotW).coerceIn(0f, 1f)
+                        },
+                        onPinchTransform = { centroidX, panX, zoom ->
+                            val plotW = (chartWidthPx - 82f - 34f).coerceAtLeast(1f)
+                            if (running) {
+                                val deltaMs = (panX / plotW * windowSpanMs).toLong()
+                                autoFollow = false
+                                val minEnd = (earliestMs + windowSpanMs).coerceAtLeast(windowSpanMs)
+                                val maxEnd = latestMs.coerceAtLeast(minEnd)
+                                viewEndMs = (viewEndMs - deltaMs).coerceIn(minEnd, maxEnd)
+                            } else {
+                                val focalRatio = ((centroidX - 82f) / plotW).coerceIn(0f, 1f)
                                 val focalMs = viewStartMs + (windowSpanMs * focalRatio).toLong()
                                 val newSpan = (windowSpanMs / zoom.coerceIn(0.25f, 4.0f)).toLong().coerceIn(1_000L, fullSpanMs)
                                 stoppedZoomSpanMs = newSpan
-                                val newEnd = (focalMs + ((newSpan) * (1f - focalRatio)).toLong() - (pan.x / plotW * newSpan).toLong())
+                                val newEnd = focalMs + (newSpan * (1f - focalRatio)).toLong() - (panX / plotW * newSpan).toLong()
                                 val minEnd = (earliestMs + newSpan).coerceAtLeast(newSpan)
                                 val maxEnd = latestMs.coerceAtLeast(minEnd)
                                 viewEndMs = newEnd.coerceIn(minEnd, maxEnd)
                                 autoFollow = false
                             }
+                        },
+                        onTap = { offset ->
+                            val left = 82f
+                            val right = chartWidthPx - 34f
+                            val plotW = (right - left).coerceAtLeast(1f)
+                            val x = offset.x.coerceIn(left, right)
+                            val targetMs = viewStartMs + (((x - left) / plotW) * windowSpanMs).toLong()
+                            selectedPoint = visible.minByOrNull { kotlin.math.abs(it.elapsedMs - targetMs) }
+                        },
+                        onDoubleTap = {
+                            if (running) autoFollow = true
+                            else {
+                                stoppedZoomSpanMs = fullSpanMs
+                                viewEndMs = latestMs.coerceAtLeast(fullSpanMs)
+                            }
                         }
-                    }
+                    )
             ) {
                 val left = 82f
                 val top = 42f
