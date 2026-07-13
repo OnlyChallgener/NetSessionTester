@@ -91,6 +91,7 @@ object AppTestRuntime {
     @Volatile private var pingJob: Job? = null
     @Volatile private var pingRestartForConnectionJob: Job? = null
     @Volatile private var pingLogSaveJob: Job? = null
+    @Volatile private var pingBackgroundStopJob: Job? = null
     @Volatile private var pingCoupledToConnection = false
     @Volatile private var networkWatchJob: Job? = null
     @Volatile private var wakeLock: PowerManager.WakeLock? = null
@@ -511,6 +512,8 @@ object AppTestRuntime {
     ): Boolean {
         val context = appContext ?: return false
         if (pingJob?.isActive == true) return false
+        pingBackgroundStopJob?.cancel()
+        pingBackgroundStopJob = null
         val sessionId = System.currentTimeMillis()
         pingCoupledToConnection = coupledToConnection
         if (connectionJob?.isActive != true) {
@@ -612,7 +615,11 @@ object AppTestRuntime {
 
         fun flushBucket(bucketMs: Long) {
             val old = _pingState.value
-            if (old.sessionId != sessionId) return
+            if (old.sessionId != sessionId || !old.running) {
+                bucketSamples.clear()
+                pendingLogs.clear()
+                return
+            }
             val valid = bucketSamples.mapNotNull { it }
             val point = if (bucketSamples.isEmpty()) null else PingPoint(
                 elapsedSec = (bucketMs / 1_000L).toInt(),
@@ -793,7 +800,7 @@ object AppTestRuntime {
 
     private fun finishPingSession(sessionId: Long, label: String) {
         val old = _pingState.value
-        if (old.sessionId != sessionId) return
+        if (old.sessionId != sessionId || !old.running) return
         val ended = System.currentTimeMillis()
         val duration = if (old.startedAtElapsedMs > 0L) (SystemClock.elapsedRealtime() - old.startedAtElapsedMs).coerceAtLeast(0L) else 0L
         val finalLog = PingLogEntry(target = old.target, protocol = old.protocol.label, latencyMs = null, status = "停止", note = "共${old.sent}次 · 时长${duration / 1_000L}秒", sessionId = sessionId, elapsedMs = duration)
@@ -813,8 +820,37 @@ object AppTestRuntime {
 
     fun stopPing(reason: String) {
         val job = pingJob ?: return
-        appendRuntimePingLog(PingLogEntry(target = _pingState.value.target.ifBlank { "Ping" }, protocol = _pingState.value.protocol.label, latencyMs = null, status = "中断", note = reason, sessionId = _pingState.value.sessionId, elapsedMs = _pingState.value.durationMs))
+        val snapshot = _pingState.value
+        appendRuntimePingLog(PingLogEntry(target = snapshot.target.ifBlank { "Ping" }, protocol = snapshot.protocol.label, latencyMs = null, status = "中断", note = reason, sessionId = snapshot.sessionId, elapsedMs = snapshot.durationMs))
         job.cancel(CancellationException(reason))
+        // Do not leave the UI in a ghost-running state while a platform ping/socket
+        // call is still unwinding on an IO thread. The job's finally block is
+        // idempotent and will not append a second stop record.
+        finishPingSession(snapshot.sessionId, reason)
+    }
+
+    fun onAppForegroundChanged(inForeground: Boolean) {
+        pingBackgroundStopJob?.cancel()
+        pingBackgroundStopJob = null
+        if (inForeground || pingJob?.isActive != true || connectionJob?.isActive == true || connectionFinishing.get()) return
+        val sessionId = _pingState.value.sessionId
+        pingBackgroundStopJob = scope.launch {
+            try {
+                delay(PING_BACKGROUND_GRACE_MS)
+                val state = _pingState.value
+                if (
+                    state.running &&
+                    state.sessionId == sessionId &&
+                    pingJob?.isActive == true &&
+                    connectionJob?.isActive != true &&
+                    !connectionFinishing.get()
+                ) {
+                    stopPing("APP进入后台超过5秒")
+                }
+            } finally {
+                pingBackgroundStopJob = null
+            }
+        }
     }
 
     fun clearPing() {
@@ -838,6 +874,7 @@ object AppTestRuntime {
     private const val CONNECTION_UI_THROTTLE_MS = 500L
     private const val PING_UI_BUCKET_MS = 500L
     private const val PING_DISK_SAVE_INTERVAL_MS = 2_000L
+    private const val PING_BACKGROUND_GRACE_MS = 5_000L
     private const val PING_WAKE_LOCK_TIMEOUT_MS = 6L * 60L * 60L * 1_000L
     private const val CONNECTION_WAKE_LOCK_TIMEOUT_MS = 6L * 60L * 60L * 1_000L
 }

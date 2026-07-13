@@ -3199,9 +3199,13 @@ private fun NetSessionTesterApp() {
             when (event) {
                 Lifecycle.Event.ON_START -> {
                     appInForeground = true
+                    AppTestRuntime.onAppForegroundChanged(true)
                     networkInfoExpanded = false
                 }
-                Lifecycle.Event.ON_STOP -> appInForeground = false
+                Lifecycle.Event.ON_STOP -> {
+                    appInForeground = false
+                    AppTestRuntime.onAppForegroundChanged(false)
+                }
                 else -> Unit
             }
         }
