@@ -3765,6 +3765,37 @@ private fun NetSessionTesterApp() {
         lastChartSampleAt = lastChartSampleAt + (stats.protocol to now)
     }
 
+    LaunchedEffect(runtimeConnectionState.revision) {
+        if (runtimeConnectionState.revision <= 0L) return@LaunchedEffect
+        val previousPhase = state.runPhase
+        val previousV4 = state.ipv4Stats
+        val previousV6 = state.ipv6Stats
+        currentTestConfig = runtimeConnectionState.config
+        currentStartedAt = runtimeConnectionState.startedAtEpochMs
+        state = runtimeConnectionState.ui.copy(
+            resolveResult = state.resolveResult,
+            history = state.history
+        )
+        if (previousV4 != state.ipv4Stats) recordChartPoint(state.ipv4Stats)
+        if (previousV6 != state.ipv6Stats) recordChartPoint(state.ipv6Stats)
+        if (previousPhase != state.runPhase && state.runPhase in listOf(RunPhase.Finished, RunPhase.Failed)) {
+            refreshHistory()
+        }
+        if (state.isAdding || state.runPhase == RunPhase.Releasing) {
+            showRunLogDetail = false
+            appToolPage = AppToolPage.NONE
+            selectedTab = MainTab.TEST
+        }
+    }
+
+    fun ensureNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+
     fun safePingIntervalMs(): Long = pingIntervalSetting.toLongOrNull()?.coerceIn(30L, 60_000L) ?: 1_000L
 
     fun safePingTimeoutMs(): Int = pingTimeoutSetting.toIntOrNull()?.coerceIn(300, 10_000) ?: 1_000
@@ -3835,14 +3866,6 @@ private fun NetSessionTesterApp() {
         displayPingLogCount = next.size
         persistPingLogs(next)
         scope.launch { snackbarHostState.showSnackbar("已删除 1 条 Ping 历史") }
-    }
-
-    fun ensureNotificationPermission() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
-        ) {
-            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-        }
     }
 
     fun buildConfig(): SessionConfig? {
@@ -5534,29 +5557,6 @@ private fun TestPage(
         if (pingFocusRequest <= 0) return@LaunchedEffect
         val pingIndex = visibleOrder.indexOf("ping")
         if (pingIndex >= 0) listState.animateScrollToItem(pingIndex + 1)
-    }
-
-    LaunchedEffect(runtimeConnectionState.revision) {
-        if (runtimeConnectionState.revision <= 0L) return@LaunchedEffect
-        val previousPhase = state.runPhase
-        val previousV4 = state.ipv4Stats
-        val previousV6 = state.ipv6Stats
-        currentTestConfig = runtimeConnectionState.config
-        currentStartedAt = runtimeConnectionState.startedAtEpochMs
-        state = runtimeConnectionState.ui.copy(
-            resolveResult = state.resolveResult,
-            history = state.history
-        )
-        if (previousV4 != state.ipv4Stats) recordChartPoint(state.ipv4Stats)
-        if (previousV6 != state.ipv6Stats) recordChartPoint(state.ipv6Stats)
-        if (previousPhase != state.runPhase && state.runPhase in listOf(RunPhase.Finished, RunPhase.Failed)) {
-            refreshHistory()
-        }
-        if (state.isAdding || state.runPhase == RunPhase.Releasing) {
-            showRunLogDetail = false
-            appToolPage = AppToolPage.NONE
-            selectedTab = MainTab.TEST
-        }
     }
 
     LaunchedEffect(releaseFocusRunId, visibleOrder) {
