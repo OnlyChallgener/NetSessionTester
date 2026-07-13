@@ -12919,8 +12919,7 @@ private fun Modifier.chartGestureModifier(
                 val tapAt = event.changes.maxOfOrNull { it.uptimeMillis } ?: down.uptimeMillis
                 val isDoubleTap = lastTapAt > 0L &&
                     tapAt - lastTapAt in viewConfiguration.doubleTapMinTimeMillis..viewConfiguration.doubleTapTimeoutMillis &&
-                    lastTapPosition.isSpecified &&
-                    (upPosition - lastTapPosition).getDistance() <= viewConfiguration.doubleTapSlop
+                    (upPosition - lastTapPosition).getDistance() <= viewConfiguration.touchSlop * 2f
                 if (isDoubleTap) {
                     currentDoubleTap?.invoke()
                     lastTapAt = 0L
