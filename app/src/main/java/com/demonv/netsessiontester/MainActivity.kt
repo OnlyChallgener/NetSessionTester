@@ -7663,6 +7663,7 @@ private fun CombinedSessionGrowthChart(series: List<SessionChartSeries>) {
     val fullSpanX = (fullMaxX - fullMinX).coerceAtLeast(1)
     var zoomSpanX by remember { mutableStateOf<Int?>(null) }
     var viewEndX by remember { mutableStateOf(fullMaxX) }
+    val horizontalPanRemainderX = remember { floatArrayOf(0f) }
     var chartWidthPx by remember { mutableStateOf(1f) }
     val spanX = (zoomSpanX ?: fullSpanX).coerceIn(1, fullSpanX)
     val minViewEndX = fullMinX + spanX
@@ -7685,6 +7686,7 @@ private fun CombinedSessionGrowthChart(series: List<SessionChartSeries>) {
     LaunchedEffect(allPoints.firstOrNull()?.elapsedSec, allPoints.firstOrNull()?.protocol) {
         zoomSpanX = null
         viewEndX = fullMaxX
+        horizontalPanRemainderX[0] = 0f
     }
     LaunchedEffect(fullMaxX, spanX) {
         if (zoomSpanX == null) viewEndX = fullMaxX
@@ -7728,10 +7730,17 @@ private fun CombinedSessionGrowthChart(series: List<SessionChartSeries>) {
                     .onSizeChanged { chartWidthPx = it.width.toFloat().coerceAtLeast(1f) }
                     .chartGestureModifier(
                         onHorizontalPan = { dragAmount ->
-                            val deltaX = (dragAmount / chartWidthPx.coerceAtLeast(1f) * spanX).toInt()
-                            viewEndX = (viewEndX - deltaX).coerceIn(minViewEndX, maxViewEndX)
+                            val preciseDeltaX = dragAmount / chartWidthPx.coerceAtLeast(1f) * spanX + horizontalPanRemainderX[0]
+                            val deltaX = preciseDeltaX.toInt()
+                            horizontalPanRemainderX[0] = preciseDeltaX - deltaX
+                            if (deltaX != 0) {
+                                val nextEndX = (effectiveViewEndX - deltaX).coerceIn(minViewEndX, maxViewEndX)
+                                if (nextEndX == effectiveViewEndX) horizontalPanRemainderX[0] = 0f
+                                viewEndX = nextEndX
+                            }
                         },
                         onPinchTransform = { centroidX, panX, zoom ->
+                            horizontalPanRemainderX[0] = 0f
                             val width = chartWidthPx.coerceAtLeast(1f)
                             val focalRatio = (centroidX / width).coerceIn(0f, 1f)
                             val focalX = minX + (spanX * focalRatio).toInt()
@@ -7743,6 +7752,7 @@ private fun CombinedSessionGrowthChart(series: List<SessionChartSeries>) {
                         onDoubleTap = {
                             zoomSpanX = null
                             viewEndX = fullMaxX
+                            horizontalPanRemainderX[0] = 0f
                         }
                     )
             ) {
@@ -13036,8 +13046,9 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
         running -> 60_000L
         else -> fullSpanMs
     }
-    var stoppedZoomSpanMs by remember { mutableStateOf<Long?>(null) }
-    val windowSpanMs = if (running) liveWindowSpanMs else (stoppedZoomSpanMs ?: fullSpanMs).coerceIn(1_000L, fullSpanMs)
+    var zoomSpanMs by remember { mutableStateOf<Long?>(null) }
+    val defaultWindowSpanMs = if (running) liveWindowSpanMs else fullSpanMs
+    val windowSpanMs = (zoomSpanMs ?: defaultWindowSpanMs).coerceIn(1_000L, fullSpanMs)
     var autoFollow by remember { mutableStateOf(true) }
     var viewEndMs by remember { mutableStateOf(windowSpanMs) }
     var chartWidthPx by remember { mutableStateOf(1f) }
@@ -13047,13 +13058,13 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
     LaunchedEffect(firstPointKey, allPoints.isEmpty()) {
         selectedPoint = null
         autoFollow = true
-        stoppedZoomSpanMs = null
+        zoomSpanMs = null
     }
 
     LaunchedEffect(running, latestMs, fullSpanMs) {
         if (!running && allPoints.isNotEmpty()) {
             // 测试停止后自动缩放到全局概览。
-            stoppedZoomSpanMs = fullSpanMs
+            zoomSpanMs = fullSpanMs
             autoFollow = false
             viewEndMs = latestMs.coerceAtLeast(fullSpanMs)
         }
@@ -13146,9 +13157,10 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
                     onClick = {
                         if (running) autoFollow = true
                         else {
-                            stoppedZoomSpanMs = fullSpanMs
+                            zoomSpanMs = fullSpanMs
                             viewEndMs = latestMs.coerceAtLeast(fullSpanMs)
                         }
+                        if (running) zoomSpanMs = null
                     },
                     compact = true
                 )
@@ -13176,23 +13188,15 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
                         },
                         onPinchTransform = { centroidX, panX, zoom ->
                             val plotW = (chartWidthPx - 82f - 34f).coerceAtLeast(1f)
-                            if (running) {
-                                val deltaMs = (panX / plotW * windowSpanMs).toLong()
-                                autoFollow = false
-                                val minEnd = (earliestMs + windowSpanMs).coerceAtLeast(windowSpanMs)
-                                val maxEnd = latestMs.coerceAtLeast(minEnd)
-                                viewEndMs = (viewEndMs - deltaMs).coerceIn(minEnd, maxEnd)
-                            } else {
-                                val focalRatio = ((centroidX - 82f) / plotW).coerceIn(0f, 1f)
-                                val focalMs = viewStartMs + (windowSpanMs * focalRatio).toLong()
-                                val newSpan = (windowSpanMs / zoom.coerceIn(0.25f, 4.0f)).toLong().coerceIn(1_000L, fullSpanMs)
-                                stoppedZoomSpanMs = newSpan
-                                val newEnd = focalMs + (newSpan * (1f - focalRatio)).toLong() - (panX / plotW * newSpan).toLong()
-                                val minEnd = (earliestMs + newSpan).coerceAtLeast(newSpan)
-                                val maxEnd = latestMs.coerceAtLeast(minEnd)
-                                viewEndMs = newEnd.coerceIn(minEnd, maxEnd)
-                                autoFollow = false
-                            }
+                            val focalRatio = ((centroidX - 82f) / plotW).coerceIn(0f, 1f)
+                            val focalMs = viewStartMs + (windowSpanMs * focalRatio).toLong()
+                            val newSpan = (windowSpanMs / zoom.coerceIn(0.25f, 4.0f)).toLong().coerceIn(1_000L, fullSpanMs)
+                            zoomSpanMs = newSpan
+                            val newEnd = focalMs + (newSpan * (1f - focalRatio)).toLong() - (panX / plotW * newSpan).toLong()
+                            val minEnd = (earliestMs + newSpan).coerceAtLeast(newSpan)
+                            val maxEnd = latestMs.coerceAtLeast(minEnd)
+                            viewEndMs = newEnd.coerceIn(minEnd, maxEnd)
+                            autoFollow = false
                         },
                         onTap = { offset ->
                             val left = 82f
@@ -13205,9 +13209,10 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
                         onDoubleTap = {
                             if (running) autoFollow = true
                             else {
-                                stoppedZoomSpanMs = fullSpanMs
+                                zoomSpanMs = fullSpanMs
                                 viewEndMs = latestMs.coerceAtLeast(fullSpanMs)
                             }
+                            if (running) zoomSpanMs = null
                         }
                     )
             ) {
