@@ -1,6 +1,7 @@
 package com.demonv.netsessiontester.network
 
 import android.content.Context
+import android.os.SystemClock
 import com.demonv.netsessiontester.model.IpProtocol
 import com.demonv.netsessiontester.model.LogLevel
 import com.demonv.netsessiontester.model.LogLine
@@ -579,7 +580,7 @@ class TcpTester(context: Context) {
             return@withContext 0
         }
 
-        val startedAt = System.currentTimeMillis()
+        val startedAt = SystemClock.elapsedRealtime()
         val actualChunkSize = batchSize.coerceIn(128, 512)
         val actualWorkerCount = workerCount.coerceIn(2, 8).coerceAtMost(total)
         val nextStart = AtomicInteger(0)
@@ -587,15 +588,15 @@ class TcpTester(context: Context) {
 
         coroutineScope {
             val reporter = launch(Dispatchers.Default) {
-                var lastReported = -1
+                var lastReported = 0
                 while (currentCoroutineContext().isActive) {
+                    delay(progressIntervalMs.coerceIn(300L, 1_000L))
                     val done = closedCount.get().coerceAtMost(total)
+                    if (done >= total) break
                     if (done != lastReported) {
                         lastReported = done
-                        onProgress(done, total, System.currentTimeMillis() - startedAt)
+                        onProgress(done, total, SystemClock.elapsedRealtime() - startedAt)
                     }
-                    if (done >= total) break
-                    delay(progressIntervalMs.coerceIn(100L, 1_000L))
                 }
             }
 
@@ -619,7 +620,7 @@ class TcpTester(context: Context) {
         }
 
         val finalClosed = closedCount.get().coerceAtMost(total)
-        onProgress(finalClosed, total, System.currentTimeMillis() - startedAt)
+        onProgress(finalClosed, total, SystemClock.elapsedRealtime() - startedAt)
         finalClosed
     }
 

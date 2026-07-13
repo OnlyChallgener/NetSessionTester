@@ -3063,7 +3063,7 @@ private fun NetSessionTesterApp() {
     var appInForeground by remember { mutableStateOf(true) }
     var lastNetworkInfoSignature by remember { mutableStateOf("") }
     var pendingReleaseFocusRunId by remember { mutableStateOf(0L) }
-    var lastAutoLocatedReleaseRunId by remember { mutableStateOf(0L) }
+    var lastAutoLocatedReleaseRunId by rememberSaveable { mutableStateOf(0L) }
 
     var detailTitle by remember { mutableStateOf<String?>(null) }
     var detailLines by remember { mutableStateOf<List<String>>(emptyList()) }
@@ -3113,16 +3113,22 @@ private fun NetSessionTesterApp() {
         }
     }
 
-    LaunchedEffect(state.releaseUi.visible, state.releaseUi.finished, state.releaseUi.elapsedMs) {
+    LaunchedEffect(
+        state.releaseUi.runId,
+        state.releaseUi.visible,
+        state.releaseUi.finished,
+        state.releaseUi.finishedAtEpochMs
+    ) {
         if (runtimeConnectionState.revision > 0L) return@LaunchedEffect
         if (!state.releaseUi.visible || !state.releaseUi.finished) return@LaunchedEffect
-        val completedSnapshot = state.releaseUi
-        val remainingVisibleMs = completedSnapshot.finishedAtEpochMs
+        val completedRunId = state.releaseUi.runId
+        val completedAt = state.releaseUi.finishedAtEpochMs
+        val remainingVisibleMs = completedAt
             .takeIf { it > 0L }
             ?.let { finishedAt -> (10_000L - (System.currentTimeMillis() - finishedAt)).coerceAtLeast(0L) }
             ?: 10_000L
         delay(remainingVisibleMs)
-        if (state.releaseUi == completedSnapshot) {
+        if (state.releaseUi.runId == completedRunId && state.releaseUi.finished && state.releaseUi.finishedAtEpochMs == completedAt) {
             state = state.copy(releaseUi = ReleaseUiState())
             AppTestRuntime.releaseUiSnapshot = ReleaseUiState()
         }
@@ -3145,6 +3151,7 @@ private fun NetSessionTesterApp() {
         appToolPage = AppToolPage.NONE
         selectedTab = MainTab.TEST
         sessionCardExpanded = true
+        lastAutoLocatedReleaseRunId = releaseRunId
         pendingReleaseFocusRunId = releaseRunId
     }
 
@@ -3489,13 +3496,15 @@ private fun NetSessionTesterApp() {
         refreshPublicIp()
     }
 
-    LaunchedEffect(Unit) {
-        while (true) {
+    LaunchedEffect(pingRunning, state.isAdding, state.runPhase) {
+        while (pingRunning || (state.isAdding && state.runPhase != RunPhase.Releasing && state.runPhase != RunPhase.Stopping)) {
             displayPingPoints = compactPingPointsForRender(pingPoints)
-            displayChartPoints = compactSessionPointsForRender(chartPoints)
+            if (state.isAdding && state.runPhase != RunPhase.Releasing && state.runPhase != RunPhase.Stopping) {
+                displayChartPoints = compactSessionPointsForRender(chartPoints)
+            }
             displayPingJitterMs = pingJitterMs
             displayPingLogCount = pingLogs.size
-            delay(if (pingRunning || state.isAdding) TEST_UI_REFRESH_MS else 1_000L)
+            delay(TEST_UI_REFRESH_MS)
         }
     }
 
@@ -3776,8 +3785,10 @@ private fun NetSessionTesterApp() {
             resolveResult = state.resolveResult,
             history = state.history
         )
-        if (previousV4 != state.ipv4Stats) recordChartPoint(state.ipv4Stats)
-        if (previousV6 != state.ipv6Stats) recordChartPoint(state.ipv6Stats)
+        val freezeSessionUi = state.runPhase == RunPhase.Stopping || state.runPhase == RunPhase.Releasing ||
+            state.runPhase == RunPhase.Finished || state.runPhase == RunPhase.Failed
+        if (!freezeSessionUi && previousV4 != state.ipv4Stats) recordChartPoint(state.ipv4Stats)
+        if (!freezeSessionUi && previousV6 != state.ipv6Stats) recordChartPoint(state.ipv6Stats)
         if (previousPhase != state.runPhase && state.runPhase in listOf(RunPhase.Finished, RunPhase.Failed)) {
             refreshHistory()
         }
@@ -3850,6 +3861,11 @@ private fun NetSessionTesterApp() {
         pingPoints = runtimePingState.points
         pingLogs = runtimePingState.logs
         pingJitterMs = runtimePingState.jitterMs
+        if (!runtimePingState.running) {
+            displayPingPoints = compactPingPointsForRender(runtimePingState.points)
+            displayPingJitterMs = runtimePingState.jitterMs
+            displayPingLogCount = runtimePingState.logs.size
+        }
     }
 
     fun stopPingMonitor(reason: String = "手动停止") {
@@ -4294,7 +4310,6 @@ private fun NetSessionTesterApp() {
                     releaseFocusRunId = pendingReleaseFocusRunId,
                     onReleaseFocusHandled = { handledRunId ->
                         if (pendingReleaseFocusRunId == handledRunId) pendingReleaseFocusRunId = 0L
-                        lastAutoLocatedReleaseRunId = handledRunId
                     },
                     sessionExpanded = sessionCardExpanded,
                     onSessionExpandedChange = { sessionCardExpanded = it },
@@ -5516,10 +5531,10 @@ private fun TestPage(
         isAdding -> "● 运行中"
         else -> status
     }
-    val defaultCards = listOf("sessions", "release", "ping", "diagnosis", "logs")
+    val defaultCards = listOf("ping", "diagnosis", "logs")
     val initialTestOrder = remember {
         val saved = loadCardOrder(context.applicationContext, "test_card_order_v4", defaultCards)
-        (saved.filterNot { it == "control" } + defaultCards.filterNot { it in saved }).distinct()
+        (saved.filter { it in defaultCards } + defaultCards.filterNot { it in saved }).distinct()
     }
     var testCardOrder by remember { mutableStateOf(initialTestOrder) }
     val totalSessionAttempts = ipv4Stats.totalAttempts + ipv6Stats.totalAttempts
@@ -5533,18 +5548,8 @@ private fun TestPage(
         previousSessionAttempts = totalSessionAttempts
     }
 
-    val visibleIds = remember(releaseUi.visible, releaseBusy) {
-        buildList {
-            add("sessions")
-            if (releaseUi.visible || releaseBusy) add("release")
-            add("ping")
-            add("diagnosis")
-            add("logs")
-        }
-    }
-    val visibleOrder = remember(testCardOrder, visibleIds) {
-        (testCardOrder.filter { it in visibleIds } + visibleIds.filterNot { it in testCardOrder }).distinct()
-    }
+    val releaseCardVisible = releaseUi.visible || releaseBusy
+    val visibleOrder = testCardOrder
     val ipv4ChartPoints = remember(chartPoints) { chartPoints.filter { it.protocol == IpProtocol.IPV4 } }
     val ipv6ChartPoints = remember(chartPoints) { chartPoints.filter { it.protocol == IpProtocol.IPV6 } }
     fun updateTestOrder(nextVisible: List<String>) {
@@ -5556,17 +5561,18 @@ private fun TestPage(
     LaunchedEffect(pingFocusRequest, visibleOrder) {
         if (pingFocusRequest <= 0) return@LaunchedEffect
         val pingIndex = visibleOrder.indexOf("ping")
-        if (pingIndex >= 0) listState.animateScrollToItem(pingIndex + 1)
+        if (pingIndex >= 0) {
+            val fixedItemCount = 2 + (if (releaseCardVisible) 1 else 0) + (if (sessionExpanded) 1 else 0)
+            listState.animateScrollToItem(fixedItemCount + pingIndex)
+        }
     }
 
-    LaunchedEffect(releaseFocusRunId, visibleOrder) {
+    LaunchedEffect(releaseFocusRunId) {
         if (releaseFocusRunId == 0L) return@LaunchedEffect
-        val releaseIndex = visibleOrder.indexOf("release")
-        if (releaseIndex < 0) return@LaunchedEffect
-        val targetIndex = releaseIndex + 1 // Page title is the first LazyColumn item.
+        val targetIndex = 2 // Page title and connection control card precede the release card.
         snapshotFlow { listState.layoutInfo.totalItemsCount }
             .first { itemCount -> itemCount > targetIndex }
-        listState.animateScrollToItem(targetIndex)
+        if (!listState.isScrollInProgress) listState.scrollToItem(targetIndex)
         onReleaseFocusHandled(releaseFocusRunId)
     }
 
@@ -5585,10 +5591,8 @@ private fun TestPage(
                 StatusChip("◎ 目标 $target", Color.White, TextDark)
             }
         }
-        items(visibleOrder, key = { it }) { cardId ->
-            ReorderableCardItem(id = cardId, order = visibleOrder, onOrderChange = ::updateTestOrder) {
-                when (cardId) {
-                    "sessions" -> SoftCard {
+        item(key = "connection_control_card") {
+            SoftCard {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             SectionTitle("connection_tree", "连接数测试", Blue)
                             Spacer(Modifier.weight(1f))
@@ -5636,24 +5640,30 @@ private fun TestPage(
                                 Text("导出", fontSize = 13.sp)
                             }
                         }
-                        if (sessionExpanded) {
-                            HorizontalDivider(color = Border.copy(alpha = 0.72f))
-                            CombinedSessionStatsCard(
-                                ipv4Stats = ipv4Stats,
-                                ipv6Stats = ipv6Stats,
-                                maskPrivacy = maskPrivacy,
-                                ipv4Points = ipv4ChartPoints,
-                                ipv6Points = ipv6ChartPoints,
-                                showIpv4 = showIpv4,
-                                showIpv6 = showIpv6,
-                                chartMode = chartMode,
-                                onChartModeChange = onChartModeChange,
-                                testActive = isAdding,
-                                embedded = true
-                            )
-                        }
-                    }
-                    "release" -> ReleaseProgressCard(releaseUi)
+            }
+        }
+        if (releaseCardVisible) {
+            item(key = "release_card") { ReleaseProgressCard(releaseUi) }
+        }
+        if (sessionExpanded) {
+            item(key = "session_card") {
+                CombinedSessionStatsCard(
+                    ipv4Stats = ipv4Stats,
+                    ipv6Stats = ipv6Stats,
+                    maskPrivacy = maskPrivacy,
+                    ipv4Points = ipv4ChartPoints,
+                    ipv6Points = ipv6ChartPoints,
+                    showIpv4 = showIpv4,
+                    showIpv6 = showIpv6,
+                    chartMode = chartMode,
+                    onChartModeChange = onChartModeChange,
+                    testActive = isAdding
+                )
+            }
+        }
+        items(visibleOrder, key = { "test_card_$it" }) { cardId ->
+            ReorderableCardItem(id = cardId, order = visibleOrder, onOrderChange = ::updateTestOrder) {
+                when (cardId) {
                     "ping" -> PingCompactChartCard(
                         pingPoints = pingPoints,
                         intervalLabel = pingIntervalLabel,

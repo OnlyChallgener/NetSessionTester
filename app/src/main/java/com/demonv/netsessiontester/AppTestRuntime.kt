@@ -311,7 +311,7 @@ object AppTestRuntime {
             networkWatchJob = null
             val tcp = tester ?: return
             val sockets = tcp.detachForRelease()
-            val started = System.currentTimeMillis()
+            val started = SystemClock.elapsedRealtime()
             val releaseRunId = _connectionState.value.ui.releaseUi.runId.takeIf { it != 0L } ?: runId
             val baseUi = _connectionState.value.ui
             val releasing = ReleaseUiState(
@@ -325,26 +325,27 @@ object AppTestRuntime {
             appendLog(LogLine(level = LogLevel.WARN, text = "${reason.label}：已停止新增，开始释放 ${sockets.size} 条 socket"))
             updateNoticeNow("正在释放连接 0/${sockets.size}")
             delay(80L)
-            var lastLogAt = 0L
+            var lastReleaseNoticeAt = SystemClock.elapsedRealtime()
             val closed = runCatching {
                 tcp.closeDetachedSockets(sockets, batchSize = 512, workerCount = 6, progressIntervalMs = 300L) { done, total, elapsed ->
-                    val speed = if (done <= 0) 0 else (done * 1_000L / elapsed.coerceAtLeast(1L)).toInt().coerceAtLeast(1)
-                    val progress = ReleaseUiState(
-                        runId = releaseRunId,
-                        visible = true,
-                        total = total,
-                        closed = done,
-                        speedPerSecond = speed,
-                        elapsedMs = elapsed,
-                        message = if (done >= total) "释放完成，正在更新界面状态" else "正在关闭 Socket 连接，请勿退出页面",
-                        finished = done >= total
-                    )
-                    releaseUiSnapshot = progress
-                    publishUi(_connectionState.value.ui.copy(releaseUi = progress))
-                    val now = System.currentTimeMillis()
-                    if (now - lastLogAt >= 1_000L || done >= total) {
-                        lastLogAt = now
-                        updateNoticeNow("正在释放连接 $done/$total｜${progress.percent}%")
+                    if (done < total) {
+                        val speed = if (done <= 0) 0 else (done * 1_000L / elapsed.coerceAtLeast(1L)).toInt().coerceAtLeast(1)
+                        val progress = ReleaseUiState(
+                            runId = releaseRunId,
+                            visible = true,
+                            total = total,
+                            closed = done,
+                            speedPerSecond = speed,
+                            elapsedMs = elapsed,
+                            message = "正在关闭 Socket 连接，请勿退出页面"
+                        )
+                        releaseUiSnapshot = progress
+                        publishUi(_connectionState.value.ui.copy(releaseUi = progress))
+                        val now = SystemClock.elapsedRealtime()
+                        if (now - lastReleaseNoticeAt >= NOTICE_THROTTLE_MS) {
+                            lastReleaseNoticeAt = now
+                            updateNoticeNow("正在释放连接 $done/$total｜${progress.percent}%")
+                        }
                     }
                 }
             }.getOrElse { error ->
@@ -355,7 +356,7 @@ object AppTestRuntime {
                 runCatching { appContext?.let { HistoryStore(it).append(summary) } }
                     .onFailure { appendLog(LogLine(level = LogLevel.ERROR, text = "保存历史失败：${it.message ?: it.javaClass.simpleName}")) }
             }
-            val elapsed = System.currentTimeMillis() - started
+            val elapsed = SystemClock.elapsedRealtime() - started
             val failed = reason !in listOf(ConnectionFinishReason.COMPLETED, ConnectionFinishReason.FORCE_RELEASE)
             val old = _connectionState.value.ui
             val finished = old.releaseUi.copy(
@@ -373,9 +374,7 @@ object AppTestRuntime {
                 status = if (reason == ConnectionFinishReason.FORCE_RELEASE) "已释放" else "${reason.label} · 已释放",
                 summary = summary ?: old.summary,
                 error = reason.label.takeIf { failed },
-                releaseUi = finished,
-                ipv4Stats = old.ipv4Stats.copy(activeSessions = 0, phase = if (old.ipv4Stats.totalAttempts > 0) "已释放" else old.ipv4Stats.phase),
-                ipv6Stats = old.ipv6Stats.copy(activeSessions = 0, phase = if (old.ipv6Stats.totalAttempts > 0) "已释放" else old.ipv6Stats.phase)
+                releaseUi = finished
             ))
             scope.launch {
                 delay(10_000L)
@@ -823,7 +822,7 @@ object AppTestRuntime {
 
     private const val MAX_RUNTIME_LOGS = 500
     private const val RUNTIME_CHECKPOINT_PREFS = "test_runtime_checkpoint"
-    private const val NOTICE_THROTTLE_MS = 750L
+    private const val NOTICE_THROTTLE_MS = 1_000L
     private const val CONNECTION_UI_THROTTLE_MS = 500L
     private const val PING_UI_BUCKET_MS = 500L
     private const val PING_DISK_SAVE_INTERVAL_MS = 2_000L
