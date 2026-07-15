@@ -4203,9 +4203,9 @@ private fun NetSessionTesterApp() {
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(Brush.verticalGradient(listOf(BgTop, Bg, Color.White)))
                 .padding(padding)
         ) {
+            GlassAppBackground()
             if (showRunLogDetail) {
                 FullRunLogPage(
                     logs = state.logs,
@@ -4793,7 +4793,7 @@ private fun PingHistoryToolPage(logs: List<PingLogEntry>, onBack: () -> Unit, on
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
-            .background(Bg)
+            .background(Color.Transparent)
             .padding(horizontal = 14.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
@@ -5197,18 +5197,21 @@ private fun ReorderableCardItem(
     var lastReorderAt by remember { mutableStateOf(0L) }
     val isDragging = draggingId == id
     val scale by animateFloatAsState(if (isDragging) 1.018f else 1f, tween(220, easing = FastOutSlowInEasing), label = "dragScale")
-    val elevation by animateFloatAsState(if (isDragging) 18f else 0f, tween(220, easing = FastOutSlowInEasing), label = "dragElevation")
 
     Box(
         modifier = modifier
             .zIndex(if (isDragging) 20f else 0f)
-            .shadow(elevation.dp, ShapeL, clip = false)
-            .clip(ShapeL)
-            .graphicsLayer {
-                translationY = if (isDragging) dragOffsetY else 0f
-                scaleX = scale
-                scaleY = scale
-            }
+            .then(
+                if (isDragging || scale != 1f) {
+                    Modifier.graphicsLayer {
+                        translationY = if (isDragging) dragOffsetY else 0f
+                        scaleX = scale
+                        scaleY = scale
+                    }
+                } else {
+                    Modifier
+                }
+            )
             .pointerInput(id, order) {
                 detectDragGesturesAfterLongPress(
                     onDragStart = {
@@ -6461,16 +6464,54 @@ private fun VersionLine(version: String, text: String) {
 
 @Composable
 private fun SoftCard(content: @Composable ColumnScope.() -> Unit) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = ShapeL,
-        colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.96f)),
-        elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
-    ) {
-        Column(
-            modifier = Modifier.padding(9.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
-            content = content
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .shadow(GlassCardElevation, ShapeL, clip = false)
+            .clip(ShapeL)
+            .background(GlassCardBrush)
+            .border(1.dp, GlassBorderBrush, ShapeL)
+            .padding(9.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+        content = content
+    )
+}
+
+/**
+ * One ambient draw layer for the whole page. Glass panels stay translucent but
+ * never capture or blur each other, avoiding nested RenderEffect/z-order bugs.
+ */
+@Composable
+private fun GlassAppBackground() {
+    Canvas(modifier = Modifier.fillMaxSize()) {
+        drawRect(brush = Brush.verticalGradient(listOf(GlassBackgroundTop, GlassBackgroundMid, GlassBackgroundBottom)))
+        val base = size.minDimension
+        drawCircle(
+            brush = Brush.radialGradient(
+                colors = listOf(GlassBlueGlow, Color.Transparent),
+                center = Offset(size.width * 0.10f, size.height * 0.08f),
+                radius = base * 0.72f
+            ),
+            radius = base * 0.72f,
+            center = Offset(size.width * 0.10f, size.height * 0.08f)
+        )
+        drawCircle(
+            brush = Brush.radialGradient(
+                colors = listOf(GlassPurpleGlow, Color.Transparent),
+                center = Offset(size.width * 0.92f, size.height * 0.42f),
+                radius = base * 0.64f
+            ),
+            radius = base * 0.64f,
+            center = Offset(size.width * 0.92f, size.height * 0.42f)
+        )
+        drawCircle(
+            brush = Brush.radialGradient(
+                colors = listOf(GlassCyanGlow, Color.Transparent),
+                center = Offset(size.width * 0.18f, size.height * 0.92f),
+                radius = base * 0.58f
+            ),
+            radius = base * 0.58f,
+            center = Offset(size.width * 0.18f, size.height * 0.92f)
         )
     }
 }
@@ -12666,14 +12707,19 @@ private fun TracketRecordCard(record: TracketToolRecord, expanded: Boolean, onTo
 
 @Composable
 private fun SoftCompactToolCard(modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) {
-    Card(
-        modifier = modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.98f)),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
-    ) {
-        Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp), content = content)
-    }
+    val shape = RoundedCornerShape(16.dp)
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .shadow(GlassCompactElevation, shape, clip = false)
+            .clip(shape)
+            .background(GlassCompactBrush)
+            .border(1.dp, GlassBorderBrush, shape)
+            .then(modifier)
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+        content = content
+    )
 }
 
 @Composable
@@ -13917,11 +13963,15 @@ private fun PublicExitLine(
 
 @Composable
 private fun BottomNav(selectedTab: MainTab, onSelect: (MainTab) -> Unit) {
+    val navShape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .height(58.dp)
-            .background(Color(0xFFEAF2FF))
+            .shadow(8.dp, navShape, clip = false)
+            .clip(navShape)
+            .background(GlassNavBrush)
+            .border(1.dp, GlassBorderBrush, navShape)
             .padding(horizontal = 18.dp, vertical = 4.dp),
         horizontalArrangement = Arrangement.spacedBy(10.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -13935,12 +13985,19 @@ private fun BottomNav(selectedTab: MainTab, onSelect: (MainTab) -> Unit) {
             }
             val shape = RoundedCornerShape(24.dp)
             val interactionSource = remember(tab) { MutableInteractionSource() }
+            val selectionModifier = if (selected) {
+                Modifier
+                    .background(GlassSelectionBrush, shape)
+                    .border(1.dp, Color.White.copy(alpha = 0.82f), shape)
+            } else {
+                Modifier
+            }
             Column(
                 modifier = Modifier
                     .weight(1f)
                     .height(50.dp)
                     .clip(shape)
-                    .background(if (selected) Color(0xFFEBDCFD) else Color.Transparent, shape)
+                    .then(selectionModifier)
                     .clickable(
                         interactionSource = interactionSource,
                         indication = null,
@@ -14061,8 +14118,6 @@ private fun String.onlyDigits(): String = filter { it.isDigit() }
 private val IPV4_REGEX = Regex("""\b(?:\d{1,3}\.){3}\d{1,3}\b""")
 private val IPV6_REGEX = Regex("""(?i)(?<![\w.])(?:[0-9a-f]{1,4}:){2,}[0-9a-f]{0,4}(?:%[\w.]+)?(?![\w.])""")
 
-private val BgTop = Color(0xFFF8FBFF)
-private val Bg = Color(0xFFF6F8FC)
 private val TextDark = Color(0xFF111827)
 private val Muted = Color(0xFF64748B)
 private val Border = Color(0xFFE5E7EB)
@@ -14078,3 +14133,29 @@ private val Navy = Color(0xFF0F2F6E)
 private val ShapeL = RoundedCornerShape(20.dp)
 private val ShapeM = RoundedCornerShape(14.dp)
 private val ShapeS = RoundedCornerShape(10.dp)
+
+// Apple-inspired glass tokens. A single page background plus translucent
+// surfaces keeps the visual depth without stacking multiple blur render layers.
+private val GlassBackgroundTop = Color(0xFFF4F8FF)
+private val GlassBackgroundMid = Color(0xFFF8F7FF)
+private val GlassBackgroundBottom = Color(0xFFF4FBFF)
+private val GlassBlueGlow = Color(0x5960A5FA)
+private val GlassPurpleGlow = Color(0x4FBEA7FF)
+private val GlassCyanGlow = Color(0x3F67E8F9)
+private val GlassCardBrush = Brush.verticalGradient(
+    listOf(Color.White.copy(alpha = 0.86f), Color(0xFFF8FBFF).copy(alpha = 0.68f))
+)
+private val GlassCompactBrush = Brush.verticalGradient(
+    listOf(Color.White.copy(alpha = 0.90f), Color(0xFFF8FBFF).copy(alpha = 0.74f))
+)
+private val GlassNavBrush = Brush.verticalGradient(
+    listOf(Color.White.copy(alpha = 0.90f), Color(0xFFEFF5FF).copy(alpha = 0.82f))
+)
+private val GlassSelectionBrush = Brush.horizontalGradient(
+    listOf(Color(0xFFE7DEFF).copy(alpha = 0.88f), Color(0xFFDCEBFF).copy(alpha = 0.82f))
+)
+private val GlassBorderBrush = Brush.linearGradient(
+    listOf(Color.White.copy(alpha = 0.96f), Color(0xFFCBDCF4).copy(alpha = 0.58f))
+)
+private val GlassCardElevation = 5.dp
+private val GlassCompactElevation = 3.dp

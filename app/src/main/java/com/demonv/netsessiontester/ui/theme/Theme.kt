@@ -9,8 +9,9 @@ private val LightColors = lightColorScheme(
     primary = Color(0xFF2563EB),
     secondary = Color(0xFF16A34A),
     tertiary = Color(0xFF7C3AED),
-    background = Color(0xFFF6F8FC),
-    surface = Color.White,
+    background = Color(0xFFF4F8FF),
+    surface = Color(0xFFFDFEFF),
+    surfaceVariant = Color(0xFFF0F5FC),
     error = Color(0xFFEF4444)
 )
 
