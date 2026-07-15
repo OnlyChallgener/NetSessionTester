@@ -166,7 +166,6 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
@@ -2976,7 +2975,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         WindowCompat.setDecorFitsSystemWindows(window, true)
         window.statusBarColor = android.graphics.Color.TRANSPARENT
-        window.navigationBarColor = android.graphics.Color.WHITE
+        window.navigationBarColor = android.graphics.Color.rgb(248, 251, 255)
         WindowCompat.getInsetsController(window, window.decorView).apply {
             isAppearanceLightStatusBars = true
             isAppearanceLightNavigationBars = true
@@ -3198,7 +3197,6 @@ private fun NetSessionTesterApp() {
                 Lifecycle.Event.ON_START -> {
                     appInForeground = true
                     AppTestRuntime.onAppForegroundChanged(true)
-                    networkInfoExpanded = false
                 }
                 Lifecycle.Event.ON_STOP -> {
                     appInForeground = false
@@ -3961,17 +3959,19 @@ private fun NetSessionTesterApp() {
 
     fun startTest() {
         val config = buildConfig() ?: return
-        hostHistory = rememberTargetHistoryItem(context.applicationContext, "tcp_target_history_v1", config.host)
         ensureNotificationPermission()
+        val started = AppTestRuntime.startConnection(config, state.logs)
+        if (!started) {
+            selectedTab = MainTab.TEST
+            scope.launch { snackbarHostState.showSnackbar("已有后台测试正在运行，请先停止当前任务") }
+            return
+        }
+        hostHistory = rememberTargetHistoryItem(context.applicationContext, "tcp_target_history_v1", config.host)
         selectedTab = MainTab.TEST
         currentTestConfig = config
         currentStartedAt = System.currentTimeMillis()
         resetCurrentCharts()
-        val started = AppTestRuntime.startConnection(config, state.logs)
-        if (started && pingEnabled) startPingMonitor(reset = true, targetOverride = config.host)
-        if (!started) {
-            scope.launch { snackbarHostState.showSnackbar("已有后台测试正在运行，请先停止当前任务") }
-        }
+        if (pingEnabled) startPingMonitor(reset = true, targetOverride = config.host)
     }
 
     fun stopAdding() {
@@ -4858,7 +4858,7 @@ private fun PingLogDialog(logs: List<PingLogEntry>, onDismiss: () -> Unit) {
                 } else {
                     Card(
                         shape = ShapeM,
-                        colors = CardDefaults.cardColors(containerColor = Color(0xFFFAF7FF)),
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFFF1F6FD)),
                         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
                         modifier = Modifier.fillMaxWidth()
                     ) {
@@ -7191,7 +7191,6 @@ private fun SessionProtocolSelector(
             Box(
                 modifier = Modifier
                     .weight(1f)
-                    .shadow(if (isSelected) 4.dp else 0.dp, ShapeM, clip = false)
                     .clip(ShapeM)
                     .background(if (isSelected) BlueSoft else Color.Transparent, ShapeM)
                     .clickable(
@@ -12591,31 +12590,38 @@ private fun PolicyPicker(current: ToolIpPolicy, onPick: (ToolIpPolicy) -> Unit) 
 
 @Composable
 private fun SwipeDeleteToolBox(onDelete: () -> Unit, content: @Composable () -> Unit) {
+    val shape = RoundedCornerShape(16.dp)
     val revealWidthPx = with(LocalDensity.current) { 58.dp.toPx() }
     val thresholdPx = revealWidthPx * 0.42f
     var dragOffset by remember { mutableStateOf(0f) }
     var isDragging by remember { mutableStateOf(false) }
     val animatedOffset by animateFloatAsState(dragOffset, tween(190, easing = FastOutSlowInEasing), label = "toolSwipe")
     val displayedOffset = if (isDragging) dragOffset else animatedOffset
-    Box(modifier = Modifier.fillMaxWidth()) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(shape)
+            .background(GlassSwipeSurface)
+    ) {
         Box(
             modifier = Modifier
                 .align(Alignment.CenterEnd)
                 .width(52.dp)
                 .height(56.dp)
-                .background(RedSoft, RoundedCornerShape(16.dp))
-                .border(1.dp, ErrorRed.copy(alpha = 0.20f), RoundedCornerShape(16.dp))
+                .background(DeleteActionSurface, shape)
                 .clickable(onClick = onDelete),
             contentAlignment = Alignment.Center
         ) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Icon(Icons.Filled.DeleteOutline, contentDescription = "删除", tint = ErrorRed, modifier = Modifier.width(17.dp).height(17.dp))
-                Text("删除", color = ErrorRed, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                Icon(Icons.Filled.DeleteOutline, contentDescription = "删除", tint = Color.White, modifier = Modifier.width(17.dp).height(17.dp))
+                Text("删除", color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold)
             }
         }
         Box(
             modifier = Modifier
                 .offset { IntOffset(displayedOffset.roundToInt(), 0) }
+                .clip(shape)
+                .background(GlassSwipeSurface)
                 .pointerInput(Unit) {
                     detectHorizontalDragGestures(
                         onDragStart = { isDragging = true },
@@ -13104,7 +13110,7 @@ private fun PingCompactChartCard(
                 Spacer(Modifier.width(4.dp))
                 Text("历史 $logCount", fontSize = 12.sp)
             }
-            OutlinedButton(onClick = onClear, modifier = Modifier.weight(0.65f).height(38.dp), shape = ShapeM) {
+            OutlinedButton(onClick = onClear, enabled = !running, modifier = Modifier.weight(0.65f).height(38.dp), shape = ShapeM) {
                 Icon(Icons.Filled.DeleteOutline, contentDescription = null, modifier = Modifier.width(16.dp).height(16.dp))
                 Spacer(Modifier.width(4.dp))
                 Text("清空", fontSize = 12.sp)
@@ -13672,7 +13678,12 @@ private fun SwipeDeleteHistoryCard(
     val displayedOffset = if (isDragging) dragOffset else animatedOffset
     val isRevealed = dragOffset <= -revealWidthPx * 0.9f
 
-    Box(modifier = Modifier.fillMaxWidth()) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(ShapeL)
+            .background(GlassSwipeSurface)
+    ) {
         if (displayedOffset < 0f) {
             Box(
                 modifier = Modifier
@@ -13696,6 +13707,8 @@ private fun SwipeDeleteHistoryCard(
         Box(
             modifier = Modifier
                 .offset { IntOffset(displayedOffset.roundToInt(), 0) }
+                .clip(ShapeL)
+                .background(GlassSwipeSurface)
                 .pointerInput(item.id) {
                     detectHorizontalDragGestures(
                         onDragStart = { isDragging = true },
@@ -13977,15 +13990,11 @@ private fun PublicExitLine(
 
 @Composable
 private fun BottomNav(selectedTab: MainTab, onSelect: (MainTab) -> Unit) {
-    val navShape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .height(58.dp)
-            .shadow(8.dp, navShape, clip = false)
-            .clip(navShape)
-            .background(GlassNavBrush)
-            .border(1.dp, GlassBorderBrush, navShape)
+            .background(GlassNavSurface)
             .padding(horizontal = 18.dp, vertical = 4.dp),
         horizontalArrangement = Arrangement.spacedBy(10.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -14001,8 +14010,7 @@ private fun BottomNav(selectedTab: MainTab, onSelect: (MainTab) -> Unit) {
             val interactionSource = remember(tab) { MutableInteractionSource() }
             val selectionModifier = if (selected) {
                 Modifier
-                    .background(GlassSelectionBrush, shape)
-                    .border(1.dp, Color.White.copy(alpha = 0.82f), shape)
+                    .background(GlassNavSelectionSurface, shape)
             } else {
                 Modifier
             }
@@ -14162,12 +14170,10 @@ private val GlassCardBrush = Brush.verticalGradient(
 private val GlassCompactBrush = Brush.verticalGradient(
     listOf(Color.White.copy(alpha = 0.90f), Color(0xFFF8FBFF).copy(alpha = 0.74f))
 )
-private val GlassNavBrush = Brush.verticalGradient(
-    listOf(Color.White.copy(alpha = 0.90f), Color(0xFFEFF5FF).copy(alpha = 0.82f))
-)
-private val GlassSelectionBrush = Brush.horizontalGradient(
-    listOf(Color(0xFFE7DEFF).copy(alpha = 0.88f), Color(0xFFDCEBFF).copy(alpha = 0.82f))
-)
 private val GlassBorderBrush = Brush.linearGradient(
     listOf(Color.White.copy(alpha = 0.96f), Color(0xFFCBDCF4).copy(alpha = 0.58f))
 )
+private val GlassSwipeSurface = Color(0xFFF8FBFF)
+private val DeleteActionSurface = Color(0xFFE5484D)
+private val GlassNavSurface = Color(0xFFF8FBFF)
+private val GlassNavSelectionSurface = Color(0xFFE7ECFF)

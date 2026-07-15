@@ -92,6 +92,7 @@ object AppTestRuntime {
     @Volatile private var pingRestartForConnectionJob: Job? = null
     @Volatile private var pingLogSaveJob: Job? = null
     @Volatile private var pingBackgroundStopJob: Job? = null
+    @Volatile private var pingBackgroundedAtElapsedMs = 0L
     @Volatile private var pingCoupledToConnection = false
     @Volatile private var networkWatchJob: Job? = null
     @Volatile private var wakeLock: PowerManager.WakeLock? = null
@@ -514,6 +515,7 @@ object AppTestRuntime {
         if (pingJob?.isActive == true) return false
         pingBackgroundStopJob?.cancel()
         pingBackgroundStopJob = null
+        pingBackgroundedAtElapsedMs = 0L
         val sessionId = System.currentTimeMillis()
         pingCoupledToConnection = coupledToConnection
         if (connectionJob?.isActive != true) {
@@ -811,6 +813,7 @@ object AppTestRuntime {
         lastPingLogSaveAtElapsedMs = SystemClock.elapsedRealtime()
         pingJob = null
         pingCoupledToConnection = false
+        pingBackgroundedAtElapsedMs = 0L
         if (connectionJob?.isActive != true && !connectionFinishing.get()) {
             releaseWakeLock()
             appContext?.let(::stopForeground)
@@ -830,13 +833,29 @@ object AppTestRuntime {
     }
 
     fun onAppForegroundChanged(inForeground: Boolean) {
+        val now = SystemClock.elapsedRealtime()
+        val backgroundedAt = pingBackgroundedAtElapsedMs
         pingBackgroundStopJob?.cancel()
         pingBackgroundStopJob = null
-        if (inForeground || pingJob?.isActive != true || connectionJob?.isActive == true || connectionFinishing.get()) return
+        val independentPingRunning = pingJob?.isActive == true && connectionJob?.isActive != true && !connectionFinishing.get()
+        if (inForeground) {
+            pingBackgroundedAtElapsedMs = 0L
+            if (independentPingRunning && backgroundedAt > 0L && now - backgroundedAt >= PING_BACKGROUND_GRACE_MS) {
+                stopPing("APP进入后台超过5秒")
+            }
+            return
+        }
+        if (!independentPingRunning) {
+            pingBackgroundedAtElapsedMs = 0L
+            return
+        }
+        val deadlineBase = backgroundedAt.takeIf { it > 0L } ?: now
+        pingBackgroundedAtElapsedMs = deadlineBase
         val sessionId = _pingState.value.sessionId
         pingBackgroundStopJob = scope.launch {
             try {
-                delay(PING_BACKGROUND_GRACE_MS)
+                val remainingMs = (PING_BACKGROUND_GRACE_MS - (SystemClock.elapsedRealtime() - deadlineBase)).coerceAtLeast(0L)
+                delay(remainingMs)
                 val state = _pingState.value
                 if (
                     state.running &&
