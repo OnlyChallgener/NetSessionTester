@@ -4797,7 +4797,7 @@ private fun PingHistoryToolPage(logs: List<PingLogEntry>, onBack: () -> Unit, on
             .padding(horizontal = 14.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        item { ToolPageHeader("Ping历史", "${groups.size}/12 · $storageText · 点击卡片展开，单条可删除", onBack) }
+        item { ToolPageHeader("Ping历史", "${groups.size}/12 · $storageText · 点击展开 · 左滑删除", onBack) }
         if (groups.isEmpty()) {
             item {
                 SoftCard {
@@ -4807,12 +4807,13 @@ private fun PingHistoryToolPage(logs: List<PingLogEntry>, onBack: () -> Unit, on
         } else {
             items(groups, key = { it.sessionId }) { group ->
                 val expanded = expandedSession == group.sessionId
-                PingLogSessionCard(
-                    group = group,
-                    expanded = expanded,
-                    onToggle = { expandedSession = if (expanded) null else group.sessionId },
-                    onDelete = { onDeleteSession(group.sessionId) }
-                )
+                SwipeDeleteToolBox(onDelete = { onDeleteSession(group.sessionId) }, stateKey = group.sessionId) {
+                    PingLogSessionCard(
+                        group = group,
+                        expanded = expanded,
+                        onToggle = { expandedSession = if (expanded) null else group.sessionId }
+                    )
+                }
             }
         }
         item { Spacer(Modifier.height(70.dp)) }
@@ -4903,8 +4904,7 @@ private fun PingLogDialog(logs: List<PingLogEntry>, onDismiss: () -> Unit) {
 private fun PingLogSessionCard(
     group: PingLogGroup,
     expanded: Boolean,
-    onToggle: () -> Unit,
-    onDelete: (() -> Unit)? = null
+    onToggle: () -> Unit
 ) {
     val items = group.entries.filter { it.status != "开始" && it.status != "停止" && it.status != "高频不可用" }
     val success = items.count { it.status == "成功" || it.status == "高延迟" }
@@ -4928,15 +4928,6 @@ private fun PingLogSessionCard(
                     }
                     Box(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
                         Text("${formatPingDuration(pingLogGroupDurationMs(group))} · ${items.size}次 · 成功$success · 平均${avg?.let { "${it}ms" } ?: "—"} · 丢包$loss%", color = Muted, fontSize = 11.sp, maxLines = 1)
-                    }
-                }
-                if (onDelete != null) {
-                    TextButton(
-                        onClick = onDelete,
-                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
-                        modifier = Modifier.height(28.dp)
-                    ) {
-                        Text("删除", color = ErrorRed, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                     }
                 }
                 Text(if (expanded) "⌃" else "⌄", color = Blue, fontSize = 18.sp, fontWeight = FontWeight.Bold)
@@ -5907,7 +5898,7 @@ private fun LogsPage(
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 4.dp, bottom = 5.dp)) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text("检测历史", fontSize = 19.sp, fontWeight = FontWeight.ExtraBold, color = TextDark)
-                    Text("已保存 ${historySavedCount} 条 · 占用 ${historySizeKb}KB", color = Muted, fontSize = 11.sp)
+                    Text("已保存 ${historySavedCount} 条 · 占用 ${historySizeKb}KB · 左滑单条删除", color = Muted, fontSize = 11.sp)
                 }
                 OutlinedButton(onClick = onClear, shape = ShapeM, modifier = Modifier.height(36.dp)) {
                     Icon(Icons.Filled.DeleteOutline, contentDescription = null, modifier = Modifier.width(15.dp).height(15.dp))
@@ -6935,7 +6926,13 @@ private fun HistoryTextField(
                 }
             },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 480.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(7.dp)
+                ) {
                     if (presets.isNotEmpty()) {
                         Row(
                             modifier = Modifier.fillMaxWidth().clickable { presetsExpanded = !presetsExpanded },
@@ -6961,18 +6958,22 @@ private fun HistoryTextField(
                             modifier = Modifier.fillMaxWidth().clickable { historyExpanded = !historyExpanded },
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text("自定义/最近", color = Muted, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                            Text("自定义/最近 · 左滑删除", color = Muted, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
                             Text(if (historyExpanded) "⌃" else "⌄", color = Muted, fontSize = 14.sp, fontWeight = FontWeight.Bold)
                         }
                         val shownHistory = if (historyExpanded) history.take(10) else history.take(3)
                         shownHistory.forEach { item ->
-                            Row(
-                                modifier = Modifier.fillMaxWidth().background(Color(0xFFF8FAFC), ShapeM).clickable { onPick(item); open = false }.padding(horizontal = 12.dp, vertical = 9.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(item, color = TextDark, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-                                IconButton(onClick = { onDelete(item) }, modifier = Modifier.width(32.dp).height(32.dp)) {
-                                    Icon(Icons.Filled.Close, contentDescription = null, tint = Muted, modifier = Modifier.width(16.dp).height(16.dp))
+                            SwipeDeleteToolBox(onDelete = { onDelete(item) }, stateKey = item) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .heightIn(min = 56.dp)
+                                        .background(Color(0xFFF8FAFC), ShapeM)
+                                        .clickable { onPick(item); open = false }
+                                        .padding(horizontal = 12.dp, vertical = 9.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(item, color = TextDark, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
                                 }
                             }
                         }
@@ -8313,10 +8314,20 @@ private fun NatDiagnosticDialog(
                 )
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("STUN服务器", color = TextDark, fontSize = 13.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-                    Text("未填写端口时默认 3478", color = Muted, fontSize = 10.sp)
+                    Text("左滑删除 · 默认端口 3478", color = Muted, fontSize = 10.sp)
                 }
                 servers.forEachIndexed { index, item ->
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    SwipeDeleteToolBox(
+                        onDelete = {
+                            val next = if (servers.size > 1) {
+                                servers.filterIndexed { i, _ -> i != index }
+                            } else {
+                                listOf("")
+                            }
+                            onServersChange(next)
+                        },
+                        stateKey = index to servers.size
+                    ) {
                         OutlinedTextField(
                             value = item,
                             onValueChange = { value ->
@@ -8328,20 +8339,8 @@ private fun NatDiagnosticDialog(
                             placeholder = { Text(defaultNatServer(mode), fontSize = 12.sp) },
                             singleLine = true,
                             shape = ShapeM,
-                            modifier = Modifier.weight(1f)
+                            modifier = Modifier.fillMaxWidth()
                         )
-                        IconButton(
-                            onClick = {
-                                val next = if (servers.size > 1) {
-                                    servers.filterIndexed { i, _ -> i != index }
-                                } else {
-                                    listOf("")
-                                }
-                                onServersChange(next)
-                            }
-                        ) {
-                            Icon(Icons.Filled.DeleteOutline, contentDescription = null, tint = ErrorRed)
-                        }
                     }
                 }
                 OutlinedButton(
@@ -9671,7 +9670,7 @@ private fun NsLookupToolPage(onBack: () -> Unit) {
                 })
             }
         }
-        item { Text("解析记录", color = TextDark, fontWeight = FontWeight.Bold, fontSize = 15.sp, modifier = Modifier.padding(top = 4.dp)) }
+        item { Text("解析记录 · 左滑删除", color = TextDark, fontWeight = FontWeight.Bold, fontSize = 15.sp, modifier = Modifier.padding(top = 4.dp)) }
         if (records.isEmpty()) {
             item { Text("暂无记录。", color = Muted, fontSize = 12.sp, modifier = Modifier.padding(vertical = 12.dp)) }
         } else {
@@ -9679,7 +9678,7 @@ private fun NsLookupToolPage(onBack: () -> Unit) {
                 SwipeDeleteToolBox(onDelete = {
                     store.deleteNsLookup(record.id)
                     records = store.loadNsLookup()
-                }) {
+                }, stateKey = record.id) {
                     NsLookupRecordCard(record, compact = true, onCopy = {
                         clipboard.setText(AnnotatedString(record.copyText()))
                         Toast.makeText(context, "已复制解析结果", Toast.LENGTH_SHORT).show()
@@ -9929,7 +9928,7 @@ private fun TracketToolPage(onBack: () -> Unit) {
         if (tracingActive || liveHops.isNotEmpty()) {
             item { TracketLiveProcessCard(title = liveTitle, hops = liveHops) }
         }
-        item { Text("追踪历史", color = TextDark, fontWeight = FontWeight.Bold, fontSize = 15.sp, modifier = Modifier.padding(top = 4.dp)) }
+        item { Text("追踪历史 · 左滑删除", color = TextDark, fontWeight = FontWeight.Bold, fontSize = 15.sp, modifier = Modifier.padding(top = 4.dp)) }
         if (records.isEmpty()) {
             item { Text("暂无记录。", color = Muted, fontSize = 12.sp, modifier = Modifier.padding(vertical = 12.dp)) }
         } else {
@@ -9939,7 +9938,7 @@ private fun TracketToolPage(onBack: () -> Unit) {
                     store.deleteTracket(record.id)
                     records = store.loadTracket()
                     expandedIds = expandedIds - record.id
-                }) {
+                }, stateKey = record.id) {
                     TracketRecordCard(
                         record = record,
                         expanded = expanded,
@@ -12023,17 +12022,21 @@ private fun RoamingHistoryDialog(
             if (records.isEmpty()) {
                 Text("暂无漫游测试历史。停止一次测试后会自动保存，最多保留10条。", color = Muted, fontSize = 12.sp)
             } else {
-                LazyColumn(
-                    modifier = Modifier.heightIn(max = 460.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    items(records, key = { it.id }) { record ->
-                        RoamingHistoryItem(
-                            record = record,
-                            expanded = record.id in expandedIds,
-                            onToggle = { onToggle(record.id) },
-                            onDelete = { onDelete(record.id) }
-                        )
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("点击展开详情 · 左滑删除记录", color = Muted, fontSize = 11.sp)
+                    LazyColumn(
+                        modifier = Modifier.heightIn(max = 430.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        items(records, key = { it.id }) { record ->
+                            SwipeDeleteToolBox(onDelete = { onDelete(record.id) }, stateKey = record.id) {
+                                RoamingHistoryItem(
+                                    record = record,
+                                    expanded = record.id in expandedIds,
+                                    onToggle = { onToggle(record.id) }
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -12046,8 +12049,7 @@ private fun RoamingHistoryDialog(
 private fun RoamingHistoryItem(
     record: RoamingHistoryRecord,
     expanded: Boolean,
-    onToggle: () -> Unit,
-    onDelete: () -> Unit
+    onToggle: () -> Unit
 ) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
@@ -12063,7 +12065,6 @@ private fun RoamingHistoryItem(
                     Text(record.timeText, color = TextDark, fontWeight = FontWeight.Bold, fontSize = 13.sp)
                     Text("${record.durationText} · ${record.targetText} · 漫游${record.eventLines.size}次", color = Muted, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
-                IconButton(onClick = onDelete) { Icon(Icons.Filled.DeleteOutline, contentDescription = null, tint = ErrorRed) }
                 TextButton(onClick = onToggle) { Text(if (expanded) "收起" else "展开", fontSize = 11.sp) }
             }
             if (expanded) {
@@ -12660,15 +12661,20 @@ private fun PolicyPicker(current: ToolIpPolicy, onPick: (ToolIpPolicy) -> Unit) 
 }
 
 @Composable
-private fun SwipeDeleteToolBox(onDelete: () -> Unit, content: @Composable () -> Unit) {
-    val shape = RoundedCornerShape(16.dp)
+private fun SwipeDeleteToolBox(
+    onDelete: () -> Unit,
+    stateKey: Any? = Unit,
+    shape: androidx.compose.ui.graphics.Shape = RoundedCornerShape(16.dp),
+    content: @Composable () -> Unit
+) {
     val revealWidthPx = with(LocalDensity.current) { 58.dp.toPx() }
     val thresholdPx = revealWidthPx * 0.42f
     val scope = rememberCoroutineScope()
-    val offsetAnimation = remember { Animatable(0f) }
-    var dragOffset by remember { mutableStateOf(0f) }
-    var isDragging by remember { mutableStateOf(false) }
+    val offsetAnimation = remember(stateKey) { Animatable(0f) }
+    var dragOffset by remember(stateKey) { mutableStateOf(0f) }
+    var isDragging by remember(stateKey) { mutableStateOf(false) }
     val displayedOffset = if (isDragging) dragOffset else offsetAnimation.value
+    val isRevealed = displayedOffset <= -revealWidthPx * 0.9f
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -12692,10 +12698,11 @@ private fun SwipeDeleteToolBox(onDelete: () -> Unit, content: @Composable () -> 
         Box(
             modifier = Modifier
                 .fillMaxWidth()
+                .heightIn(min = 56.dp)
                 .offset { IntOffset(displayedOffset.roundToInt(), 0) }
                 .clip(shape)
                 .background(GlassSwipeSurface)
-                .pointerInput(Unit) {
+                .pointerInput(stateKey) {
                     detectHorizontalDragGestures(
                         onDragStart = {
                             dragOffset = offsetAnimation.value
@@ -12727,7 +12734,26 @@ private fun SwipeDeleteToolBox(onDelete: () -> Unit, content: @Composable () -> 
                         }
                     )
                 }
-        ) { content() }
+        ) {
+            content()
+            if (isRevealed && !isDragging) {
+                Box(
+                    modifier = Modifier
+                        .matchParentSize()
+                        .clickable(
+                            interactionSource = remember(stateKey) { MutableInteractionSource() },
+                            indication = null
+                        ) {
+                            val releaseOffset = offsetAnimation.value
+                            scope.launch {
+                                offsetAnimation.snapTo(releaseOffset)
+                                offsetAnimation.animateTo(0f, tween(190, easing = FastOutSlowInEasing))
+                                dragOffset = 0f
+                            }
+                        }
+                )
+            }
+        }
     }
 }
 
@@ -13754,86 +13780,13 @@ private fun SwipeDeleteHistoryCard(
     onEditRemark: () -> Unit,
     onDelete: () -> Unit
 ) {
-    val revealWidthPx = with(LocalDensity.current) { 78.dp.toPx() }
-    val thresholdPx = revealWidthPx * 0.35f
-    val scope = rememberCoroutineScope()
-    val offsetAnimation = remember(item.id) { Animatable(0f) }
-    var dragOffset by remember(item.id) { mutableStateOf(0f) }
-    var isDragging by remember(item.id) { mutableStateOf(false) }
-    val displayedOffset = if (isDragging) dragOffset else offsetAnimation.value
-    val isRevealed = dragOffset <= -revealWidthPx * 0.9f
-
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(ShapeL)
-            .background(Color.Transparent)
-    ) {
-        if (displayedOffset < 0f) {
-            Box(
-                modifier = Modifier
-                    .align(Alignment.CenterEnd)
-                    .width(64.dp)
-                    .height(72.dp)
-                    .background(DeleteActionSurface, RoundedCornerShape(18.dp))
-                    .clickable(onClick = onDelete),
-                contentAlignment = Alignment.Center
-            ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Icon(Icons.Filled.DeleteOutline, contentDescription = "删除", tint = Color.White, modifier = Modifier.width(22.dp).height(22.dp))
-                    Text("删除", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                }
-            }
-        }
-
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .offset { IntOffset(displayedOffset.roundToInt(), 0) }
-                .clip(ShapeL)
-                .background(GlassSwipeSurface)
-                .pointerInput(item.id) {
-                    detectHorizontalDragGestures(
-                        onDragStart = {
-                            dragOffset = offsetAnimation.value
-                            isDragging = true
-                            scope.launch { offsetAnimation.stop() }
-                        },
-                        onDragEnd = {
-                            val releaseOffset = dragOffset
-                            val targetOffset = if (releaseOffset <= -thresholdPx) -revealWidthPx else 0f
-                            scope.launch {
-                                offsetAnimation.snapTo(releaseOffset)
-                                isDragging = false
-                                offsetAnimation.animateTo(targetOffset, tween(170, easing = FastOutSlowInEasing))
-                                dragOffset = targetOffset
-                            }
-                        },
-                        onDragCancel = {
-                            val releaseOffset = dragOffset
-                            scope.launch {
-                                offsetAnimation.snapTo(releaseOffset)
-                                isDragging = false
-                                offsetAnimation.animateTo(0f, tween(170, easing = FastOutSlowInEasing))
-                                dragOffset = 0f
-                            }
-                        },
-                        onHorizontalDrag = { change, dragAmount ->
-                            change.consume()
-                            dragOffset = (dragOffset + dragAmount).coerceIn(-revealWidthPx, 0f)
-                        }
-                    )
-                }
-        ) {
-            HistoryCard(
-                item = item,
-                maskPrivacy = maskPrivacy,
-                onClick = {
-                    if (isRevealed) dragOffset = 0f else onClick()
-                },
-                onEditRemark = onEditRemark
-            )
-        }
+    SwipeDeleteToolBox(onDelete = onDelete, stateKey = item.id, shape = ShapeL) {
+        HistoryCard(
+            item = item,
+            maskPrivacy = maskPrivacy,
+            onClick = onClick,
+            onEditRemark = onEditRemark
+        )
     }
 }
 
