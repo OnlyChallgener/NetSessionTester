@@ -34,8 +34,6 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -83,7 +81,7 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.AlertDialog as MaterialAlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -4186,24 +4184,25 @@ private fun NetSessionTesterApp() {
     }
 
 
-    Scaffold(
-        snackbarHost = { OneUiSnackbarHost(snackbarHostState) },
-        bottomBar = {
-            if (!showRunLogDetail && appToolPage == AppToolPage.NONE) {
-                BottomNav(selectedTab = selectedTab, onSelect = {
-                    showRunLogDetail = false
-                    selectedTab = it
-                })
-            }
-        },
-        containerColor = Color.Transparent
-    ) { padding ->
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding)
-        ) {
-            GlassAppBackground()
+    Box(modifier = Modifier.fillMaxSize()) {
+        GlassAppBackground()
+        Scaffold(
+            snackbarHost = { OneUiSnackbarHost(snackbarHostState) },
+            bottomBar = {
+                if (!showRunLogDetail && appToolPage == AppToolPage.NONE) {
+                    BottomNav(selectedTab = selectedTab, onSelect = {
+                        showRunLogDetail = false
+                        selectedTab = it
+                    })
+                }
+            },
+            containerColor = Color.Transparent
+        ) { padding ->
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+            ) {
             if (showRunLogDetail) {
                 FullRunLogPage(
                     logs = state.logs,
@@ -4447,6 +4446,7 @@ private fun NetSessionTesterApp() {
         }
     }
 }
+}
 
 
 private suspend fun saveHistorySnapshotImage(context: Context, summary: SessionSummary, maskPrivacy: Boolean): Boolean = withContext(Dispatchers.IO) {
@@ -4546,7 +4546,7 @@ private fun HistoryDetailDialog(summary: SessionSummary, maskPrivacy: Boolean, o
                         }
                     }) { Text("保存图片", fontSize = 12.sp) }
                 }
-                Text("OneUI / Material 3 卡片详情", color = Muted, fontSize = 11.sp)
+                Text("检测数据 · 趋势与诊断建议", color = Muted, fontSize = 11.sp)
             }
         },
         text = {
@@ -4567,7 +4567,7 @@ private fun HistoryDetailDialog(summary: SessionSummary, maskPrivacy: Boolean, o
                 }
             }
         },
-        shape = ShapeL
+        shape = GlassPopupShape
     )
 }
 
@@ -4791,7 +4791,6 @@ private fun PingHistoryToolPage(logs: List<PingLogEntry>, onBack: () -> Unit, on
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color.Transparent)
             .padding(horizontal = 14.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
@@ -5835,14 +5834,7 @@ private fun FullRunLogPage(
             .padding(horizontal = 14.dp),
         verticalArrangement = Arrangement.spacedBy(7.dp)
     ) {
-        item {
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 4.dp, bottom = 5.dp)) {
-                TextButton(onClick = onBack, modifier = Modifier.width(52.dp)) {
-                    Text("‹", fontSize = 26.sp, fontWeight = FontWeight.Bold, color = TextDark)
-                }
-                Text("运行日志", fontSize = 21.sp, fontWeight = FontWeight.ExtraBold, color = TextDark, modifier = Modifier.weight(1f))
-            }
-        }
+        item { ToolPageHeader("运行日志", "最近 500 条运行记录", onBack) }
         item {
             SoftCard {
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -6081,7 +6073,7 @@ private fun VersionInfoDialog(
                 }
             }
         },
-        shape = ShapeL
+        shape = GlassPopupShape
     )
 }
 
@@ -6137,7 +6129,7 @@ private fun UpdateAvailableDialog(
                 Text("后台下载时顶部会显示下载横幅；如果速度较慢，可打开 GitHub 手动下载。", color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
             }
         },
-        shape = ShapeL
+        shape = GlassPopupShape
     )
 }
 
@@ -6240,7 +6232,7 @@ private fun UpdateDownloadDialog(
                 Text(note, color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
             }
         },
-        shape = ShapeL
+        shape = GlassPopupShape
     )
 }
 
@@ -6250,10 +6242,11 @@ private fun OneUiSnackbarHost(hostState: SnackbarHostState) {
         Card(
             modifier = Modifier
                 .padding(horizontal = 16.dp, vertical = 10.dp)
-                .fillMaxWidth(),
+                .fillMaxWidth()
+                .border(1.dp, GlassPopupBorder, RoundedCornerShape(18.dp)),
             shape = RoundedCornerShape(18.dp),
-            colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.98f)),
-            elevation = CardDefaults.cardElevation(defaultElevation = 12.dp)
+            colors = CardDefaults.cardColors(containerColor = GlassPopupSurface),
+            elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
         ) {
             Row(
                 modifier = Modifier
@@ -6299,8 +6292,8 @@ private fun BottomNoticeBanner(
     AnimatedVisibility(
         visible = state.visible && state.message.isNotBlank(),
         modifier = modifier,
-        enter = fadeIn(animationSpec = tween(160)) + slideInVertically(animationSpec = tween(220)) { it / 2 },
-        exit = fadeOut(animationSpec = tween(180)) + slideOutVertically(animationSpec = tween(200)) { it / 2 }
+        enter = slideInVertically(animationSpec = tween(220)) { it / 2 },
+        exit = slideOutVertically(animationSpec = tween(200)) { it / 2 }
     ) {
         val tint = when (state.tone) {
             BottomNoticeTone.Success -> Green
@@ -6317,10 +6310,11 @@ private fun BottomNoticeBanner(
         Card(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 6.dp),
+                .padding(horizontal = 6.dp)
+                .border(1.dp, GlassPopupBorder, RoundedCornerShape(18.dp)),
             shape = RoundedCornerShape(18.dp),
-            colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.98f)),
-            elevation = CardDefaults.cardElevation(defaultElevation = 12.dp)
+            colors = CardDefaults.cardColors(containerColor = GlassPopupSurface),
+            elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
         ) {
             Row(
                 modifier = Modifier
@@ -6412,8 +6406,9 @@ private fun UpdateDownloadBanner(
             }
             .clickable { if (state.finished) onInstall() else onOpen() },
         shape = ShapeM,
-        colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.98f)),
-        elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
+        colors = CardDefaults.cardColors(containerColor = GlassPopupSurface),
+        border = BorderStroke(1.dp, GlassPopupBorder),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
     ) {
         Column(Modifier.padding(horizontal = 12.dp, vertical = 9.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -6463,6 +6458,30 @@ private fun VersionLine(version: String, text: String) {
         Text(version, color = Blue, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.width(92.dp))
         Text(text, color = TextDark, fontSize = 12.sp, lineHeight = 16.sp, modifier = Modifier.weight(1f))
     }
+}
+
+@Composable
+private fun AlertDialog(
+    onDismissRequest: () -> Unit,
+    confirmButton: @Composable () -> Unit,
+    dismissButton: @Composable (() -> Unit)? = null,
+    title: @Composable (() -> Unit)? = null,
+    text: @Composable (() -> Unit)? = null,
+    shape: androidx.compose.ui.graphics.Shape = GlassPopupShape
+) {
+    MaterialAlertDialog(
+        onDismissRequest = onDismissRequest,
+        confirmButton = confirmButton,
+        dismissButton = dismissButton,
+        title = title,
+        text = text,
+        shape = shape,
+        containerColor = GlassPopupSurface,
+        iconContentColor = Blue,
+        titleContentColor = TextDark,
+        textContentColor = TextDark,
+        tonalElevation = 0.dp
+    )
 }
 
 @Composable
@@ -6950,7 +6969,7 @@ private fun HistoryTextField(
                     }
                 }
             },
-            shape = ShapeL
+            shape = GlassPopupShape
         )
     }
     if (addOpen && onAdd != null) {
@@ -6979,7 +6998,7 @@ private fun HistoryTextField(
                 }) { Text("添加", fontWeight = FontWeight.Bold) }
             },
             dismissButton = { TextButton(onClick = { addOpen = false }) { Text("取消") } },
-            shape = ShapeL
+            shape = GlassPopupShape
         )
     }
 }
@@ -8475,7 +8494,7 @@ private fun NatModeChip(label: String, selected: Boolean, modifier: Modifier, on
 
 @Composable
 private fun MiniResultTile(label: String, value: String, modifier: Modifier = Modifier) {
-    Column(modifier = modifier.background(Color.White.copy(alpha = 0.8f), ShapeM).padding(10.dp)) {
+    Column(modifier = modifier.background(Color.White, ShapeM).padding(10.dp)) {
         Text(label, color = Muted, fontSize = 11.sp)
         Text(value, color = TextDark, fontWeight = FontWeight.Bold, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis, lineHeight = 15.sp)
     }
@@ -9249,8 +9268,8 @@ private fun ToolPageHeader(title: String, subtitle: String, onBack: () -> Unit) 
                     onClick = onBack
                 ),
             shape = backShape,
-            color = Color.White,
-            border = BorderStroke(1.dp, Border),
+            color = GlassPopupSurface,
+            border = BorderStroke(1.dp, GlassPopupBorder),
             tonalElevation = 0.dp,
             shadowElevation = 0.dp
         ) {
@@ -10146,7 +10165,8 @@ private suspend fun runTcpBusinessMtuProbe(
     hostInput: String,
     ipv6: Boolean,
     timeoutMs: Int,
-    port: Int = 443
+    port: Int = 443,
+    activeSocket: java.util.concurrent.atomic.AtomicReference<Socket?>? = null
 ): MtuTcpProbe = withContext(Dispatchers.IO) {
     val host = cleanToolHost(hostInput)
     val address = resolveMtuFamilyAddress(host, ipv6)
@@ -10155,12 +10175,18 @@ private suspend fun runTcpBusinessMtuProbe(
     val localMtu = readLocalInterfaceMtu(context).first
     val start = SystemClock.elapsedRealtime()
     val socket = Socket()
-    val ok = runCatching {
-        socket.tcpNoDelay = true
-        socket.connect(InetSocketAddress(address, port), timeoutMs.coerceIn(500, 10000))
-        true
-    }.getOrElse { false }
-    runCatching { socket.close() }
+    activeSocket?.set(socket)
+    val ok = try {
+        runCatching {
+            socket.tcpNoDelay = true
+            socket.connect(InetSocketAddress(address, port), timeoutMs.coerceIn(500, 10000))
+            true
+        }.getOrElse { false }
+    } finally {
+        activeSocket?.compareAndSet(socket, null)
+        runCatching { socket.close() }
+    }
+    currentCoroutineContext().ensureActive()
     val cost = SystemClock.elapsedRealtime() - start
     val estimatedMss = if (ok) localMtu?.let { (it - if (ipv6) 60 else 40).coerceAtLeast(0) } else null
     val detail = if (ok) {
@@ -10175,7 +10201,7 @@ private fun pmtuModeNote(ipv6: Boolean): String {
     return if (ipv6) "PMTU增强：IPv6 使用大包探测，依赖路径 Packet Too Big 语义；若系统 ping/网络策略限制，结果会降级参考。" else "PMTU增强：IPv4 优先使用 DF 禁止分片语义探测；若系统 ping 不支持 -M do，会显示降级或失败原因。"
 }
 
-private fun runMtuPing(address: String, ipv6: Boolean, mtu: Int, timeoutMs: Int, mode: MtuProbeMode): Pair<Boolean, String> {
+private suspend fun runMtuPing(address: String, ipv6: Boolean, mtu: Int, timeoutMs: Int, mode: MtuProbeMode): Pair<Boolean, String> {
     val waitSec = ((timeoutMs.coerceIn(500, 10000) + 999) / 1000).coerceIn(1, 10).toString()
     val payload = if (ipv6) (mtu - 48).coerceAtLeast(0) else (mtu - 28).coerceAtLeast(0)
     val pmtuCommands = if (ipv6) {
@@ -10208,12 +10234,31 @@ private fun runMtuPing(address: String, ipv6: Boolean, mtu: Int, timeoutMs: Int,
     var last = ""
     var unsupported = false
     for (cmd in commands) {
+        currentCoroutineContext().ensureActive()
         val result = runCatching {
             val process = ProcessBuilder(cmd).redirectErrorStream(true).start()
-            val finished = process.waitFor((timeoutMs + 900).toLong(), TimeUnit.MILLISECONDS)
-            if (!finished) process.destroyForcibly()
-            process.inputStream.bufferedReader().use { it.readText() }
-        }.getOrDefault("")
+            try {
+                val deadline = SystemClock.elapsedRealtime() + timeoutMs + 900L
+                var finished = false
+                while (currentCoroutineContext().isActive && SystemClock.elapsedRealtime() < deadline) {
+                    if (process.waitFor(50L, TimeUnit.MILLISECONDS)) {
+                        finished = true
+                        break
+                    }
+                }
+                currentCoroutineContext().ensureActive()
+                if (!finished) process.destroyForcibly()
+                process.inputStream.bufferedReader().use { it.readText() }
+            } finally {
+                if (process.isAlive) {
+                    runCatching { process.destroy() }
+                    if (process.waitFor(80L, TimeUnit.MILLISECONDS).not()) runCatching { process.destroyForcibly() }
+                }
+            }
+        }.getOrElse { error ->
+            if (error is CancellationException) throw error
+            ""
+        }
         if (result.isBlank()) continue
         last = result
         val lower = result.lowercase(Locale.getDefault())
@@ -10483,6 +10528,7 @@ private suspend fun runMtuProbeLive(
     probeMode: MtuProbeMode,
     timeoutMs: Int,
     pauseRequested: () -> Boolean,
+    activeSocket: java.util.concurrent.atomic.AtomicReference<Socket?>,
     onStep: suspend (MtuStep) -> Unit
 ): MtuResult = withContext(Dispatchers.IO) {
     val host = cleanToolHost(hostInput)
@@ -10507,7 +10553,7 @@ private suspend fun runMtuProbeLive(
     for (ipv6 in families) {
         waitWhileMtuPaused(pauseRequested)
         if (probeMode == MtuProbeMode.TCP) {
-            val tcp = runTcpBusinessMtuProbe(context, host, ipv6, timeoutMs)
+            val tcp = runTcpBusinessMtuProbe(context, host, ipv6, timeoutMs, activeSocket = activeSocket)
             tcpResults += tcp
             checkLines += MtuCheckLine(
                 name = "${tcp.protocol} TCP",
@@ -10554,7 +10600,7 @@ private suspend fun runMtuProbeLive(
         }
 
         if (probeMode == MtuProbeMode.FAILOVER && path.mtu == null) {
-            val tcp = runTcpBusinessMtuProbe(context, host, ipv6, timeoutMs)
+            val tcp = runTcpBusinessMtuProbe(context, host, ipv6, timeoutMs, activeSocket = activeSocket)
             tcpResults += tcp
             checkLines += MtuCheckLine(
                 name = "${tcp.protocol} TCP辅助",
@@ -11238,21 +11284,21 @@ private fun roamingXTicks(size: Int): List<Int> {
 private fun MtuToolPage(onBack: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val pauseFlag = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
+    val activeSocket = remember { java.util.concurrent.atomic.AtomicReference<Socket?>(null) }
     var host by remember { mutableStateOf("www.qq.com") }
     var timeoutMs by remember { mutableStateOf("1200") }
     var runMode by remember { mutableStateOf(MtuRunMode.IPV4) }
     var probeMode by remember { mutableStateOf(MtuProbeMode.FAILOVER) }
     var running by remember { mutableStateOf(false) }
-    var paused by remember { mutableStateOf(false) }
+    var manuallyStopped by remember { mutableStateOf(false) }
     var job by remember { mutableStateOf<Job?>(null) }
     var steps by remember { mutableStateOf<List<MtuStep>>(emptyList()) }
     var result by remember { mutableStateOf<MtuResult?>(null) }
 
     DisposableEffect(Unit) {
         onDispose {
-            pauseFlag.set(false)
             job?.cancel()
+            activeSocket.getAndSet(null)?.let { socket -> runCatching { socket.close() } }
         }
     }
 
@@ -11306,12 +11352,12 @@ private fun MtuToolPage(onBack: () -> Unit) {
                 Button(
                     onClick = {
                         if (running) {
-                            paused = !paused
-                            pauseFlag.set(paused)
+                            manuallyStopped = true
+                            job?.cancel(CancellationException("手动停止 MTU 测试"))
+                            activeSocket.getAndSet(null)?.let { socket -> runCatching { socket.close() } }
                         } else {
                             running = true
-                            paused = false
-                            pauseFlag.set(false)
+                            manuallyStopped = false
                             steps = emptyList()
                             result = null
                             job = scope.launch {
@@ -11322,15 +11368,14 @@ private fun MtuToolPage(onBack: () -> Unit) {
                                         runMode = runMode,
                                         probeMode = probeMode,
                                         timeoutMs = timeoutMs.safeInt(1200, 500, 10000),
-                                        pauseRequested = { pauseFlag.get() }
+                                        pauseRequested = { false },
+                                        activeSocket = activeSocket
                                     ) { step ->
                                         steps = steps + step
                                     }
                                 } catch (_: CancellationException) {
-                                    // 页面退出时结束当前检测，不写入错误结果。
+                                    // 手动停止或离开页面时结束本轮，不写入伪失败结果。
                                 } finally {
-                                    pauseFlag.set(false)
-                                    paused = false
                                     running = false
                                     job = null
                                 }
@@ -11338,12 +11383,12 @@ private fun MtuToolPage(onBack: () -> Unit) {
                         }
                     },
                     modifier = Modifier.fillMaxWidth().height(48.dp),
-                    shape = RoundedCornerShape(18.dp)
+                    shape = RoundedCornerShape(18.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = if (running) ErrorRed else Blue)
                 ) {
                     Text(
                         when {
-                            running && paused -> "继续测试"
-                            running -> "暂停"
+                            running -> "停止测试"
                             result != null -> "重新测试"
                             else -> "开始测试"
                         },
@@ -11352,27 +11397,27 @@ private fun MtuToolPage(onBack: () -> Unit) {
                 }
             }
         }
-        item { MtuProcessCard(running = running, paused = paused, steps = steps, result = result) }
+        item { MtuProcessCard(running = running, manuallyStopped = manuallyStopped, steps = steps, result = result) }
         item { Spacer(Modifier.height(16.dp)) }
     }
 }
 
 @Composable
-private fun MtuProcessCard(running: Boolean, paused: Boolean, steps: List<MtuStep>, result: MtuResult?) {
+private fun MtuProcessCard(running: Boolean, manuallyStopped: Boolean, steps: List<MtuStep>, result: MtuResult?) {
     SoftCompactToolCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("检测过程", color = TextDark, fontWeight = FontWeight.ExtraBold, fontSize = 14.sp, modifier = Modifier.weight(1f))
             val stateText = when {
-                paused -> "已暂停"
                 running -> "运行中"
                 result != null -> "完成"
+                manuallyStopped -> "已停止"
                 else -> "等待"
             }
-            Text(stateText, color = if (running) Blue else Muted, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            Text(stateText, color = if (running) Blue else if (manuallyStopped) ErrorRed else Muted, fontSize = 11.sp, fontWeight = FontWeight.Bold)
         }
         if (steps.isEmpty()) {
             Text(
-                if (paused) "检测已暂停，点击继续测试后从当前进度恢复。" else "开始后会自动寻找路径可稳定通过的最大数据包。",
+                if (manuallyStopped) "本轮 MTU 测试已手动停止，点击开始测试可重新检测。" else "开始后会自动寻找路径可稳定通过的最大数据包。",
                 color = Muted,
                 fontSize = 11.sp,
                 lineHeight = 15.sp
@@ -11998,8 +12043,8 @@ private fun RoamingHistoryItem(
         modifier = Modifier.fillMaxWidth(),
         shape = ShapeM,
         color = Color.White,
-        tonalElevation = 1.dp,
-        shadowElevation = 1.dp,
+        tonalElevation = 0.dp,
+        shadowElevation = 0.dp,
         border = BorderStroke(1.dp, Border.copy(alpha = 0.72f))
     ) {
         Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
@@ -12437,7 +12482,15 @@ private fun RoamingIntervalField(value: String, onValueChange: (String) -> Unit)
         }
         Box {
             TextButton(onClick = { expanded = true }) { Text("预设", fontSize = 11.sp) }
-            DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            DropdownMenu(
+                expanded = expanded,
+                onDismissRequest = { expanded = false },
+                shape = RoundedCornerShape(16.dp),
+                containerColor = GlassPopupSurface,
+                tonalElevation = 0.dp,
+                shadowElevation = 0.dp,
+                border = BorderStroke(1.dp, GlassPopupBorder)
+            ) {
                 RoamingPingIntervalPresets.forEach { preset ->
                     DropdownMenuItem(
                         text = { Text("${preset}ms", fontSize = 12.sp) },
@@ -12463,7 +12516,15 @@ private fun RoamingTimeoutField(
         }
         Box {
             TextButton(onClick = { expanded = true }) { Text(if (custom) "预设" else "自动", fontSize = 11.sp) }
-            DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            DropdownMenu(
+                expanded = expanded,
+                onDismissRequest = { expanded = false },
+                shape = RoundedCornerShape(16.dp),
+                containerColor = GlassPopupSurface,
+                tonalElevation = 0.dp,
+                shadowElevation = 0.dp,
+                border = BorderStroke(1.dp, GlassPopupBorder)
+            ) {
                 DropdownMenuItem(
                     text = { Text("自动", fontSize = 12.sp) },
                     onClick = { onAuto(); expanded = false }
@@ -12582,7 +12643,7 @@ private fun PolicyPicker(current: ToolIpPolicy, onPick: (ToolIpPolicy) -> Unit) 
                         }
                     }
                 },
-                shape = ShapeL
+                shape = GlassPopupShape
             )
         }
     }
@@ -12619,6 +12680,7 @@ private fun SwipeDeleteToolBox(onDelete: () -> Unit, content: @Composable () -> 
         }
         Box(
             modifier = Modifier
+                .fillMaxWidth()
                 .offset { IntOffset(displayedOffset.roundToInt(), 0) }
                 .clip(shape)
                 .background(GlassSwipeSurface)
@@ -13706,6 +13768,7 @@ private fun SwipeDeleteHistoryCard(
 
         Box(
             modifier = Modifier
+                .fillMaxWidth()
                 .offset { IntOffset(displayedOffset.roundToInt(), 0) }
                 .clip(ShapeL)
                 .background(GlassSwipeSurface)
@@ -14177,3 +14240,6 @@ private val GlassSwipeSurface = Color(0xFFF8FBFF)
 private val DeleteActionSurface = Color(0xFFE5484D)
 private val GlassNavSurface = Color(0xFFF8FBFF)
 private val GlassNavSelectionSurface = Color(0xFFE7ECFF)
+private val GlassPopupSurface = Color(0xFFF8FBFF)
+private val GlassPopupBorder = Color(0xFFD8E3F1)
+private val GlassPopupShape = RoundedCornerShape(26.dp)
