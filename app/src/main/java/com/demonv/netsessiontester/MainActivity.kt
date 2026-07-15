@@ -163,8 +163,6 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.IntOffset
-import androidx.compose.ui.zIndex
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.draw.clip
@@ -5195,24 +5193,15 @@ private fun ReorderableCardItem(
     val density = LocalDensity.current
     val thresholdPx = with(density) { 124.dp.toPx() }
     var lastReorderAt by remember { mutableStateOf(0L) }
-    val isDragging = draggingId == id
-    val scale by animateFloatAsState(if (isDragging) 1.018f else 1f, tween(220, easing = FastOutSlowInEasing), label = "dragScale")
 
-    Box(
-        modifier = modifier
-            .zIndex(if (isDragging) 20f else 0f)
-            .then(
-                if (isDragging || scale != 1f) {
-                    Modifier.graphicsLayer {
-                        translationY = if (isDragging) dragOffsetY else 0f
-                        scaleX = scale
-                        scaleY = scale
-                    }
-                } else {
-                    Modifier
-                }
-            )
-            .pointerInput(id, order) {
+    Box(modifier = modifier) {
+        content()
+        Box(
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .width(48.dp)
+                .height(16.dp)
+                .pointerInput(id, order) {
                 detectDragGesturesAfterLongPress(
                     onDragStart = {
                         draggingId = id
@@ -5250,9 +5239,17 @@ private fun ReorderableCardItem(
                         }
                     }
                 )
-            }
-    ) {
-        content()
+            },
+            contentAlignment = Alignment.TopCenter
+        ) {
+            Box(
+                Modifier
+                    .padding(top = 4.dp)
+                    .width(24.dp)
+                    .height(3.dp)
+                    .background(Border.copy(alpha = 0.62f), CircleShape)
+            )
+        }
     }
 }
 
@@ -5351,7 +5348,6 @@ private fun SettingsPage(
         items(settingsCardOrder, key = { it }) { cardId ->
             ReorderableCardItem(
                 id = cardId,
-                modifier = Modifier.animateItem(placementSpec = tween(360, easing = FastOutSlowInEasing)),
                 order = settingsCardOrder,
                 onOrderChange = ::updateSettingsOrder
             ) {
@@ -5954,10 +5950,10 @@ private fun LogsPage(
         if (history.isEmpty()) {
             item { SoftCard { Text("暂无历史记录", color = TextDark, fontSize = 13.sp) } }
         } else {
-            itemsIndexed(
+            items(
                 history.take(historyLimit.toIntOrNull()?.coerceIn(10, 100) ?: 30),
-                key = { index, item -> "${item.id}_${item.startedAtEpochMs}_$index" }
-            ) { _, item ->
+                key = { item -> "${item.id}_${item.startedAtEpochMs}" }
+            ) { item ->
                 SwipeDeleteHistoryCard(
                     item = item,
                     maskPrivacy = maskPrivacy,
@@ -6382,28 +6378,35 @@ private fun UpdateDownloadBanner(
         else -> Blue
     }
     var dragX by remember { mutableStateOf(0f) }
+    var isDragging by remember { mutableStateOf(false) }
     val dragOffset by animateFloatAsState(
         targetValue = dragX,
         animationSpec = tween(140, easing = FastOutSlowInEasing),
         label = "update_banner_drag"
     )
+    val displayedOffset = if (isDragging) dragX else dragOffset
     val dismissible = state.failed || state.finished || state.message.contains("取消")
 
     Card(
         modifier = modifier
             .fillMaxWidth()
-            .offset { IntOffset(dragOffset.roundToInt(), 0) }
+            .offset { IntOffset(displayedOffset.roundToInt(), 0) }
             .pointerInput(dismissible) {
                 if (dismissible) {
                     detectHorizontalDragGestures(
+                        onDragStart = { isDragging = true },
                         onHorizontalDrag = { change, amount ->
                             change.consume()
-                            dragX += amount
+                            dragX = (dragX + amount).coerceIn(-240f, 240f)
                         },
                         onDragEnd = {
+                            isDragging = false
                             if (kotlin.math.abs(dragX) > 80f) onDismiss() else dragX = 0f
                         },
-                        onDragCancel = { dragX = 0f }
+                        onDragCancel = {
+                            isDragging = false
+                            dragX = 0f
+                        }
                     )
                 }
             }
@@ -6467,7 +6470,6 @@ private fun SoftCard(content: @Composable ColumnScope.() -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .shadow(GlassCardElevation, ShapeL, clip = false)
             .clip(ShapeL)
             .background(GlassCardBrush)
             .border(1.dp, GlassBorderBrush, ShapeL)
@@ -12592,7 +12594,9 @@ private fun SwipeDeleteToolBox(onDelete: () -> Unit, content: @Composable () -> 
     val revealWidthPx = with(LocalDensity.current) { 58.dp.toPx() }
     val thresholdPx = revealWidthPx * 0.42f
     var dragOffset by remember { mutableStateOf(0f) }
+    var isDragging by remember { mutableStateOf(false) }
     val animatedOffset by animateFloatAsState(dragOffset, tween(190, easing = FastOutSlowInEasing), label = "toolSwipe")
+    val displayedOffset = if (isDragging) dragOffset else animatedOffset
     Box(modifier = Modifier.fillMaxWidth()) {
         Box(
             modifier = Modifier
@@ -12611,11 +12615,18 @@ private fun SwipeDeleteToolBox(onDelete: () -> Unit, content: @Composable () -> 
         }
         Box(
             modifier = Modifier
-                .offset { IntOffset(animatedOffset.roundToInt(), 0) }
+                .offset { IntOffset(displayedOffset.roundToInt(), 0) }
                 .pointerInput(Unit) {
                     detectHorizontalDragGestures(
-                        onDragEnd = { dragOffset = if (dragOffset <= -thresholdPx) -revealWidthPx else 0f },
-                        onDragCancel = { dragOffset = 0f },
+                        onDragStart = { isDragging = true },
+                        onDragEnd = {
+                            isDragging = false
+                            dragOffset = if (dragOffset <= -thresholdPx) -revealWidthPx else 0f
+                        },
+                        onDragCancel = {
+                            isDragging = false
+                            dragOffset = 0f
+                        },
                         onHorizontalDrag = { change, dragAmount ->
                             change.consume()
                             dragOffset = (dragOffset + dragAmount).coerceIn(-revealWidthPx, 0f)
@@ -12711,7 +12722,6 @@ private fun SoftCompactToolCard(modifier: Modifier = Modifier, content: @Composa
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .shadow(GlassCompactElevation, shape, clip = false)
             .clip(shape)
             .background(GlassCompactBrush)
             .border(1.dp, GlassBorderBrush, shape)
@@ -13653,23 +13663,25 @@ private fun SwipeDeleteHistoryCard(
     val revealWidthPx = with(LocalDensity.current) { 78.dp.toPx() }
     val thresholdPx = revealWidthPx * 0.35f
     var dragOffset by remember(item.id) { mutableStateOf(0f) }
-    val isRevealed = kotlin.math.abs(dragOffset) >= revealWidthPx * 0.9f
-    val revealLeft = dragOffset > 0f
+    var isDragging by remember(item.id) { mutableStateOf(false) }
+    val animatedOffset by animateFloatAsState(
+        targetValue = dragOffset,
+        animationSpec = tween(170, easing = FastOutSlowInEasing),
+        label = "historySwipe"
+    )
+    val displayedOffset = if (isDragging) dragOffset else animatedOffset
+    val isRevealed = dragOffset <= -revealWidthPx * 0.9f
 
     Box(modifier = Modifier.fillMaxWidth()) {
-        if (isRevealed) {
+        if (displayedOffset < 0f) {
             Box(
                 modifier = Modifier
-                    .align(if (revealLeft) Alignment.CenterStart else Alignment.CenterEnd)
+                    .align(Alignment.CenterEnd)
                     .width(72.dp)
                     .heightIn(min = 156.dp)
                     .background(
                         ErrorRed,
-                        if (revealLeft) {
-                            RoundedCornerShape(topStart = 28.dp, bottomStart = 28.dp, topEnd = 14.dp, bottomEnd = 14.dp)
-                        } else {
-                            RoundedCornerShape(topEnd = 28.dp, bottomEnd = 28.dp, topStart = 14.dp, bottomStart = 14.dp)
-                        }
+                        RoundedCornerShape(topEnd = 28.dp, bottomEnd = 28.dp, topStart = 14.dp, bottomStart = 14.dp)
                     )
                     .clickable(onClick = onDelete),
                 contentAlignment = Alignment.Center
@@ -13683,19 +13695,21 @@ private fun SwipeDeleteHistoryCard(
 
         Box(
             modifier = Modifier
-                .offset { IntOffset(dragOffset.roundToInt(), 0) }
+                .offset { IntOffset(displayedOffset.roundToInt(), 0) }
                 .pointerInput(item.id) {
                     detectHorizontalDragGestures(
+                        onDragStart = { isDragging = true },
                         onDragEnd = {
-                            dragOffset = when {
-                                dragOffset <= -thresholdPx -> -revealWidthPx
-                                dragOffset >= thresholdPx -> revealWidthPx
-                                else -> 0f
-                            }
+                            isDragging = false
+                            dragOffset = if (dragOffset <= -thresholdPx) -revealWidthPx else 0f
                         },
-                        onDragCancel = { dragOffset = 0f },
-                        onHorizontalDrag = { _, dragAmount ->
-                            dragOffset = (dragOffset + dragAmount).coerceIn(-revealWidthPx, revealWidthPx)
+                        onDragCancel = {
+                            isDragging = false
+                            dragOffset = 0f
+                        },
+                        onHorizontalDrag = { change, dragAmount ->
+                            change.consume()
+                            dragOffset = (dragOffset + dragAmount).coerceIn(-revealWidthPx, 0f)
                         }
                     )
                 }
@@ -14157,5 +14171,3 @@ private val GlassSelectionBrush = Brush.horizontalGradient(
 private val GlassBorderBrush = Brush.linearGradient(
     listOf(Color.White.copy(alpha = 0.96f), Color(0xFFCBDCF4).copy(alpha = 0.58f))
 )
-private val GlassCardElevation = 5.dp
-private val GlassCompactElevation = 3.dp
