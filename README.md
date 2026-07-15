@@ -2,7 +2,7 @@
 
 NetSessionTester 是一款 Android 网络测试工具，支持连接数测试、Ping 监控、NAT 诊断、NSLookup、MTU 检查、WiFi 漫游监测以及 Traceroute 路由追踪。
 
-当前发布候选版本：`V1.1.16 build146`。
+当前发布候选版本：`v1.0.18 build147`。
 
 ## 发布说明结构
 

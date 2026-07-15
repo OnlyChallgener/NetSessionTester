@@ -3,6 +3,10 @@
 This file keeps short historical notes for local self-test and release-fix builds.
 Formal user-facing release notes stay in `CHANGELOG.md`; current validation notes stay in `TEST_NOTES_current.md`.
 
+## v1.0.18 release line
+
+- build147: unified the visible version number, refreshed the in-app recent-version list, separated STUN text editing gestures from card deletion, and completed NAT/roaming history fixes.
+
 ## v0.9.9 local self-test line
 
 - build65: added "ignore this version" behavior for update prompts and fixed bottom navigation text clipping.

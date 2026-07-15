@@ -151,6 +151,7 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.positionChange
@@ -651,8 +652,8 @@ private fun currentAppVersionCode(context: Context): Long = runCatching {
 private fun currentAppVersionName(context: Context): String {
     return runCatching {
         val pkg = context.packageManager.getPackageInfo(context.packageName, 0)
-        pkg.versionName?.takeIf { it.isNotBlank() } ?: "V1.0.8"
-    }.getOrDefault("V1.0.8")
+        pkg.versionName?.takeIf { it.isNotBlank() } ?: "v1.0.18"
+    }.getOrDefault("v1.0.18")
 }
 
 private fun displayVersionName(raw: String): String {
@@ -6064,12 +6065,11 @@ private fun VersionInfoDialog(
                     Text("当前版本", color = Muted, fontSize = 12.sp, modifier = Modifier.weight(1f))
                     StatusChip(displayVersionName(currentAppVersionName(LocalContext.current)), BlueSoft, Blue, compact = true)
                 }
-                VersionLine(displayVersionName(currentAppVersionName(LocalContext.current)), "正式版：修复 Ping IPv4/AUTO 解析、0ms异常、目标历史与图表目标显示。")
-                VersionLine("V1.0.6", "目标与模式合并，网络信息折叠，Ping日志持久化，卡片长按拖动排序。")
-                VersionLine("V1.0.5", "Ping采集和界面展示分离，图表按秒聚合，日志弹窗分组优化。")
-                VersionLine("V1.0.4", "新增独立Ping、Ping参数、响应日志与NAT兼容判定。")
-                VersionLine("V1.0.3", "修复版本显示、释放通知重复和底部通知样式。")
-                VersionLine("V1.0.0", "正式版：定速发射核心、释放耗时、网络检测与更新流程。")
+                VersionLine(displayVersionName(currentAppVersionName(LocalContext.current)), "NAT历史支持滑动删除，修复圆角与编辑手势冲突，漫游历史显示条数和空间占用。")
+                VersionLine("v1.0.17", "统一各页面滑动删除交互，公网IP改为网络变化驱动刷新。")
+                VersionLine("v1.0.16", "修复弹窗、二级页面与底部栏叠图透图，MTU暂停改为停止。")
+                VersionLine("v1.0.15", "修复后台Ping终止、连接测试页面跳转与运行状态残留。")
+                VersionLine("v1.0.14", "引入蓝白紫毛玻璃界面，优化页面滑动、图层和切换动画。")
                 HorizontalDivider(color = Border)
                 Button(
                     onClick = onCheckUpdate,
@@ -8290,6 +8290,7 @@ private fun NatDiagnosticDialog(
     onRun: () -> Unit,
     onDismiss: () -> Unit
 ) {
+    var editingServerIndex by remember { mutableStateOf<Int?>(null) }
     AlertDialog(
         onDismissRequest = { if (!running) onDismiss() },
         confirmButton = {
@@ -8342,7 +8343,8 @@ private fun NatDiagnosticDialog(
                             }
                             onServersChange(next)
                         },
-                        stateKey = index to servers.size
+                        stateKey = index to servers.size,
+                        swipeEnabled = editingServerIndex != index
                     ) {
                         OutlinedTextField(
                             value = item,
@@ -8355,7 +8357,15 @@ private fun NatDiagnosticDialog(
                             placeholder = { Text(defaultNatServer(mode), fontSize = 12.sp) },
                             singleLine = true,
                             shape = ShapeM,
-                            modifier = Modifier.fillMaxWidth()
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .onFocusChanged { focusState ->
+                                    if (focusState.isFocused) {
+                                        editingServerIndex = index
+                                    } else if (editingServerIndex == index) {
+                                        editingServerIndex = null
+                                    }
+                                }
                         )
                     }
                 }
@@ -12699,6 +12709,7 @@ private fun SwipeDeleteToolBox(
     onDelete: () -> Unit,
     stateKey: Any? = Unit,
     shape: androidx.compose.ui.graphics.Shape = RoundedCornerShape(16.dp),
+    swipeEnabled: Boolean = true,
     content: @Composable () -> Unit
 ) {
     val revealWidthPx = with(LocalDensity.current) { 58.dp.toPx() }
@@ -12736,7 +12747,8 @@ private fun SwipeDeleteToolBox(
                 .offset { IntOffset(displayedOffset.roundToInt(), 0) }
                 .clip(shape)
                 .background(GlassSwipeSurface)
-                .pointerInput(stateKey) {
+                .pointerInput(stateKey, swipeEnabled) {
+                    if (!swipeEnabled) return@pointerInput
                     awaitEachGesture {
                         val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
                         var totalX = 0f

@@ -1,11 +1,20 @@
-# V1.1.15 build145 自测重点
+# v1.0.18 build147 自测重点
 
 ## 版本与发版文件
 
-1. APP 版本应显示 `versionName=V1.1.15`、`versionCode=145`。
+1. APP 版本应显示 `versionName=v1.0.18`、`versionCode=147`。
 2. 根目录只保留当前长期文档：`README.md`、`CHANGELOG.md`、`TEST_NOTES_current.md`。
 3. 历史 build 说明应在 `docs/BUILD_HISTORY.md` 中查看，后续发版模板应使用 `docs/RELEASE_TEMPLATE.md`。
-4. `update.json` 应指向 `v1.1.15-145` 与 build145 APK。
+4. `update.json` 应指向 `v1.0.18-147` 与 build147 APK。
+
+## NAT 与删除手势
+
+1. STUN 服务器输入框未获得焦点时，向左滑动整张卡片应显示独立删除按钮。
+2. 轻点输入框进入编辑后，横向滑动应浏览或选择长文本，不应触发删除。
+3. 点到输入框外退出编辑后，应恢复整卡左滑删除。
+4. RFC5780 与 RFC3489 的首条服务器都应符合上述规则。
+5. NAT 历史应能左滑删除并持久化，卡片滑动和展开时不应出现方角阴影或圆形波纹。
+6. 漫游历史应显示保存条数和实际占用 KB。
 
 ## 路由追踪
 
