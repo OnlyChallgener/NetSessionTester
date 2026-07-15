@@ -12773,7 +12773,6 @@ private fun SwipeDeleteToolBox(
                                     if (totalX > touchSlop) break
                                     continue
                                 }
-                                offsetAnimation.stop()
                                 dragOffset = offsetAnimation.value
                                 isDragging = true
                                 horizontalDrag = true
