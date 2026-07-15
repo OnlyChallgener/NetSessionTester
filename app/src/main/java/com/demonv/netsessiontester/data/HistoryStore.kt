@@ -38,6 +38,18 @@ class HistoryStore(private val context: Context) {
         synchronized(fileLock) { if (file.exists()) file.delete() }
     }
 
+    suspend fun clearAndReturn(): List<SessionSummary> = withContext(Dispatchers.IO) {
+        synchronized(fileLock) {
+            val snapshot = loadAllInternal().sortedByDescending { it.startedAtEpochMs }
+            if (file.exists()) file.delete()
+            snapshot
+        }
+    }
+
+    suspend fun replaceAll(items: List<SessionSummary>) = withContext(Dispatchers.IO) {
+        synchronized(fileLock) { writeAll(items.sortedBy { it.startedAtEpochMs }) }
+    }
+
     suspend fun load(limit: Int = 30): List<SessionSummary> = withContext(Dispatchers.IO) {
         synchronized(fileLock) { loadAllInternal().sortedByDescending { it.startedAtEpochMs }.take(limit.coerceIn(10, 100)) }
     }

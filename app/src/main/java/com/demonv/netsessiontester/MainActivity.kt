@@ -95,8 +95,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material.icons.Icons
@@ -165,6 +167,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
@@ -642,6 +645,12 @@ private data class BottomNoticeUi(
     val message: String = "",
     val tone: BottomNoticeTone = BottomNoticeTone.Info,
     val id: Long = 0L
+)
+
+private data class ClearConfirmationRequest(
+    val title: String,
+    val message: String,
+    val onConfirm: () -> Unit
 )
 
 private fun currentAppVersionCode(context: Context): Long = runCatching {
@@ -3101,7 +3110,6 @@ private fun NetSessionTesterApp() {
     var displayChartPoints by remember { mutableStateOf<List<ChartPoint>>(emptyList()) }
     var displayPingPoints by remember { mutableStateOf<List<PingPoint>>(emptyList()) }
     var displayPingJitterMs by remember { mutableStateOf<Double?>(null) }
-    var displayPingLogCount by remember { mutableStateOf(0) }
     var pingLogSaveJob by remember { mutableStateOf<Job?>(null) }
     var pingIntervalLabel by remember { mutableStateOf("停止") }
     var pingActiveTargetLabel by remember { mutableStateOf("") }
@@ -3151,6 +3159,8 @@ private fun NetSessionTesterApp() {
     var downloadRunId by remember { mutableStateOf(0L) }
     var bottomNotice by remember { mutableStateOf(BottomNoticeUi()) }
     var bottomNoticeJob by remember { mutableStateOf<Job?>(null) }
+    var clearConfirmation by remember { mutableStateOf<ClearConfirmationRequest?>(null) }
+    var undoClearJob by remember { mutableStateOf<Job?>(null) }
 
     fun closeIpv6DiagnosticsToNetworkInfo() {
         appToolPage = AppToolPage.NONE
@@ -3529,7 +3539,6 @@ private fun NetSessionTesterApp() {
         applyHistoryUiSnapshot(initialHistory)
         state = state.copy(logs = initialLogs)
         pingLogs = initialPingLogs
-        displayPingLogCount = initialPingLogs.size
         hostHistory = initialHostHistory
         pingTargetHistory = initialPingTargetHistory
         logSizeKb = initialLogSizeKb
@@ -3566,7 +3575,6 @@ private fun NetSessionTesterApp() {
                 displayChartPoints = compactSessionPointsForRender(chartPoints)
             }
             displayPingJitterMs = pingJitterMs
-            displayPingLogCount = pingLogs.size
             delay(TEST_UI_REFRESH_MS)
         }
     }
@@ -3847,6 +3855,38 @@ private fun NetSessionTesterApp() {
         }
     }
 
+    fun requestClear(title: String, message: String, onConfirm: () -> Unit) {
+        clearConfirmation = ClearConfirmationRequest(title, message, onConfirm)
+    }
+
+    fun showClearUndo(message: String, onUndo: suspend () -> Unit) {
+        undoClearJob?.cancel()
+        snackbarHostState.currentSnackbarData?.dismiss()
+        undoClearJob = scope.launch {
+            val undoMessage = "$message · 10秒内可撤销"
+            val timer = launch {
+                while (snackbarHostState.currentSnackbarData?.visuals?.message != undoMessage) {
+                    delay(25L)
+                }
+                delay(10_000L)
+                if (snackbarHostState.currentSnackbarData?.visuals?.message == undoMessage) {
+                    snackbarHostState.currentSnackbarData?.dismiss()
+                }
+            }
+            val result = snackbarHostState.showSnackbar(
+                message = undoMessage,
+                actionLabel = "撤销",
+                withDismissAction = false,
+                duration = SnackbarDuration.Indefinite
+            )
+            timer.cancel()
+            if (result == SnackbarResult.ActionPerformed) {
+                onUndo()
+                snackbarHostState.showSnackbar("已恢复清空前的数据")
+            }
+        }
+    }
+
     fun ensureNotificationPermission() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
@@ -3912,7 +3952,6 @@ private fun NetSessionTesterApp() {
         if (!runtimePingState.running) {
             displayPingPoints = compactPingPointsForRender(runtimePingState.points)
             displayPingJitterMs = runtimePingState.jitterMs
-            displayPingLogCount = runtimePingState.logs.size
         }
     }
 
@@ -3921,13 +3960,28 @@ private fun NetSessionTesterApp() {
     }
 
     fun clearPingData() {
+        val snapshot = AppTestRuntime.pingState.value.copy(
+            target = pingActiveTargetLabel,
+            intervalLabel = pingIntervalLabel,
+            startedAtEpochMs = pingSessionStartedAt,
+            endedAtEpochMs = pingSessionEndedAt,
+            jitterMs = pingJitterMs,
+            points = pingPoints,
+            logs = pingLogs
+        )
+        if (snapshot.running) {
+            scope.launch { snackbarHostState.showSnackbar("请先停止 Ping 再清空测试历史") }
+            return
+        }
         AppTestRuntime.clearPing()
+        showClearUndo("Ping 测试历史已清空") {
+            AppTestRuntime.restorePing(snapshot)
+        }
     }
 
     fun deletePingLogSession(sessionId: Long) {
         val next = trimPingLogSessions(pingLogs.filterNot { it.sessionId == sessionId || (it.sessionId == 0L && it.timeEpochMs == sessionId) })
         pingLogs = next
-        displayPingLogCount = next.size
         persistPingLogs(next)
         scope.launch { snackbarHostState.showSnackbar("已删除 1 条 Ping 历史") }
     }
@@ -4006,12 +4060,48 @@ private fun NetSessionTesterApp() {
 
     fun clearHistoryOnly() {
         scope.launch {
-            historyStore.clear()
+            val snapshot = historyStore.clearAndReturn()
+            if (snapshot.isEmpty()) {
+                snackbarHostState.showSnackbar("暂无可清空的测试历史")
+                return@launch
+            }
             historySizeKb = 0
             historySavedCount = 0
             historyCounts = HistoryCounts()
             state = state.copy(history = emptyList())
-            snackbarHostState.showSnackbar("检测历史已清理")
+            showClearUndo("连接测试历史已清空") {
+                val current = historyStore.loadAll()
+                val restored = (snapshot + current).distinctBy { it.id }
+                historyStore.replaceAll(restored)
+                val safeLimit = historyLimit.toIntOrNull()?.coerceIn(10, 100) ?: 30
+                applyHistoryUiSnapshot(loadHistoryUiSnapshot(historyPeriod, safeLimit))
+            }
+        }
+    }
+
+    fun clearRunLogs() {
+        scope.launch {
+            val persistedSnapshot = logStore.clearAndReturn()
+            val snapshot = (persistedSnapshot + state.logs)
+                .distinctBy { it.timeEpochMs to it.text }
+                .sortedBy { it.timeEpochMs }
+                .takeLast(500)
+            if (snapshot.isEmpty()) {
+                snackbarHostState.showSnackbar("暂无可清空的运行日志")
+                return@launch
+            }
+            logSizeKb = 0
+            state = state.copy(logs = emptyList())
+            showClearUndo("运行日志已清空") {
+                val current = state.logs
+                val restored = (snapshot + current)
+                    .distinctBy { it.timeEpochMs to it.text }
+                    .sortedBy { it.timeEpochMs }
+                    .takeLast(500)
+                logStore.replaceAll(restored)
+                logSizeKb = withContext(Dispatchers.IO) { logStore.sizeKb() }
+                state = state.copy(logs = restored)
+            }
         }
     }
 
@@ -4025,6 +4115,18 @@ private fun NetSessionTesterApp() {
         }
     }
 
+
+    clearConfirmation?.let { request ->
+        ClearConfirmationDialog(
+            title = request.title,
+            message = request.message,
+            onDismiss = { clearConfirmation = null },
+            onConfirm = {
+                clearConfirmation = null
+                request.onConfirm()
+            }
+        )
+    }
 
     if (editingRemarkSummary != null) {
         AlertDialog(
@@ -4231,11 +4333,11 @@ private fun NetSessionTesterApp() {
                     onBack = { showRunLogDetail = false },
                     onExport = { exportLogs() },
                     onClear = {
-                        scope.launch {
-                            logStore.clear()
-                            logSizeKb = 0
-                            state = state.copy(logs = emptyList())
-                        }
+                        requestClear(
+                            title = "清空运行日志？",
+                            message = "将删除当前保存的运行日志。清空后 10 秒内可以撤销恢复。",
+                            onConfirm = { clearRunLogs() }
+                        )
                     }
                 )
             } else when (appToolPage) {
@@ -4260,7 +4362,19 @@ private fun NetSessionTesterApp() {
                         }
                     }
                 )
-                AppToolPage.PING_HISTORY -> PingHistoryToolPage(logs = pingLogs, onBack = { appToolPage = AppToolPage.NONE }, onDeleteSession = { sessionId -> deletePingLogSession(sessionId) })
+                AppToolPage.PING_HISTORY -> PingHistoryToolPage(
+                    logs = pingLogs,
+                    canClear = !pingRunning,
+                    onBack = { appToolPage = AppToolPage.NONE },
+                    onClear = {
+                        requestClear(
+                            title = "清空 Ping 测试历史？",
+                            message = "将删除 Ping 图表、统计和保存的测试记录。清空后 10 秒内可以撤销恢复。",
+                            onConfirm = { clearPingData() }
+                        )
+                    },
+                    onDeleteSession = { sessionId -> deletePingLogSession(sessionId) }
+                )
                 AppToolPage.NONE -> when (selectedTab) {
                 MainTab.SETTINGS -> SettingsPage(
                     listState = settingsListState,
@@ -4383,10 +4497,8 @@ private fun NetSessionTesterApp() {
                         ((if (pingRunning) pingDurationTick else (pingSessionEndedAt.takeIf { it > 0L } ?: System.currentTimeMillis())) - pingSessionStartedAt).coerceAtLeast(0L)
                     } else 0L,
                     pingJitterMs = displayPingJitterMs,
-                    pingLogCount = displayPingLogCount,
                     onStartPing = { startPingMonitor(reset = true) },
                     onStopPing = { stopPingMonitor() },
-                    onClearPing = { clearPingData() },
                     onShowPingLog = { appToolPage = AppToolPage.PING_HISTORY },
                     isAdding = state.isAdding,
                     runPhase = state.runPhase,
@@ -4420,7 +4532,13 @@ private fun NetSessionTesterApp() {
                     historyCounts = historyCounts,
                     maskPrivacy = maskPrivacy,
                     onExport = { exportLogs() },
-                    onClear = { clearHistoryOnly() },
+                    onClear = {
+                        requestClear(
+                            title = "清空连接测试历史？",
+                            message = "将删除已保存的连接数测试结果和备注。清空后 10 秒内可以撤销恢复。",
+                            onConfirm = { clearHistoryOnly() }
+                        )
+                    },
                     onHistoryLimitChange = { limit ->
                         historyLimit = limit
                         scope.launch {
@@ -4804,7 +4922,13 @@ private fun pingPointsFromLogGroup(group: PingLogGroup): List<PingPoint> {
 }
 
 @Composable
-private fun PingHistoryToolPage(logs: List<PingLogEntry>, onBack: () -> Unit, onDeleteSession: (Long) -> Unit) {
+private fun PingHistoryToolPage(
+    logs: List<PingLogEntry>,
+    canClear: Boolean,
+    onBack: () -> Unit,
+    onClear: () -> Unit,
+    onDeleteSession: (Long) -> Unit
+) {
     val groups = remember(logs) { buildPingLogGroups(logs).take(12) }
     val storageText = remember(logs) { formatBytes(estimatePingLogStorageBytes(logs)) }
     var expandedSession by remember(groups.firstOrNull()?.sessionId) { mutableStateOf<Long?>(null) }
@@ -4814,7 +4938,16 @@ private fun PingHistoryToolPage(logs: List<PingLogEntry>, onBack: () -> Unit, on
             .padding(horizontal = 14.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        item { ToolPageHeader("Ping历史", "${groups.size}/12 · $storageText · 点击卡片展开", onBack) }
+        item {
+            ToolPageHeader(
+                title = "Ping 测试历史",
+                subtitle = "${groups.size}/12 · $storageText · 点击卡片展开",
+                onBack = onBack,
+                actionLabel = "清空",
+                actionEnabled = canClear && groups.isNotEmpty(),
+                onAction = onClear
+            )
+        }
         if (groups.isEmpty()) {
             item {
                 SoftCard {
@@ -5543,10 +5676,8 @@ private fun TestPage(
     pingRunning: Boolean,
     pingDurationMs: Long,
     pingJitterMs: Double?,
-    pingLogCount: Int,
     onStartPing: () -> Unit,
     onStopPing: () -> Unit,
-    onClearPing: () -> Unit,
     onShowPingLog: () -> Unit,
     isAdding: Boolean,
     runPhase: RunPhase,
@@ -5717,10 +5848,8 @@ private fun TestPage(
                         running = pingRunning,
                         durationMs = pingDurationMs,
                         jitterMs = pingJitterMs,
-                        logCount = pingLogCount,
                         onStart = onStartPing,
                         onStop = onStopPing,
-                        onClear = onClearPing,
                         onLog = onShowPingLog
                     )
                     "diagnosis" -> DiagnosisAdviceInlineCard(mode, ipv4Stats, ipv6Stats)
@@ -5845,20 +5974,22 @@ private fun FullRunLogPage(
             .padding(horizontal = 14.dp),
         verticalArrangement = Arrangement.spacedBy(7.dp)
     ) {
-        item { ToolPageHeader("运行日志", "最近 500 条运行记录", onBack) }
+        item {
+            ToolPageHeader(
+                title = "运行日志",
+                subtitle = "最近 500 条运行记录",
+                onBack = onBack,
+                actionLabel = "清空",
+                actionEnabled = logs.isNotEmpty(),
+                onAction = onClear
+            )
+        }
         item {
             SoftCard {
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    OutlinedButton(onClick = onExport, modifier = Modifier.weight(1f).height(38.dp), shape = ShapeM) {
-                        Icon(Icons.Filled.Download, contentDescription = null, modifier = Modifier.width(16.dp).height(16.dp))
-                        Spacer(Modifier.width(4.dp))
-                        Text("导出日志", fontSize = 12.sp)
-                    }
-                    OutlinedButton(onClick = onClear, modifier = Modifier.weight(1f).height(38.dp), shape = ShapeM) {
-                        Icon(Icons.Filled.DeleteOutline, contentDescription = null, modifier = Modifier.width(16.dp).height(16.dp))
-                        Spacer(Modifier.width(4.dp))
-                        Text("清理日志", fontSize = 12.sp)
-                    }
+                OutlinedButton(onClick = onExport, modifier = Modifier.fillMaxWidth().height(38.dp), shape = ShapeM) {
+                    Icon(Icons.Filled.Download, contentDescription = null, modifier = Modifier.width(16.dp).height(16.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("导出日志", fontSize = 12.sp)
                 }
             }
         }
@@ -5917,10 +6048,10 @@ private fun LogsPage(
                     Text("检测历史", fontSize = 19.sp, fontWeight = FontWeight.ExtraBold, color = TextDark)
                     Text("已保存 ${historySavedCount} 条 · 占用 ${historySizeKb}KB", color = Muted, fontSize = 11.sp)
                 }
-                OutlinedButton(onClick = onClear, shape = ShapeM, modifier = Modifier.height(36.dp)) {
+                OutlinedButton(onClick = onClear, enabled = historySavedCount > 0, shape = ShapeM, modifier = Modifier.height(36.dp)) {
                     Icon(Icons.Filled.DeleteOutline, contentDescription = null, modifier = Modifier.width(15.dp).height(15.dp))
                     Spacer(Modifier.width(4.dp))
-                    Text("清理", fontSize = 11.sp)
+                    Text("清空", fontSize = 11.sp)
                 }
             }
         }
@@ -6065,7 +6196,7 @@ private fun VersionInfoDialog(
                     Text("当前版本", color = Muted, fontSize = 12.sp, modifier = Modifier.weight(1f))
                     StatusChip(displayVersionName(currentAppVersionName(LocalContext.current)), BlueSoft, Blue, compact = true)
                 }
-                VersionLine(displayVersionName(currentAppVersionName(LocalContext.current)), "NAT历史支持滑动删除，修复圆角与编辑手势冲突，漫游历史显示条数和空间占用。")
+                VersionLine(displayVersionName(currentAppVersionName(LocalContext.current)), "历史清空增加二次确认与10秒撤销，优化删除按钮，并修复NAT、漫游历史交互。")
                 VersionLine("v1.0.17", "统一各页面滑动删除交互，公网IP改为网络变化驱动刷新。")
                 VersionLine("v1.0.16", "修复弹窗、二级页面与底部栏叠图透图，MTU暂停改为停止。")
                 VersionLine("v1.0.15", "修复后台Ping终止、连接测试页面跳转与运行状态残留。")
@@ -6249,6 +6380,7 @@ private fun UpdateDownloadDialog(
 @Composable
 private fun OneUiSnackbarHost(hostState: SnackbarHostState) {
     SnackbarHost(hostState = hostState) { data ->
+        val hasAction = data.visuals.actionLabel != null
         Card(
             modifier = Modifier
                 .padding(horizontal = 16.dp, vertical = 10.dp)
@@ -6268,13 +6400,13 @@ private fun OneUiSnackbarHost(hostState: SnackbarHostState) {
                     modifier = Modifier
                         .width(32.dp)
                         .height(32.dp)
-                        .background(BlueSoft, RoundedCornerShape(13.dp)),
+                        .background(if (hasAction) RedSoft else BlueSoft, RoundedCornerShape(13.dp)),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
-                        imageVector = Icons.Filled.CheckCircle,
+                        imageVector = if (hasAction) Icons.Filled.DeleteOutline else Icons.Filled.CheckCircle,
                         contentDescription = null,
-                        tint = Blue,
+                        tint = if (hasAction) ErrorRed else Blue,
                         modifier = Modifier.width(19.dp).height(19.dp)
                     )
                 }
@@ -6289,6 +6421,27 @@ private fun OneUiSnackbarHost(hostState: SnackbarHostState) {
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f)
                 )
+                data.visuals.actionLabel?.let { label ->
+                    Spacer(Modifier.width(9.dp))
+                    Surface(
+                        shape = RoundedCornerShape(13.dp),
+                        color = BlueSoft,
+                        border = BorderStroke(1.dp, Blue.copy(alpha = 0.18f)),
+                        tonalElevation = 0.dp,
+                        shadowElevation = 0.dp,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(13.dp))
+                            .clickable(onClick = data::performAction)
+                    ) {
+                        Text(
+                            label,
+                            color = Blue,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            modifier = Modifier.padding(horizontal = 13.dp, vertical = 9.dp)
+                        )
+                    }
+                }
             }
         }
     }
@@ -6507,6 +6660,60 @@ private fun AlertDialog(
         titleContentColor = TextDark,
         textContentColor = TextDark,
         tonalElevation = 0.dp
+    )
+}
+
+@Composable
+private fun ClearConfirmationDialog(
+    title: String,
+    message: String,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = {
+            Button(
+                onClick = onConfirm,
+                colors = ButtonDefaults.buttonColors(containerColor = ErrorRed, contentColor = Color.White),
+                shape = ShapeM
+            ) {
+                Icon(Icons.Filled.DeleteOutline, contentDescription = null, modifier = Modifier.width(16.dp).height(16.dp))
+                Spacer(Modifier.width(5.dp))
+                Text("确认清空", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss, shape = ShapeM) {
+                Text("取消", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+            }
+        },
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier.width(38.dp).height(38.dp).background(RedSoft, RoundedCornerShape(14.dp)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(Icons.Filled.WarningAmber, contentDescription = null, tint = ErrorRed, modifier = Modifier.width(21.dp).height(21.dp))
+                }
+                Spacer(Modifier.width(10.dp))
+                Text(title, fontWeight = FontWeight.ExtraBold, color = TextDark)
+            }
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(message, color = TextDark, fontSize = 13.sp, lineHeight = 18.sp)
+                Row(
+                    modifier = Modifier.fillMaxWidth().background(BlueSoft.copy(alpha = 0.72f), ShapeM).padding(10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Filled.History, contentDescription = null, tint = Blue, modifier = Modifier.width(18.dp).height(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("确认后底部会出现 10 秒撤销按钮", color = Blue, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+        },
+        shape = GlassPopupShape
     )
 }
 
@@ -9295,7 +9502,14 @@ private fun NetworkToolShortcutCard(
 }
 
 @Composable
-private fun ToolPageHeader(title: String, subtitle: String, onBack: () -> Unit) {
+private fun ToolPageHeader(
+    title: String,
+    subtitle: String,
+    onBack: () -> Unit,
+    actionLabel: String? = null,
+    actionEnabled: Boolean = true,
+    onAction: (() -> Unit)? = null
+) {
     Row(
         modifier = Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 6.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -9325,6 +9539,20 @@ private fun ToolPageHeader(title: String, subtitle: String, onBack: () -> Unit) 
         Column(Modifier.weight(1f)) {
             Text(title, color = TextDark, fontWeight = FontWeight.ExtraBold, fontSize = 20.sp, maxLines = 1)
             Text(subtitle, color = Muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        if (actionLabel != null && onAction != null) {
+            Spacer(Modifier.width(8.dp))
+            OutlinedButton(
+                onClick = onAction,
+                enabled = actionEnabled,
+                shape = RoundedCornerShape(14.dp),
+                modifier = Modifier.height(36.dp),
+                contentPadding = PaddingValues(horizontal = 11.dp, vertical = 0.dp)
+            ) {
+                Icon(Icons.Filled.DeleteOutline, contentDescription = null, modifier = Modifier.width(15.dp).height(15.dp))
+                Spacer(Modifier.width(4.dp))
+                Text(actionLabel, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            }
         }
     }
 }
@@ -9824,10 +10052,14 @@ private fun TracketToolPage(onBack: () -> Unit) {
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         item {
-            ToolPageHeader("追踪配置", "逐跳追踪域名经过的 IP；结果以系统返回为准") {
-                stopTrace("返回页面，路由追踪已停止")
-                onBack()
-            }
+            ToolPageHeader(
+                title = "追踪配置",
+                subtitle = "逐跳追踪域名经过的 IP；结果以系统返回为准",
+                onBack = {
+                    stopTrace("返回页面，路由追踪已停止")
+                    onBack()
+                }
+            )
         }
         item {
             SoftCard {
@@ -12710,6 +12942,7 @@ private fun SwipeDeleteToolBox(
     stateKey: Any? = Unit,
     shape: androidx.compose.ui.graphics.Shape = RoundedCornerShape(16.dp),
     swipeEnabled: Boolean = true,
+    deleteActionHeight: Dp = 56.dp,
     content: @Composable () -> Unit
 ) {
     val revealWidthPx = with(LocalDensity.current) { 58.dp.toPx() }
@@ -12730,7 +12963,7 @@ private fun SwipeDeleteToolBox(
             modifier = Modifier
                 .align(Alignment.CenterEnd)
                 .width(52.dp)
-                .height(56.dp)
+                .height(deleteActionHeight)
                 .background(DeleteActionSurface, RoundedCornerShape(16.dp))
                 .clickable(onClick = onDelete),
             contentAlignment = Alignment.Center
@@ -13222,10 +13455,8 @@ private fun PingCompactChartCard(
     running: Boolean,
     durationMs: Long,
     jitterMs: Double?,
-    logCount: Int,
     onStart: () -> Unit,
     onStop: () -> Unit,
-    onClear: () -> Unit,
     onLog: () -> Unit
 ) {
     val stats = remember(pingPoints) {
@@ -13281,15 +13512,10 @@ private fun PingCompactChartCard(
                 Spacer(Modifier.width(4.dp))
                 Text(if (running) "停止 Ping" else "开始 Ping", fontSize = 12.sp, fontWeight = FontWeight.Bold)
             }
-            OutlinedButton(onClick = onLog, modifier = Modifier.weight(0.8f).height(38.dp), shape = ShapeM) {
+            OutlinedButton(onClick = onLog, modifier = Modifier.weight(1f).height(38.dp), shape = ShapeM) {
                 Icon(Icons.Filled.Article, contentDescription = null, modifier = Modifier.width(16.dp).height(16.dp))
                 Spacer(Modifier.width(4.dp))
-                Text("历史 $logCount", fontSize = 12.sp)
-            }
-            OutlinedButton(onClick = onClear, enabled = !running, modifier = Modifier.weight(0.65f).height(38.dp), shape = ShapeM) {
-                Icon(Icons.Filled.DeleteOutline, contentDescription = null, modifier = Modifier.width(16.dp).height(16.dp))
-                Spacer(Modifier.width(4.dp))
-                Text("清空", fontSize = 12.sp)
+                Text("测试历史", fontSize = 12.sp)
             }
         }
     }
@@ -13842,7 +14068,12 @@ private fun SwipeDeleteHistoryCard(
     onEditRemark: () -> Unit,
     onDelete: () -> Unit
 ) {
-    SwipeDeleteToolBox(onDelete = onDelete, stateKey = item.id, shape = ShapeL) {
+    SwipeDeleteToolBox(
+        onDelete = onDelete,
+        stateKey = item.id,
+        shape = ShapeL,
+        deleteActionHeight = 88.dp
+    ) {
         HistoryCard(
             item = item,
             maskPrivacy = maskPrivacy,

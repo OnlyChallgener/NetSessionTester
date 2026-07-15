@@ -31,6 +31,31 @@ class LogStore(private val context: Context) {
         synchronized(fileLock) { if (file.exists()) file.delete() }
     }
 
+    suspend fun clearAndReturn(): List<LogLine> = withContext(Dispatchers.IO) {
+        synchronized(fileLock) {
+            val snapshot = if (file.exists()) {
+                file.readLines().takeLast(500).mapNotNull { raw ->
+                    runCatching { JSONObject(raw).toLogLine() }.getOrNull()
+                }
+            } else {
+                emptyList()
+            }
+            if (file.exists()) file.delete()
+            snapshot
+        }
+    }
+
+    suspend fun replaceAll(lines: List<LogLine>) = withContext(Dispatchers.IO) {
+        synchronized(fileLock) {
+            val kept = lines.takeLast(500)
+            if (kept.isEmpty()) {
+                if (file.exists()) file.delete()
+            } else {
+                file.writeText(kept.joinToString("\n") { it.toJson().toString() } + "\n")
+            }
+        }
+    }
+
     fun clearNow() {
         synchronized(fileLock) { if (file.exists()) file.delete() }
     }

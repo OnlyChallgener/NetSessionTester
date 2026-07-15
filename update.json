@@ -9,7 +9,7 @@
     "NAT检测历史支持左滑删除，修复圆角阴影和展开波纹",
     "STUN服务器输入框编辑时优先横向浏览文本，退出编辑后恢复左滑删除",
     "漫游历史新增保存条数和实际空间占用显示",
-    "统一各页面删除交互并移除左滑操作说明",
+    "统一删除与清空交互，增加二次确认和10秒撤销恢复",
     "优化公网IP刷新、后台终止和毛玻璃图层稳定性"
   ],
   "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.0.18-147/NetSessionTester-v1.0.18-build147-signed.apk",

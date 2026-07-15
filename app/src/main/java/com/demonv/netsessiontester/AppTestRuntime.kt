@@ -878,6 +878,14 @@ object AppTestRuntime {
         schedulePingLogSave(emptyList())
     }
 
+    internal fun restorePing(snapshot: PingRuntimeState) {
+        if (pingJob?.isActive == true || snapshot.running) return
+        val currentRevision = _pingState.value.revision
+        val restored = snapshot.copy(revision = currentRevision + 1L, running = false)
+        _pingState.value = restored
+        schedulePingLogSave(restored.logs)
+    }
+
     fun stopRoaming(reason: String) { /* Roaming is accuracy-first and is managed by its paused UI checkpoint. */ }
 
     private enum class ConnectionFinishReason(val label: String, val saveHistory: Boolean) {
