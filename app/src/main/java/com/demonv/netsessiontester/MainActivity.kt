@@ -47,9 +47,10 @@ import androidx.compose.animation.core.animateIntAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.calculateCentroid
 import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateZoom
@@ -151,6 +152,8 @@ import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -1067,13 +1070,23 @@ private fun saveNatHistory(context: Context, record: NatHistoryRecord): List<Nat
     val next = (listOf(record) + loadNatHistory(context).filterNot { it.id == record.id })
         .sortedByDescending { it.id }
         .take(NAT_HISTORY_MAX)
+    writeNatHistory(context, next)
+    return next
+}
+
+private fun deleteNatHistory(context: Context, id: Long): List<NatHistoryRecord> {
+    val next = loadNatHistory(context).filterNot { it.id == id }
+    writeNatHistory(context, next)
+    return next
+}
+
+private fun writeNatHistory(context: Context, records: List<NatHistoryRecord>) {
     val array = JSONArray()
-    next.forEach { array.put(it.toJson()) }
+    records.forEach { array.put(it.toJson()) }
     context.getSharedPreferences(NAT_HISTORY_PREFS, Context.MODE_PRIVATE)
         .edit()
         .putString(NAT_HISTORY_KEY, array.toString())
         .apply()
-    return next
 }
 
 private fun natHistorySizeKb(records: List<NatHistoryRecord>): Double {
@@ -4058,7 +4071,10 @@ private fun NetSessionTesterApp() {
     if (showNatHistoryDialog) {
         NatHistoryDialog(
             records = natHistory,
-            onDismiss = { showNatHistoryDialog = false }
+            onDismiss = { showNatHistoryDialog = false },
+            onDelete = { id ->
+                natHistory = deleteNatHistory(context.applicationContext, id)
+            }
         )
     }
 
@@ -4797,7 +4813,7 @@ private fun PingHistoryToolPage(logs: List<PingLogEntry>, onBack: () -> Unit, on
             .padding(horizontal = 14.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        item { ToolPageHeader("Ping历史", "${groups.size}/12 · $storageText · 点击展开 · 左滑删除", onBack) }
+        item { ToolPageHeader("Ping历史", "${groups.size}/12 · $storageText · 点击卡片展开", onBack) }
         if (groups.isEmpty()) {
             item {
                 SoftCard {
@@ -5898,7 +5914,7 @@ private fun LogsPage(
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 4.dp, bottom = 5.dp)) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text("检测历史", fontSize = 19.sp, fontWeight = FontWeight.ExtraBold, color = TextDark)
-                    Text("已保存 ${historySavedCount} 条 · 占用 ${historySizeKb}KB · 左滑单条删除", color = Muted, fontSize = 11.sp)
+                    Text("已保存 ${historySavedCount} 条 · 占用 ${historySizeKb}KB", color = Muted, fontSize = 11.sp)
                 }
                 OutlinedButton(onClick = onClear, shape = ShapeM, modifier = Modifier.height(36.dp)) {
                     Icon(Icons.Filled.DeleteOutline, contentDescription = null, modifier = Modifier.width(15.dp).height(15.dp))
@@ -6958,7 +6974,7 @@ private fun HistoryTextField(
                             modifier = Modifier.fillMaxWidth().clickable { historyExpanded = !historyExpanded },
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text("自定义/最近 · 左滑删除", color = Muted, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                            Text("自定义/最近", color = Muted, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
                             Text(if (historyExpanded) "⌃" else "⌄", color = Muted, fontSize = 14.sp, fontWeight = FontWeight.Bold)
                         }
                         val shownHistory = if (historyExpanded) history.take(10) else history.take(3)
@@ -8314,7 +8330,7 @@ private fun NatDiagnosticDialog(
                 )
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("STUN服务器", color = TextDark, fontSize = 13.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-                    Text("左滑删除 · 默认端口 3478", color = Muted, fontSize = 10.sp)
+                    Text("未填写端口时默认 3478", color = Muted, fontSize = 10.sp)
                 }
                 servers.forEachIndexed { index, item ->
                     SwipeDeleteToolBox(
@@ -8400,7 +8416,8 @@ private fun NatDiagnosticDialog(
 @Composable
 private fun NatHistoryDialog(
     records: List<NatHistoryRecord>,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    onDelete: (Long) -> Unit
 ) {
     var expandedIds by remember(records) { mutableStateOf<Set<Long>>(emptySet()) }
     val sizeKb = remember(records) { natHistorySizeKb(records) }
@@ -8426,45 +8443,53 @@ private fun NatHistoryDialog(
                 } else {
                     records.forEach { record ->
                         val expanded = record.id in expandedIds
-                        Surface(
-                            shape = ShapeM,
-                            color = Color(0xFFF8FAFC),
-                            border = BorderStroke(0.7.dp, Border.copy(alpha = 0.75f)),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable {
-                                    expandedIds = if (expanded) expandedIds - record.id else expandedIds + record.id
-                                }
-                        ) {
-                            Column(
-                                modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 9.dp),
-                                verticalArrangement = Arrangement.spacedBy(5.dp)
-                            ) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Column(Modifier.weight(1f)) {
-                                        Text(record.timeText, color = Muted, fontSize = 10.sp)
-                                        Text(
-                                            "${record.mode} · ${record.natType}",
-                                            color = TextDark,
-                                            fontSize = 12.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
+                        SwipeDeleteToolBox(onDelete = { onDelete(record.id) }, stateKey = record.id, shape = ShapeM) {
+                            Surface(
+                                shape = ShapeM,
+                                color = Color(0xFFF8FAFC),
+                                tonalElevation = 0.dp,
+                                shadowElevation = 0.dp,
+                                border = BorderStroke(0.7.dp, Border.copy(alpha = 0.75f)),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(ShapeM)
+                                    .clickable(
+                                        interactionSource = remember(record.id) { MutableInteractionSource() },
+                                        indication = null
+                                    ) {
+                                        expandedIds = if (expanded) expandedIds - record.id else expandedIds + record.id
                                     }
-                                    Text(if (expanded) "收起" else "展开", color = Blue, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                                }
-                                if (expanded) {
-                                    HorizontalDivider(color = Border.copy(alpha = 0.7f))
-                                    MiniResultLine("映射行为", record.mappingBehavior.ifBlank { "—" })
-                                    MiniResultLine("过滤行为", record.filteringBehavior.ifBlank { "—" })
-                                    MiniResultLine("本地地址", record.localAddress.ifBlank { "—" })
-                                    MiniResultLine("公网地址", record.publicAddress.ifBlank { "—" })
-                                    MiniResultLine("测试方法", record.method.ifBlank { record.mode })
-                                    MiniResultLine("服务器", record.server.ifBlank { "—" })
-                                    MiniResultLine("检测耗时", if (record.durationMs > 0L) "${record.durationMs}ms" else "—")
-                                    if (record.message.isNotBlank()) {
-                                        Text(record.message, color = Muted, fontSize = 10.sp, lineHeight = 14.sp)
+                            ) {
+                                Column(
+                                    modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 9.dp),
+                                    verticalArrangement = Arrangement.spacedBy(5.dp)
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Column(Modifier.weight(1f)) {
+                                            Text(record.timeText, color = Muted, fontSize = 10.sp)
+                                            Text(
+                                                "${record.mode} · ${record.natType}",
+                                                color = TextDark,
+                                                fontSize = 12.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+                                        Text(if (expanded) "收起" else "展开", color = Blue, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                    }
+                                    if (expanded) {
+                                        HorizontalDivider(color = Border.copy(alpha = 0.7f))
+                                        MiniResultLine("映射行为", record.mappingBehavior.ifBlank { "—" })
+                                        MiniResultLine("过滤行为", record.filteringBehavior.ifBlank { "—" })
+                                        MiniResultLine("本地地址", record.localAddress.ifBlank { "—" })
+                                        MiniResultLine("公网地址", record.publicAddress.ifBlank { "—" })
+                                        MiniResultLine("测试方法", record.method.ifBlank { record.mode })
+                                        MiniResultLine("服务器", record.server.ifBlank { "—" })
+                                        MiniResultLine("检测耗时", if (record.durationMs > 0L) "${record.durationMs}ms" else "—")
+                                        if (record.message.isNotBlank()) {
+                                            Text(record.message, color = Muted, fontSize = 10.sp, lineHeight = 14.sp)
+                                        }
                                     }
                                 }
                             }
@@ -9670,7 +9695,7 @@ private fun NsLookupToolPage(onBack: () -> Unit) {
                 })
             }
         }
-        item { Text("解析记录 · 左滑删除", color = TextDark, fontWeight = FontWeight.Bold, fontSize = 15.sp, modifier = Modifier.padding(top = 4.dp)) }
+        item { Text("解析记录", color = TextDark, fontWeight = FontWeight.Bold, fontSize = 15.sp, modifier = Modifier.padding(top = 4.dp)) }
         if (records.isEmpty()) {
             item { Text("暂无记录。", color = Muted, fontSize = 12.sp, modifier = Modifier.padding(vertical = 12.dp)) }
         } else {
@@ -9928,7 +9953,7 @@ private fun TracketToolPage(onBack: () -> Unit) {
         if (tracingActive || liveHops.isNotEmpty()) {
             item { TracketLiveProcessCard(title = liveTitle, hops = liveHops) }
         }
-        item { Text("追踪历史 · 左滑删除", color = TextDark, fontWeight = FontWeight.Bold, fontSize = 15.sp, modifier = Modifier.padding(top = 4.dp)) }
+        item { Text("追踪历史", color = TextDark, fontWeight = FontWeight.Bold, fontSize = 15.sp, modifier = Modifier.padding(top = 4.dp)) }
         if (records.isEmpty()) {
             item { Text("暂无记录。", color = Muted, fontSize = 12.sp, modifier = Modifier.padding(vertical = 12.dp)) }
         } else {
@@ -10099,6 +10124,27 @@ private data class RoamingHistoryRecord(
     val eventLines: List<String>,
     val networkEventLines: List<String>
 )
+
+private fun RoamingHistoryRecord.toJson(): JSONObject = JSONObject()
+    .put("id", id)
+    .put("timeText", timeText)
+    .put("targetText", targetText)
+    .put("durationText", durationText)
+    .put("sampleCount", sampleCount)
+    .put("lossCount", lossCount)
+    .put("gatewaySummary", gatewaySummary)
+    .put("externalSummary", externalSummary)
+    .put("rssiSummary", rssiSummary)
+    .put("speedSummary", speedSummary)
+    .put("roamingSummary", roamingSummary)
+    .put("eventLines", JSONArray(eventLines))
+    .put("networkEventLines", JSONArray(networkEventLines))
+
+private fun roamingHistorySizeKb(records: List<RoamingHistoryRecord>): Double {
+    val array = JSONArray()
+    records.forEach { array.put(it.toJson()) }
+    return array.toString().toByteArray(Charsets.UTF_8).size / 1024.0
+}
 
 private enum class RoamingTargetMode(val label: String) {
     GATEWAY_AND_EXTERNAL("路由器+外网"),
@@ -11231,24 +11277,7 @@ private fun deleteRoamingHistory(context: Context, id: Long) {
 
 private fun writeRoamingHistory(context: Context, records: List<RoamingHistoryRecord>) {
     val arr = JSONArray()
-    records.forEach { r ->
-        arr.put(
-            JSONObject()
-                .put("id", r.id)
-                .put("timeText", r.timeText)
-                .put("targetText", r.targetText)
-                .put("durationText", r.durationText)
-                .put("sampleCount", r.sampleCount)
-                .put("lossCount", r.lossCount)
-                .put("gatewaySummary", r.gatewaySummary)
-                .put("externalSummary", r.externalSummary)
-                .put("rssiSummary", r.rssiSummary)
-                .put("speedSummary", r.speedSummary)
-                .put("roamingSummary", r.roamingSummary)
-                .put("eventLines", JSONArray(r.eventLines))
-                .put("networkEventLines", JSONArray(r.networkEventLines))
-        )
-    }
+    records.forEach { arr.put(it.toJson()) }
     context.getSharedPreferences("net_tools_history", Context.MODE_PRIVATE).edit().putString("roaming_history_v1", arr.toString()).apply()
 }
 
@@ -12015,15 +12044,20 @@ private fun RoamingHistoryDialog(
     onToggle: (Long) -> Unit,
     onDelete: (Long) -> Unit
 ) {
+    val sizeKb = remember(records) { roamingHistorySizeKb(records) }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("漫游历史", fontWeight = FontWeight.ExtraBold) },
         text = {
-            if (records.isEmpty()) {
-                Text("暂无漫游测试历史。停止一次测试后会自动保存，最多保留10条。", color = Muted, fontSize = 12.sp)
-            } else {
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text("点击展开详情 · 左滑删除记录", color = Muted, fontSize = 11.sp)
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(
+                    "已保存 ${records.size}/10 条 · 占用 ${String.format(Locale.US, "%.1f", sizeKb)} KB",
+                    color = Muted,
+                    fontSize = 11.sp
+                )
+                if (records.isEmpty()) {
+                    Text("暂无漫游测试历史。停止一次测试后会自动保存，最多保留10条。", color = Muted, fontSize = 12.sp)
+                } else {
                     LazyColumn(
                         modifier = Modifier.heightIn(max = 430.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -12703,13 +12737,43 @@ private fun SwipeDeleteToolBox(
                 .clip(shape)
                 .background(GlassSwipeSurface)
                 .pointerInput(stateKey) {
-                    detectHorizontalDragGestures(
-                        onDragStart = {
-                            dragOffset = offsetAnimation.value
-                            isDragging = true
-                            scope.launch { offsetAnimation.stop() }
-                        },
-                        onDragEnd = {
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                        var totalX = 0f
+                        var totalY = 0f
+                        var horizontalDrag = false
+                        while (true) {
+                            val event = awaitPointerEvent(PointerEventPass.Initial)
+                            val change = event.changes.firstOrNull { it.id == down.id }
+                            if (change == null || !change.pressed) break
+                            val delta = change.positionChange()
+                            totalX += delta.x
+                            totalY += delta.y
+
+                            if (!horizontalDrag) {
+                                val touchSlop = viewConfiguration.touchSlop
+                                if (kotlin.math.abs(totalY) > touchSlop && kotlin.math.abs(totalY) >= kotlin.math.abs(totalX)) {
+                                    break
+                                }
+                                val opening = totalX < -touchSlop
+                                val closing = offsetAnimation.value < -0.5f && totalX > touchSlop
+                                if (!opening && !closing) {
+                                    if (totalX > touchSlop) break
+                                    continue
+                                }
+                                offsetAnimation.stop()
+                                dragOffset = offsetAnimation.value
+                                isDragging = true
+                                horizontalDrag = true
+                                dragOffset = (dragOffset + totalX).coerceIn(-revealWidthPx, 0f)
+                                change.consume()
+                            } else {
+                                dragOffset = (dragOffset + delta.x).coerceIn(-revealWidthPx, 0f)
+                                change.consume()
+                            }
+                        }
+
+                        if (horizontalDrag) {
                             val releaseOffset = dragOffset
                             val targetOffset = if (releaseOffset <= -thresholdPx) -revealWidthPx else 0f
                             scope.launch {
@@ -12718,21 +12782,8 @@ private fun SwipeDeleteToolBox(
                                 offsetAnimation.animateTo(targetOffset, tween(190, easing = FastOutSlowInEasing))
                                 dragOffset = targetOffset
                             }
-                        },
-                        onDragCancel = {
-                            val releaseOffset = dragOffset
-                            scope.launch {
-                                offsetAnimation.snapTo(releaseOffset)
-                                isDragging = false
-                                offsetAnimation.animateTo(0f, tween(190, easing = FastOutSlowInEasing))
-                                dragOffset = 0f
-                            }
-                        },
-                        onHorizontalDrag = { change, dragAmount ->
-                            change.consume()
-                            dragOffset = (dragOffset + dragAmount).coerceIn(-revealWidthPx, 0f)
                         }
-                    )
+                    }
                 }
         ) {
             content()
