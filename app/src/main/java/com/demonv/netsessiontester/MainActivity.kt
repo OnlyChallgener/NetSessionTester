@@ -41,6 +41,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.Canvas
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.animateIntAsState
 import androidx.compose.animation.core.tween
@@ -6373,14 +6374,11 @@ private fun UpdateDownloadBanner(
         state.failed -> ErrorRed
         else -> Blue
     }
+    val dragScope = rememberCoroutineScope()
+    val dragAnimation = remember { Animatable(0f) }
     var dragX by remember { mutableStateOf(0f) }
     var isDragging by remember { mutableStateOf(false) }
-    val dragOffset by animateFloatAsState(
-        targetValue = dragX,
-        animationSpec = tween(140, easing = FastOutSlowInEasing),
-        label = "update_banner_drag"
-    )
-    val displayedOffset = if (isDragging) dragX else dragOffset
+    val displayedOffset = if (isDragging) dragX else dragAnimation.value
     val dismissible = state.failed || state.finished || state.message.contains("取消")
 
     Card(
@@ -6390,18 +6388,37 @@ private fun UpdateDownloadBanner(
             .pointerInput(dismissible) {
                 if (dismissible) {
                     detectHorizontalDragGestures(
-                        onDragStart = { isDragging = true },
+                        onDragStart = {
+                            dragX = dragAnimation.value
+                            isDragging = true
+                            dragScope.launch { dragAnimation.stop() }
+                        },
                         onHorizontalDrag = { change, amount ->
                             change.consume()
                             dragX = (dragX + amount).coerceIn(-240f, 240f)
                         },
                         onDragEnd = {
-                            isDragging = false
-                            if (kotlin.math.abs(dragX) > 80f) onDismiss() else dragX = 0f
+                            if (kotlin.math.abs(dragX) > 80f) {
+                                isDragging = false
+                                onDismiss()
+                            } else {
+                                val releaseX = dragX
+                                dragScope.launch {
+                                    dragAnimation.snapTo(releaseX)
+                                    isDragging = false
+                                    dragAnimation.animateTo(0f, tween(140, easing = FastOutSlowInEasing))
+                                    dragX = 0f
+                                }
+                            }
                         },
                         onDragCancel = {
-                            isDragging = false
-                            dragX = 0f
+                            val releaseX = dragX
+                            dragScope.launch {
+                                dragAnimation.snapTo(releaseX)
+                                isDragging = false
+                                dragAnimation.animateTo(0f, tween(140, easing = FastOutSlowInEasing))
+                                dragX = 0f
+                            }
                         }
                     )
                 }
@@ -12647,25 +12664,27 @@ private fun SwipeDeleteToolBox(onDelete: () -> Unit, content: @Composable () -> 
     val shape = RoundedCornerShape(16.dp)
     val revealWidthPx = with(LocalDensity.current) { 58.dp.toPx() }
     val thresholdPx = revealWidthPx * 0.42f
+    val scope = rememberCoroutineScope()
+    val offsetAnimation = remember { Animatable(0f) }
     var dragOffset by remember { mutableStateOf(0f) }
     var isDragging by remember { mutableStateOf(false) }
-    val animatedOffset by animateFloatAsState(dragOffset, tween(190, easing = FastOutSlowInEasing), label = "toolSwipe")
-    val displayedOffset = if (isDragging) dragOffset else animatedOffset
+    val displayedOffset = if (isDragging) dragOffset else offsetAnimation.value
     Box(
         modifier = Modifier
             .fillMaxWidth()
             .clip(shape)
-            .background(DeleteActionSurface)
+            .background(Color.Transparent)
     ) {
         Box(
             modifier = Modifier
-                .matchParentSize()
+                .align(Alignment.CenterEnd)
+                .width(52.dp)
+                .height(56.dp)
+                .background(DeleteActionSurface, RoundedCornerShape(16.dp))
                 .clickable(onClick = onDelete),
+            contentAlignment = Alignment.Center
         ) {
-            Column(
-                modifier = Modifier.align(Alignment.CenterEnd).width(58.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Icon(Icons.Filled.DeleteOutline, contentDescription = "删除", tint = Color.White, modifier = Modifier.width(17.dp).height(17.dp))
                 Text("删除", color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold)
             }
@@ -12678,14 +12697,29 @@ private fun SwipeDeleteToolBox(onDelete: () -> Unit, content: @Composable () -> 
                 .background(GlassSwipeSurface)
                 .pointerInput(Unit) {
                     detectHorizontalDragGestures(
-                        onDragStart = { isDragging = true },
+                        onDragStart = {
+                            dragOffset = offsetAnimation.value
+                            isDragging = true
+                            scope.launch { offsetAnimation.stop() }
+                        },
                         onDragEnd = {
-                            isDragging = false
-                            dragOffset = if (dragOffset <= -thresholdPx) -revealWidthPx else 0f
+                            val releaseOffset = dragOffset
+                            val targetOffset = if (releaseOffset <= -thresholdPx) -revealWidthPx else 0f
+                            scope.launch {
+                                offsetAnimation.snapTo(releaseOffset)
+                                isDragging = false
+                                offsetAnimation.animateTo(targetOffset, tween(190, easing = FastOutSlowInEasing))
+                                dragOffset = targetOffset
+                            }
                         },
                         onDragCancel = {
-                            isDragging = false
-                            dragOffset = 0f
+                            val releaseOffset = dragOffset
+                            scope.launch {
+                                offsetAnimation.snapTo(releaseOffset)
+                                isDragging = false
+                                offsetAnimation.animateTo(0f, tween(190, easing = FastOutSlowInEasing))
+                                dragOffset = 0f
+                            }
                         },
                         onHorizontalDrag = { change, dragAmount ->
                             change.consume()
@@ -13722,33 +13756,30 @@ private fun SwipeDeleteHistoryCard(
 ) {
     val revealWidthPx = with(LocalDensity.current) { 78.dp.toPx() }
     val thresholdPx = revealWidthPx * 0.35f
+    val scope = rememberCoroutineScope()
+    val offsetAnimation = remember(item.id) { Animatable(0f) }
     var dragOffset by remember(item.id) { mutableStateOf(0f) }
     var isDragging by remember(item.id) { mutableStateOf(false) }
-    val animatedOffset by animateFloatAsState(
-        targetValue = dragOffset,
-        animationSpec = tween(170, easing = FastOutSlowInEasing),
-        label = "historySwipe"
-    )
-    val displayedOffset = if (isDragging) dragOffset else animatedOffset
+    val displayedOffset = if (isDragging) dragOffset else offsetAnimation.value
     val isRevealed = dragOffset <= -revealWidthPx * 0.9f
 
     Box(
         modifier = Modifier
             .fillMaxWidth()
             .clip(ShapeL)
-            .background(DeleteActionSurface)
+            .background(Color.Transparent)
     ) {
         if (displayedOffset < 0f) {
             Box(
                 modifier = Modifier
-                    .matchParentSize()
+                    .align(Alignment.CenterEnd)
+                    .width(64.dp)
+                    .height(72.dp)
+                    .background(DeleteActionSurface, RoundedCornerShape(18.dp))
                     .clickable(onClick = onDelete),
+                contentAlignment = Alignment.Center
             ) {
-                Column(
-                    modifier = Modifier.align(Alignment.CenterEnd).width(78.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Icon(Icons.Filled.DeleteOutline, contentDescription = "删除", tint = Color.White, modifier = Modifier.width(22.dp).height(22.dp))
                     Text("删除", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                 }
@@ -13763,14 +13794,29 @@ private fun SwipeDeleteHistoryCard(
                 .background(GlassSwipeSurface)
                 .pointerInput(item.id) {
                     detectHorizontalDragGestures(
-                        onDragStart = { isDragging = true },
+                        onDragStart = {
+                            dragOffset = offsetAnimation.value
+                            isDragging = true
+                            scope.launch { offsetAnimation.stop() }
+                        },
                         onDragEnd = {
-                            isDragging = false
-                            dragOffset = if (dragOffset <= -thresholdPx) -revealWidthPx else 0f
+                            val releaseOffset = dragOffset
+                            val targetOffset = if (releaseOffset <= -thresholdPx) -revealWidthPx else 0f
+                            scope.launch {
+                                offsetAnimation.snapTo(releaseOffset)
+                                isDragging = false
+                                offsetAnimation.animateTo(targetOffset, tween(170, easing = FastOutSlowInEasing))
+                                dragOffset = targetOffset
+                            }
                         },
                         onDragCancel = {
-                            isDragging = false
-                            dragOffset = 0f
+                            val releaseOffset = dragOffset
+                            scope.launch {
+                                offsetAnimation.snapTo(releaseOffset)
+                                isDragging = false
+                                offsetAnimation.animateTo(0f, tween(170, easing = FastOutSlowInEasing))
+                                dragOffset = 0f
+                            }
                         },
                         onHorizontalDrag = { change, dragAmount ->
                             change.consume()
