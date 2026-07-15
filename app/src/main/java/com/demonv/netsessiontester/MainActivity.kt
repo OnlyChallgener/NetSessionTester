@@ -2585,15 +2585,26 @@ private fun currentNetworkSignature(context: Context): String {
     val connectivity = context.getSystemService(ConnectivityManager::class.java)
     val network = connectivity?.activeNetwork ?: return "none"
     val caps = connectivity.getNetworkCapabilities(network)
+    val linkProperties = connectivity.getLinkProperties(network)
     val transports = buildList {
         if (caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true) add("wifi")
         if (caps?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) == true) add("cellular")
         if (caps?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true) add("vpn")
         if (caps?.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) == true) add("ethernet")
     }.joinToString("+").ifBlank { "unknown" }
-    // 只检测真实网络切换：activeNetwork 或传输类型变化。
-    // 不把 VALIDATED/INTERNET 放进去，避免运营商抖动导致误中断。
-    return "${network}|$transports"
+    val addresses = linkProperties?.linkAddresses
+        ?.map { it.toString() }
+        ?.sorted()
+        ?.joinToString(",")
+        .orEmpty()
+    val dnsServers = linkProperties?.dnsServers
+        ?.mapNotNull { it.hostAddress }
+        ?.sorted()
+        ?.joinToString(",")
+        .orEmpty()
+    // 只把会改变出口判定的网络、传输、接口地址和 DNS 纳入签名。
+    // 不纳入带宽、VALIDATED 等高频变量，避免回调抖动反复请求公网 IP。
+    return "${network}|$transports|${linkProperties?.interfaceName.orEmpty()}|$addresses|$dnsServers"
 }
 
 
@@ -3396,7 +3407,7 @@ private fun NetSessionTesterApp() {
                     )
                 }
                 if (generation != networkRefreshGeneration) return@launch
-                // 5 秒轻量刷新不能覆盖本次手动 NAT 诊断结果。
+                // 网络变化或手动刷新不能覆盖本次手动 NAT 诊断结果。
                 val mergedProbe = if (natDiagnosticResult != null) {
                     freshProbe.copy(
                         natType = networkProbeInfo.natType,
@@ -3442,6 +3453,7 @@ private fun NetSessionTesterApp() {
             val signature = currentNetworkSignature(appContext)
             val vpnActive = detectNetworkEnvironment(appContext).hasVpn
             val signatureChanged = signature != lastNetworkInfoSignature
+            if (!signatureChanged && !vpnActive) return@launch
             if (signatureChanged) {
                 // 默认网络确实变化时，旧公网 IPv6 不再沿用；同一网络的普通刷新仍保持静默。
                 networkRefreshGeneration += 1L
@@ -3548,16 +3560,6 @@ private fun NetSessionTesterApp() {
         while (pingRunning && pingSessionStartedAt > 0L) {
             pingDurationTick = System.currentTimeMillis()
             delay(1_000L)
-        }
-    }
-
-    LaunchedEffect(settingsLoaded, appInForeground, state.isAdding, state.runPhase) {
-        if (!settingsLoaded || !appInForeground) return@LaunchedEffect
-        // 进入前台立即刷新；连接数压测/释放阶段暂停轻量刷新，避免额外占用 FD。
-        if (!state.isAdding && state.runPhase != RunPhase.Releasing) refreshPublicIp()
-        while (appInForeground) {
-            delay(5_000L)
-            if (!state.isAdding && state.runPhase != RunPhase.Releasing) refreshPublicIp()
         }
     }
 
@@ -6524,15 +6526,6 @@ private fun GlassAppBackground() {
             ),
             radius = base * 0.64f,
             center = Offset(size.width * 0.92f, size.height * 0.42f)
-        )
-        drawCircle(
-            brush = Brush.radialGradient(
-                colors = listOf(GlassCyanGlow, Color.Transparent),
-                center = Offset(size.width * 0.18f, size.height * 0.92f),
-                radius = base * 0.58f
-            ),
-            radius = base * 0.58f,
-            center = Offset(size.width * 0.18f, size.height * 0.92f)
         )
     }
 }
@@ -12662,18 +12655,17 @@ private fun SwipeDeleteToolBox(onDelete: () -> Unit, content: @Composable () -> 
         modifier = Modifier
             .fillMaxWidth()
             .clip(shape)
-            .background(GlassSwipeSurface)
+            .background(DeleteActionSurface)
     ) {
         Box(
             modifier = Modifier
-                .align(Alignment.CenterEnd)
-                .width(52.dp)
-                .height(56.dp)
-                .background(DeleteActionSurface, shape)
+                .matchParentSize()
                 .clickable(onClick = onDelete),
-            contentAlignment = Alignment.Center
         ) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Column(
+                modifier = Modifier.align(Alignment.CenterEnd).width(58.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
                 Icon(Icons.Filled.DeleteOutline, contentDescription = "删除", tint = Color.White, modifier = Modifier.width(17.dp).height(17.dp))
                 Text("删除", color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold)
             }
@@ -13744,22 +13736,19 @@ private fun SwipeDeleteHistoryCard(
         modifier = Modifier
             .fillMaxWidth()
             .clip(ShapeL)
-            .background(GlassSwipeSurface)
+            .background(DeleteActionSurface)
     ) {
         if (displayedOffset < 0f) {
             Box(
                 modifier = Modifier
-                    .align(Alignment.CenterEnd)
-                    .width(72.dp)
-                    .heightIn(min = 156.dp)
-                    .background(
-                        ErrorRed,
-                        RoundedCornerShape(topEnd = 28.dp, bottomEnd = 28.dp, topStart = 14.dp, bottomStart = 14.dp)
-                    )
+                    .matchParentSize()
                     .clickable(onClick = onDelete),
-                contentAlignment = Alignment.Center
             ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Column(
+                    modifier = Modifier.align(Alignment.CenterEnd).width(78.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
                     Icon(Icons.Filled.DeleteOutline, contentDescription = "删除", tint = Color.White, modifier = Modifier.width(22.dp).height(22.dp))
                     Text("删除", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                 }
@@ -14223,10 +14212,9 @@ private val ShapeS = RoundedCornerShape(10.dp)
 // surfaces keeps the visual depth without stacking multiple blur render layers.
 private val GlassBackgroundTop = Color(0xFFF4F8FF)
 private val GlassBackgroundMid = Color(0xFFF8F7FF)
-private val GlassBackgroundBottom = Color(0xFFF4FBFF)
+private val GlassBackgroundBottom = Color(0xFFF7F9FF)
 private val GlassBlueGlow = Color(0x5960A5FA)
 private val GlassPurpleGlow = Color(0x4FBEA7FF)
-private val GlassCyanGlow = Color(0x3F67E8F9)
 private val GlassCardBrush = Brush.verticalGradient(
     listOf(Color.White.copy(alpha = 0.86f), Color(0xFFF8FBFF).copy(alpha = 0.68f))
 )
