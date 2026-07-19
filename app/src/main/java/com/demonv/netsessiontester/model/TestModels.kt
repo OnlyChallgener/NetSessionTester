@@ -25,13 +25,15 @@ enum class RunPhase(val label: String) {
 }
 
 data class ReleaseUiState(
+    val runId: Long = 0L,
     val visible: Boolean = false,
     val total: Int = 0,
     val closed: Int = 0,
     val speedPerSecond: Int = 0,
     val elapsedMs: Long = 0L,
     val message: String = "",
-    val finished: Boolean = false
+    val finished: Boolean = false,
+    val finishedAtEpochMs: Long = 0L
 ) {
     val progress: Float
         get() = if (total <= 0) 1f else (closed.toFloat() / total.toFloat()).coerceIn(0f, 1f)
@@ -60,7 +62,7 @@ data class SessionConfig(
             host = cleanHost,
             port = port.coerceIn(1, 65535),
             // batchSize 直接作为“目标 CPS”使用，不再做 128 动态调速。
-            batchSize = batchSize.coerceIn(20, 2_000),
+            batchSize = batchSize.coerceIn(1, 2_000),
             // 调度间隔用于固定 CPS 发射：每个 tick 发起 batchSize * intervalMs / 1000 条。
             intervalMs = intervalMs.coerceIn(20L, 1_000L),
             timeoutMs = timeoutMs.coerceIn(300, 10_000),
@@ -88,7 +90,8 @@ data class ProtocolStats(
     val cps: Int = 0,
     val errorSummary: Map<String, Int> = emptyMap(),
     val totalSuccess: Int = 0,
-    val maxStableSessions: Int = 0
+    val maxStableSessions: Int = 0,
+    val averageConnectLatencyMs: Int = 0
 )
 
 data class LogLine(

@@ -1,18 +1,18 @@
 {
-  "versionCode": 146,
-  "versionName": "V1.1.16",
-  "build": 146,
+  "versionCode": 147,
+  "versionName": "v1.0.18",
+  "build": 147,
   "status": "ready",
   "minReadyFileSize": 3000000,
-  "title": "发现新版本 V1.1.16 build146",
+  "title": "发现新版本 v1.0.18 build147",
   "content": [
-    "清理冗余历史日志文件，新增统一构建历史和发版模板",
-    "路由追踪支持暂停和继续，暂停后保留已完成节点",
-    "优化路由追踪停止、返回、后台和异常网络下的资源释放",
-    "优化测试页、历史页和图表刷新性能，减少页面卡顿",
-    "检查并优化稳定性、兼容性、性能和必要权限处理"
+    "NAT检测历史支持左滑删除，修复圆角阴影和展开波纹",
+    "STUN服务器输入框编辑时优先横向浏览文本，退出编辑后恢复左滑删除",
+    "漫游历史新增保存条数和实际空间占用显示",
+    "统一删除与清空交互，增加二次确认和10秒撤销恢复",
+    "优化公网IP刷新、后台终止和毛玻璃图层稳定性"
   ],
-  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.1.16-146/NetSessionTester-V1.1.16-build146-signed.apk",
-  "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/tag/v1.1.16-146",
+  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.0.18-147/NetSessionTester-v1.0.18-build147-signed.apk",
+  "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/tag/v1.0.18-147",
   "force": false
 }

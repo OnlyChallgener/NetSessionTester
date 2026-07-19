@@ -27,14 +27,13 @@ import android.provider.MediaStore
 import android.provider.Settings
 import android.telephony.TelephonyManager
 import android.widget.Toast
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -42,14 +41,19 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.Canvas
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.animateIntAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.calculateCentroid
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -68,7 +72,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
@@ -80,25 +83,22 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.AlertDialog as MaterialAlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material.icons.Icons
@@ -107,7 +107,6 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Assessment
-import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.OpenInNew
@@ -132,6 +131,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -140,8 +140,11 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.composed
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
@@ -150,7 +153,10 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -161,13 +167,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
-import androidx.compose.ui.zIndex
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
@@ -190,7 +194,6 @@ import com.demonv.netsessiontester.model.RunPhase
 import com.demonv.netsessiontester.model.SessionConfig
 import com.demonv.netsessiontester.model.SessionSummary
 import com.demonv.netsessiontester.model.TestMode
-import com.demonv.netsessiontester.network.TcpTester
 import com.demonv.netsessiontester.network.PublicIpDetector
 import com.demonv.netsessiontester.network.PublicIpResult
 import com.demonv.netsessiontester.network.NetworkDnsResolver
@@ -205,6 +208,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.flow.first
 import org.json.JSONObject
 import org.json.JSONArray
 import java.io.BufferedInputStream
@@ -266,20 +270,6 @@ private enum class SessionProtocolView(val label: String) {
     COMPARE("对比")
 }
 
-private enum class FinishReason(val label: String, val saveHistory: Boolean) {
-    Completed("测试完成", true),
-    FailureLimit("失败上限", true),
-    NoGrowth("无增长确认", true),
-    ConsecutiveFailure("连续失败", true),
-    FdLimit("FD上限", true),
-    ManualStop("手动停止", true),
-    ForceRelease("强制释放", false),
-    NetworkChange("网络环境变化", true),
-    DnsFail("解析失败", false),
-    Interrupted("测试中断", true),
-    ServiceDestroyed("服务销毁保护", true)
-}
-
 private data class ChartPoint(
     val protocol: IpProtocol,
     val elapsedSec: Int,
@@ -291,7 +281,7 @@ private data class ChartPoint(
     val timeEpochMs: Long = System.currentTimeMillis()
 )
 
-private data class PingPoint(
+internal data class PingPoint(
     val elapsedSec: Int,
     val latencyMs: Int?,
     val lossCount: Int = 0,
@@ -342,7 +332,7 @@ private fun compactSessionPointsForRender(points: List<ChartPoint>): List<ChartP
         .flatMap { downsampleForRender(it.sortedBy { point -> point.elapsedSec }, (MAX_RENDER_SESSION_POINTS / 2).coerceAtLeast(1)) }
         .sortedWith(compareBy<ChartPoint> { it.protocol.ordinal }.thenBy { it.elapsedSec })
 
-private enum class PingProtocolMode(val label: String) {
+internal enum class PingProtocolMode(val label: String) {
     AUTO("自动"), IPV4("IPv4"), IPV6("IPv6")
 }
 
@@ -389,7 +379,7 @@ private val DefaultPingTimeoutPresets = listOf(
     PingTimeoutPreset("3000", "3000")
 )
 
-private data class PingLogEntry(
+internal data class PingLogEntry(
     val timeEpochMs: Long = System.currentTimeMillis(),
     val target: String,
     val protocol: String,
@@ -405,7 +395,7 @@ private data class PingLogEntry(
             .format(Instant.ofEpochMilli(timeEpochMs))
 }
 
-private class RttJitterWindow(private val maxSize: Int = 50) {
+internal class RttJitterWindow(private val maxSize: Int = 50) {
     private val values = ArrayDeque<Double>()
 
     fun reset() {
@@ -433,7 +423,7 @@ private class RttJitterWindow(private val maxSize: Int = 50) {
     }
 }
 
-private fun trimPingLogSessions(
+internal fun trimPingLogSessions(
     logs: List<PingLogEntry>,
     maxSessions: Int = 12,
     maxEntriesPerSession: Int = 6000
@@ -453,7 +443,7 @@ private fun trimPingLogSessions(
         .sortedBy { it.timeEpochMs }
 }
 
-private fun savePingLogs(context: Context, logs: List<PingLogEntry>) {
+internal fun savePingLogs(context: Context, logs: List<PingLogEntry>) {
     runCatching {
         val arr = JSONArray()
         trimPingLogSessions(logs).forEach { item ->
@@ -657,6 +647,12 @@ private data class BottomNoticeUi(
     val id: Long = 0L
 )
 
+private data class ClearConfirmationRequest(
+    val title: String,
+    val message: String,
+    val onConfirm: () -> Unit
+)
+
 private fun currentAppVersionCode(context: Context): Long = runCatching {
     val info = context.packageManager.getPackageInfo(context.packageName, 0)
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) info.longVersionCode else info.versionCode.toLong()
@@ -665,8 +661,8 @@ private fun currentAppVersionCode(context: Context): Long = runCatching {
 private fun currentAppVersionName(context: Context): String {
     return runCatching {
         val pkg = context.packageManager.getPackageInfo(context.packageName, 0)
-        pkg.versionName?.takeIf { it.isNotBlank() } ?: "V1.0.8"
-    }.getOrDefault("V1.0.8")
+        pkg.versionName?.takeIf { it.isNotBlank() } ?: "v1.0.18"
+    }.getOrDefault("v1.0.18")
 }
 
 private fun displayVersionName(raw: String): String {
@@ -1084,13 +1080,23 @@ private fun saveNatHistory(context: Context, record: NatHistoryRecord): List<Nat
     val next = (listOf(record) + loadNatHistory(context).filterNot { it.id == record.id })
         .sortedByDescending { it.id }
         .take(NAT_HISTORY_MAX)
+    writeNatHistory(context, next)
+    return next
+}
+
+private fun deleteNatHistory(context: Context, id: Long): List<NatHistoryRecord> {
+    val next = loadNatHistory(context).filterNot { it.id == id }
+    writeNatHistory(context, next)
+    return next
+}
+
+private fun writeNatHistory(context: Context, records: List<NatHistoryRecord>) {
     val array = JSONArray()
-    next.forEach { array.put(it.toJson()) }
+    records.forEach { array.put(it.toJson()) }
     context.getSharedPreferences(NAT_HISTORY_PREFS, Context.MODE_PRIVATE)
         .edit()
         .putString(NAT_HISTORY_KEY, array.toString())
         .apply()
-    return next
 }
 
 private fun natHistorySizeKb(records: List<NatHistoryRecord>): Double {
@@ -2603,15 +2609,26 @@ private fun currentNetworkSignature(context: Context): String {
     val connectivity = context.getSystemService(ConnectivityManager::class.java)
     val network = connectivity?.activeNetwork ?: return "none"
     val caps = connectivity.getNetworkCapabilities(network)
+    val linkProperties = connectivity.getLinkProperties(network)
     val transports = buildList {
         if (caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true) add("wifi")
         if (caps?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) == true) add("cellular")
         if (caps?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true) add("vpn")
         if (caps?.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) == true) add("ethernet")
     }.joinToString("+").ifBlank { "unknown" }
-    // 只检测真实网络切换：activeNetwork 或传输类型变化。
-    // 不把 VALIDATED/INTERNET 放进去，避免运营商抖动导致误中断。
-    return "${network}|$transports"
+    val addresses = linkProperties?.linkAddresses
+        ?.map { it.toString() }
+        ?.sorted()
+        ?.joinToString(",")
+        .orEmpty()
+    val dnsServers = linkProperties?.dnsServers
+        ?.mapNotNull { it.hostAddress }
+        ?.sorted()
+        ?.joinToString(",")
+        .orEmpty()
+    // 只把会改变出口判定的网络、传输、接口地址和 DNS 纳入签名。
+    // 不纳入带宽、VALIDATED 等高频变量，避免回调抖动反复请求公网 IP。
+    return "${network}|$transports|${linkProperties?.interfaceName.orEmpty()}|$addresses|$dnsServers"
 }
 
 
@@ -2690,25 +2707,27 @@ private fun normalizeNetworkTargetInput(raw: String, defaultHost: String = "223.
     return NormalizedNetworkTarget(normalizedHost, parsedPort)
 }
 
-private data class ResolvedPingTarget(
+internal data class ResolvedPingTarget(
     val address: String,
     val protocol: PingProtocolMode,
     val displayProtocol: String,
     val error: String? = null
 )
 
-private data class PingCommandResult(
+internal data class PingCommandResult(
     val latencyMs: Int?,
     val failure: String? = null
 )
 
-private data class PingStreamEvent(
+internal data class PingStreamEvent(
     val latencyMs: Int?,
     val failure: String? = null,
     val timeEpochMs: Long = System.currentTimeMillis()
 )
 
-private suspend fun resolvePingTarget(host: String, protocol: PingProtocolMode): ResolvedPingTarget = withContext(Dispatchers.IO) {
+internal const val PING_STREAM_STALL_REASON = "连续5秒无Ping输出"
+
+internal suspend fun resolvePingTarget(host: String, protocol: PingProtocolMode): ResolvedPingTarget = withContext(Dispatchers.IO) {
     val target = normalizeNetworkTargetInput(host, "223.5.5.5").host
     runCatching {
         if (looksLikeIpv4Literal(target)) {
@@ -2757,7 +2776,7 @@ private suspend fun resolvePingTarget(host: String, protocol: PingProtocolMode):
 }
 
 
-private data class TcpPingProbe(val port: Int, val latencyMs: Int)
+internal data class TcpPingProbe(val port: Int, val latencyMs: Int)
 
 private val TCP_PING_PROBE_PORTS = listOf(80, 443, 22, 8080, 8443, 8000, 5000, 5001)
 
@@ -2772,7 +2791,7 @@ private suspend fun tcpSocketProbe(address: String, port: Int, timeoutMs: Int): 
     }.getOrNull()
 }
 
-private suspend fun findTcpPingPort(address: String, timeoutMs: Int): TcpPingProbe? = withContext(Dispatchers.IO) {
+internal suspend fun findTcpPingPort(address: String, timeoutMs: Int): TcpPingProbe? = withContext(Dispatchers.IO) {
     val probeTimeout = timeoutMs.coerceIn(180, 650)
     for (port in TCP_PING_PROBE_PORTS) {
         val probe = tcpSocketProbe(address, port, probeTimeout)
@@ -2781,7 +2800,7 @@ private suspend fun findTcpPingPort(address: String, timeoutMs: Int): TcpPingPro
     null
 }
 
-private suspend fun tcpSocketPingResolved(address: String, port: Int, timeoutMs: Int): PingCommandResult = withContext(Dispatchers.IO) {
+internal suspend fun tcpSocketPingResolved(address: String, port: Int, timeoutMs: Int): PingCommandResult = withContext(Dispatchers.IO) {
     runCatching {
         val startedAt = System.nanoTime()
         Socket().use { socket ->
@@ -2801,18 +2820,28 @@ private suspend fun tcpSocketPingResolved(address: String, port: Int, timeoutMs:
     }
 }
 
-private suspend fun icmpPingResolved(address: String, timeoutMs: Int, protocol: PingProtocolMode): PingCommandResult = withContext(Dispatchers.IO) {
+internal suspend fun icmpPingResolved(address: String, timeoutMs: Int, protocol: PingProtocolMode): PingCommandResult = withContext(Dispatchers.IO) {
     val timeoutSec = ((timeoutMs.coerceIn(300, 10_000) + 999) / 1000).coerceAtLeast(1)
-    fun runCommand(command: List<String>): PingCommandResult {
-        return runCatching {
+    suspend fun runCommand(command: List<String>): PingCommandResult {
+        var process: Process? = null
+        return try {
             val startedAt = System.nanoTime()
-            val process = ProcessBuilder(command).redirectErrorStream(true).start()
-            val finished = process.waitFor((timeoutMs + 900).toLong(), TimeUnit.MILLISECONDS)
-            if (!finished) {
-                process.destroyForcibly()
-                return@runCatching PingCommandResult(null, "超时")
+            val activeProcess = ProcessBuilder(command).redirectErrorStream(true).start()
+            process = activeProcess
+            val deadline = SystemClock.elapsedRealtime() + timeoutMs + 900L
+            var finished = false
+            while (currentCoroutineContext().isActive && SystemClock.elapsedRealtime() < deadline) {
+                if (activeProcess.waitFor(50L, TimeUnit.MILLISECONDS)) {
+                    finished = true
+                    break
+                }
             }
-            val output = process.inputStream.bufferedReader().use { it.readText() }
+            currentCoroutineContext().ensureActive()
+            if (!finished) {
+                activeProcess.destroyForcibly()
+                return PingCommandResult(null, "超时")
+            }
+            val output = activeProcess.inputStream.bufferedReader().use { it.readText() }
             val parsed = Regex("time[=<]([0-9.]+)\\s*ms")
                 .find(output)
                 ?.groupValues
@@ -2822,13 +2851,20 @@ private suspend fun icmpPingResolved(address: String, timeoutMs: Int, protocol: 
                 ?.coerceAtLeast(1)
             when {
                 parsed != null -> PingCommandResult(parsed, null)
-                process.exitValue() == 0 -> PingCommandResult(((System.nanoTime() - startedAt) / 1_000_000L).toInt().coerceAtLeast(1), null)
+                activeProcess.exitValue() == 0 -> PingCommandResult(((System.nanoTime() - startedAt) / 1_000_000L).toInt().coerceAtLeast(1), null)
                 output.contains("unknown host", ignoreCase = true) -> PingCommandResult(null, "解析失败")
                 output.contains("unreachable", ignoreCase = true) -> PingCommandResult(null, "不可达")
                 else -> PingCommandResult(null, "超时")
             }
-        }.getOrElse {
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Error) {
+            throw error
+        } catch (_: Throwable) {
             PingCommandResult(null, "命令失败")
+        } finally {
+            runCatching { process?.destroy() }
+            runCatching { process?.destroyForcibly() }
         }
     }
     when (protocol) {
@@ -2841,7 +2877,7 @@ private suspend fun icmpPingResolved(address: String, timeoutMs: Int, protocol: 
     }
 }
 
-private suspend fun streamIcmpPingResolved(
+internal suspend fun streamIcmpPingResolved(
     address: String,
     timeoutMs: Int,
     protocol: PingProtocolMode,
@@ -2861,16 +2897,32 @@ private suspend fun streamIcmpPingResolved(
         var emitted = 0
         var lastSeq = 0
         var sawPingLine = false
+        var lastOutputAt = SystemClock.elapsedRealtime()
         val seqRegex = Regex("(?:icmp_)?seq[= ](\\d+)")
         val timeRegex = Regex("time[=<]([0-9.]+)\\s*ms")
         return try {
             process = ProcessBuilder(command).redirectErrorStream(true).start()
             val reader = process!!.inputStream.bufferedReader()
             while (currentCoroutineContext().isActive) {
+                if (!reader.ready()) {
+                    if (process?.isAlive != true) break
+                    if (SystemClock.elapsedRealtime() - lastOutputAt >= PING_STREAM_STALL_TIMEOUT_MS) {
+                        onEvent(PingStreamEvent(null, PING_STREAM_STALL_REASON))
+                        emitted++
+                        runCatching { process?.destroy() }
+                        if (process?.waitFor(200L, TimeUnit.MILLISECONDS) == false) {
+                            runCatching { process?.destroyForcibly() }
+                        }
+                        break
+                    }
+                    delay(PING_STREAM_READ_POLL_MS)
+                    continue
+                }
                 val line = reader.readLine() ?: break
+                lastOutputAt = SystemClock.elapsedRealtime()
                 val lower = line.lowercase()
                 if (lower.contains("unknown host") || lower.contains("bad address")) {
-                    withContext(Dispatchers.Main) { onEvent(PingStreamEvent(null, "解析失败")) }
+                    onEvent(PingStreamEvent(null, "解析失败"))
                     emitted++
                     break
                 }
@@ -2883,27 +2935,41 @@ private suspend fun streamIcmpPingResolved(
                     val seq = seqRegex.find(line)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: (lastSeq + 1)
                     if (seq > lastSeq + 1) {
                         repeat((seq - lastSeq - 1).coerceAtMost(maxCount - emitted)) {
-                            withContext(Dispatchers.Main) { onEvent(PingStreamEvent(null, "超时")) }
+                            onEvent(PingStreamEvent(null, "超时"))
                             emitted++
                         }
                     }
                     lastSeq = seq.coerceAtLeast(lastSeq)
-                    withContext(Dispatchers.Main) { onEvent(PingStreamEvent(time, null)) }
+                    onEvent(PingStreamEvent(time, null))
                     emitted++
                     if (emitted >= maxCount) break
                 }
             }
             if (currentCoroutineContext().isActive) {
                 val waitMs = (timeoutMs + intervalMs + 1500L).coerceAtMost(12_000L)
-                process!!.waitFor(waitMs, TimeUnit.MILLISECONDS)
+                val waitDeadline = SystemClock.elapsedRealtime() + waitMs
+                while (process?.isAlive == true && currentCoroutineContext().isActive && SystemClock.elapsedRealtime() < waitDeadline) {
+                    if (process?.waitFor(50L, TimeUnit.MILLISECONDS) == true) break
+                }
+                currentCoroutineContext().ensureActive()
+                if (process?.isAlive == true) {
+                    runCatching { process?.destroy() }
+                    if (process?.waitFor(200L, TimeUnit.MILLISECONDS) == false) {
+                        runCatching { process?.destroyForcibly() }
+                    }
+                }
                 if (sawPingLine && emitted < maxCount) {
                     repeat((maxCount - emitted).coerceAtMost(500)) {
-                        withContext(Dispatchers.Main) { onEvent(PingStreamEvent(null, "超时")) }
+                        onEvent(PingStreamEvent(null, "超时"))
                         emitted++
                     }
                 }
             }
             Pair(emitted, sawPingLine || emitted > 0)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Error) {
+            throw error
         } catch (_: Throwable) {
             Pair(emitted, false)
         } finally {
@@ -2920,6 +2986,9 @@ private suspend fun streamIcmpPingResolved(
     }
 }
 
+private const val PING_STREAM_STALL_TIMEOUT_MS = 5_000L
+private const val PING_STREAM_READ_POLL_MS = 25L
+
 private fun recommendedPingTimeoutMsForInterval(intervalMs: Long): Int = when {
     intervalMs <= 30L -> 300
     intervalMs <= 50L -> 500
@@ -2929,7 +2998,7 @@ private fun recommendedPingTimeoutMsForInterval(intervalMs: Long): Int = when {
     else -> 3000
 }
 
-private fun pingMaxInflight(intervalMs: Long, timeoutMs: Int): Int {
+internal fun pingMaxInflight(intervalMs: Long, timeoutMs: Int): Int {
     val byWindow = ((timeoutMs + intervalMs - 1L) / intervalMs).toInt().coerceAtLeast(1)
     return byWindow.coerceIn(3, 16)
 }
@@ -2939,7 +3008,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         WindowCompat.setDecorFitsSystemWindows(window, true)
         window.statusBarColor = android.graphics.Color.TRANSPARENT
-        window.navigationBarColor = android.graphics.Color.WHITE
+        window.navigationBarColor = android.graphics.Color.rgb(248, 251, 255)
         WindowCompat.getInsetsController(window, window.decorView).apply {
             isAppearanceLightStatusBars = true
             isAppearanceLightNavigationBars = true
@@ -2959,7 +3028,9 @@ private fun NetSessionTesterApp() {
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
     NetworkDnsResolver.install(context.applicationContext)
-    val tester = remember { TcpTester(context.applicationContext) }
+    AppTestRuntime.initialize(context.applicationContext)
+    val runtimeConnectionState by AppTestRuntime.connectionState.collectAsState()
+    val runtimePingState by AppTestRuntime.pingState.collectAsState()
     val historyStore = remember { HistoryStore(context.applicationContext) }
     val logStore = remember { LogStore(context.applicationContext) }
     val settingsStore = remember { SettingsStore(context.applicationContext) }
@@ -2972,8 +3043,34 @@ private fun NetSessionTesterApp() {
     var settingsNetworkFocusRequest by remember { mutableStateOf(0) }
     var sessionCardExpanded by remember { mutableStateOf(false) }
     var networkInfoExpanded by rememberSaveable { mutableStateOf(false) }
-    var runningJob by remember { mutableStateOf<Job?>(null) }
-    var state by remember { mutableStateOf(AppUiState()) }
+    val restoredReleaseUi = remember {
+        val snapshot = AppTestRuntime.releaseUiSnapshot
+        val completionStillVisible = !snapshot.finished ||
+            snapshot.finishedAtEpochMs <= 0L ||
+            System.currentTimeMillis() - snapshot.finishedAtEpochMs < 10_000L
+        if (snapshot.visible && completionStillVisible) {
+            snapshot
+        } else {
+            ReleaseUiState().also { AppTestRuntime.releaseUiSnapshot = it }
+        }
+    }
+    var state by remember {
+        mutableStateOf(
+            runtimeConnectionState.ui.takeIf { runtimeConnectionState.revision > 0L } ?: AppUiState(
+                runPhase = when {
+                    !restoredReleaseUi.visible -> RunPhase.Idle
+                    restoredReleaseUi.finished -> RunPhase.Finished
+                    else -> RunPhase.Releasing
+                },
+                status = when {
+                    !restoredReleaseUi.visible -> "待测试"
+                    restoredReleaseUi.finished -> "已释放"
+                    else -> "正在释放"
+                },
+                releaseUi = restoredReleaseUi
+            )
+        )
+    }
     var pendingCsv by remember { mutableStateOf<String?>(null) }
     var settingsLoaded by remember { mutableStateOf(false) }
 
@@ -3004,7 +3101,6 @@ private fun NetSessionTesterApp() {
     var ipv6ConnectivityVerified by remember { mutableStateOf(false) }
     var publicIpv6FailureStreak by remember { mutableStateOf(0) }
     var networkProbeInfo by remember { mutableStateOf(NetworkProbeInfo()) }
-    var manualStopRequested by remember { mutableStateOf(false) }
     var currentTestConfig by remember { mutableStateOf<SessionConfig?>(null) }
     var currentStartedAt by remember { mutableStateOf(0L) }
     var chartMode by remember { mutableStateOf(ChartMode.GROWTH) }
@@ -3014,8 +3110,6 @@ private fun NetSessionTesterApp() {
     var displayChartPoints by remember { mutableStateOf<List<ChartPoint>>(emptyList()) }
     var displayPingPoints by remember { mutableStateOf<List<PingPoint>>(emptyList()) }
     var displayPingJitterMs by remember { mutableStateOf<Double?>(null) }
-    var displayPingLogCount by remember { mutableStateOf(0) }
-    var pingJob by remember { mutableStateOf<Job?>(null) }
     var pingLogSaveJob by remember { mutableStateOf<Job?>(null) }
     var pingIntervalLabel by remember { mutableStateOf("停止") }
     var pingActiveTargetLabel by remember { mutableStateOf("") }
@@ -3028,15 +3122,13 @@ private fun NetSessionTesterApp() {
     var pingLogs by remember { mutableStateOf<List<PingLogEntry>>(emptyList()) }
     var hostHistory by remember { mutableStateOf<List<String>>(emptyList()) }
     var pingTargetHistory by remember { mutableStateOf<List<String>>(emptyList()) }
-    var networkWatchJob by remember { mutableStateOf<Job?>(null) }
     var networkRefreshJob by remember { mutableStateOf<Job?>(null) }
     var networkEventRefreshJob by remember { mutableStateOf<Job?>(null) }
     var networkRefreshGeneration by remember { mutableStateOf(0L) }
     var appInForeground by remember { mutableStateOf(true) }
-    var testNetworkSignature by remember { mutableStateOf("") }
     var lastNetworkInfoSignature by remember { mutableStateOf("") }
-    var activeRunId by remember { mutableStateOf(0L) }
-    var finishInProgress by remember { mutableStateOf(false) }
+    var pendingReleaseFocusRunId by remember { mutableStateOf(0L) }
+    var lastAutoLocatedReleaseRunId by rememberSaveable { mutableStateOf(0L) }
 
     var detailTitle by remember { mutableStateOf<String?>(null) }
     var detailLines by remember { mutableStateOf<List<String>>(emptyList()) }
@@ -3067,6 +3159,8 @@ private fun NetSessionTesterApp() {
     var downloadRunId by remember { mutableStateOf(0L) }
     var bottomNotice by remember { mutableStateOf(BottomNoticeUi()) }
     var bottomNoticeJob by remember { mutableStateOf<Job?>(null) }
+    var clearConfirmation by remember { mutableStateOf<ClearConfirmationRequest?>(null) }
+    var undoClearJob by remember { mutableStateOf<Job?>(null) }
 
     fun closeIpv6DiagnosticsToNetworkInfo() {
         appToolPage = AppToolPage.NONE
@@ -3086,13 +3180,48 @@ private fun NetSessionTesterApp() {
         }
     }
 
-    LaunchedEffect(state.releaseUi.visible, state.releaseUi.finished, state.releaseUi.elapsedMs) {
+    LaunchedEffect(
+        state.releaseUi.runId,
+        state.releaseUi.visible,
+        state.releaseUi.finished,
+        state.releaseUi.finishedAtEpochMs
+    ) {
+        if (runtimeConnectionState.revision > 0L) return@LaunchedEffect
         if (!state.releaseUi.visible || !state.releaseUi.finished) return@LaunchedEffect
-        val completedSnapshot = state.releaseUi
-        delay(10_000L)
-        if (state.releaseUi == completedSnapshot) {
+        val completedRunId = state.releaseUi.runId
+        val completedAt = state.releaseUi.finishedAtEpochMs
+        val remainingVisibleMs = completedAt
+            .takeIf { it > 0L }
+            ?.let { finishedAt -> (10_000L - (System.currentTimeMillis() - finishedAt)).coerceAtLeast(0L) }
+            ?: 10_000L
+        delay(remainingVisibleMs)
+        if (state.releaseUi.runId == completedRunId && state.releaseUi.finished && state.releaseUi.finishedAtEpochMs == completedAt) {
             state = state.copy(releaseUi = ReleaseUiState())
+            AppTestRuntime.releaseUiSnapshot = ReleaseUiState()
         }
+    }
+
+    LaunchedEffect(Unit) {
+        if (runtimeConnectionState.ui.isAdding || runtimeConnectionState.ui.runPhase == RunPhase.Releasing || runtimePingState.running) {
+            showRunLogDetail = false
+            appToolPage = AppToolPage.NONE
+            selectedTab = MainTab.TEST
+        }
+    }
+
+    LaunchedEffect(state.releaseUi.visible, state.releaseUi.runId, appInForeground) {
+        val releaseRunId = state.releaseUi.runId
+        if (!appInForeground || !state.releaseUi.visible || releaseRunId == 0L || releaseRunId == lastAutoLocatedReleaseRunId) {
+            return@LaunchedEffect
+        }
+        // A running test must not take navigation ownership away from the user.
+        // Auto-focus the release card only when the test page is already visible.
+        lastAutoLocatedReleaseRunId = releaseRunId
+        if (showRunLogDetail || appToolPage != AppToolPage.NONE || selectedTab != MainTab.TEST) {
+            return@LaunchedEffect
+        }
+        sessionCardExpanded = true
+        pendingReleaseFocusRunId = releaseRunId
     }
 
     DisposableEffect(context) {
@@ -3101,9 +3230,12 @@ private fun NetSessionTesterApp() {
             when (event) {
                 Lifecycle.Event.ON_START -> {
                     appInForeground = true
-                    networkInfoExpanded = false
+                    AppTestRuntime.onAppForegroundChanged(true)
                 }
-                Lifecycle.Event.ON_STOP -> appInForeground = false
+                Lifecycle.Event.ON_STOP -> {
+                    appInForeground = false
+                    AppTestRuntime.onAppForegroundChanged(false)
+                }
                 else -> Unit
             }
         }
@@ -3212,7 +3344,15 @@ private fun NetSessionTesterApp() {
             }
             try {
                 val result = withContext(Dispatchers.IO) {
-                    runCatching { PublicIpDetector.detect(network) }.getOrElse { PublicIpResult() }
+                    try {
+                        PublicIpDetector.detect(network)
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (error: Error) {
+                        throw error
+                    } catch (_: Throwable) {
+                        PublicIpResult()
+                    }
                 }
                 if (generation != networkRefreshGeneration) return@launch
 
@@ -3292,7 +3432,7 @@ private fun NetSessionTesterApp() {
                     )
                 }
                 if (generation != networkRefreshGeneration) return@launch
-                // 5 秒轻量刷新不能覆盖本次手动 NAT 诊断结果。
+                // 网络变化或手动刷新不能覆盖本次手动 NAT 诊断结果。
                 val mergedProbe = if (natDiagnosticResult != null) {
                     freshProbe.copy(
                         natType = networkProbeInfo.natType,
@@ -3333,11 +3473,12 @@ private fun NetSessionTesterApp() {
         networkEventRefreshJob = scope.launch {
             // VPN/默认网络变化通常会连续触发多次回调，短暂防抖后只刷新一次。
             delay(250L)
-            if (!settingsLoaded || !appInForeground || state.isAdding || finishInProgress) return@launch
+            if (!settingsLoaded || !appInForeground || state.isAdding || state.runPhase == RunPhase.Releasing) return@launch
             val appContext = context.applicationContext
             val signature = currentNetworkSignature(appContext)
             val vpnActive = detectNetworkEnvironment(appContext).hasVpn
             val signatureChanged = signature != lastNetworkInfoSignature
+            if (!signatureChanged && !vpnActive) return@launch
             if (signatureChanged) {
                 // 默认网络确实变化时，旧公网 IPv6 不再沿用；同一网络的普通刷新仍保持静默。
                 networkRefreshGeneration += 1L
@@ -3364,8 +3505,8 @@ private fun NetSessionTesterApp() {
         refreshPublicIp()
     }
 
-    DisposableEffect(settingsLoaded, appInForeground, state.isAdding, finishInProgress) {
-        if (!settingsLoaded || !appInForeground || state.isAdding || finishInProgress) {
+    DisposableEffect(settingsLoaded, appInForeground, state.isAdding, state.runPhase) {
+        if (!settingsLoaded || !appInForeground || state.isAdding || state.runPhase == RunPhase.Releasing) {
             onDispose { }
         } else {
             val cm = context.applicationContext.getSystemService(ConnectivityManager::class.java)
@@ -3398,7 +3539,6 @@ private fun NetSessionTesterApp() {
         applyHistoryUiSnapshot(initialHistory)
         state = state.copy(logs = initialLogs)
         pingLogs = initialPingLogs
-        displayPingLogCount = initialPingLogs.size
         hostHistory = initialHostHistory
         pingTargetHistory = initialPingTargetHistory
         logSizeKb = initialLogSizeKb
@@ -3428,13 +3568,14 @@ private fun NetSessionTesterApp() {
         refreshPublicIp()
     }
 
-    LaunchedEffect(Unit) {
-        while (true) {
+    LaunchedEffect(pingRunning, state.isAdding, state.runPhase) {
+        while (pingRunning || (state.isAdding && state.runPhase != RunPhase.Releasing && state.runPhase != RunPhase.Stopping)) {
             displayPingPoints = compactPingPointsForRender(pingPoints)
-            displayChartPoints = compactSessionPointsForRender(chartPoints)
+            if (state.isAdding && state.runPhase != RunPhase.Releasing && state.runPhase != RunPhase.Stopping) {
+                displayChartPoints = compactSessionPointsForRender(chartPoints)
+            }
             displayPingJitterMs = pingJitterMs
-            displayPingLogCount = pingLogs.size
-            delay(if (pingRunning || state.isAdding) TEST_UI_REFRESH_MS else 1_000L)
+            delay(TEST_UI_REFRESH_MS)
         }
     }
 
@@ -3442,16 +3583,6 @@ private fun NetSessionTesterApp() {
         while (pingRunning && pingSessionStartedAt > 0L) {
             pingDurationTick = System.currentTimeMillis()
             delay(1_000L)
-        }
-    }
-
-    LaunchedEffect(settingsLoaded, appInForeground, state.isAdding, finishInProgress) {
-        if (!settingsLoaded || !appInForeground) return@LaunchedEffect
-        // 进入前台立即刷新；连接数压测/释放阶段暂停轻量刷新，避免额外占用 FD。
-        if (!state.isAdding && !finishInProgress) refreshPublicIp()
-        while (appInForeground) {
-            delay(5_000L)
-            if (!state.isAdding && !finishInProgress) refreshPublicIp()
         }
     }
 
@@ -3704,36 +3835,64 @@ private fun NetSessionTesterApp() {
         lastChartSampleAt = lastChartSampleAt + (stats.protocol to now)
     }
 
-    fun appendPingBucket(bucketElapsedMs: Long, samples: List<Int?>) {
-        val valid = samples.mapNotNull { it }
-        val avg = valid.takeIf { it.isNotEmpty() }?.average()?.roundToInt()
-        val min = valid.minOrNull()
-        val max = valid.maxOrNull()
-        val lossCount = samples.count { it == null }
-        val highLatency = valid.any { it >= 100 }
-        val sec = (bucketElapsedMs / 1_000L).toInt().coerceAtLeast(0)
-        pingPoints = (pingPoints.filterNot { it.elapsedMs == bucketElapsedMs } + PingPoint(
-            elapsedSec = sec,
-            latencyMs = avg,
-            lossCount = lossCount,
-            highLatency = highLatency,
-            sampleCount = samples.size.coerceAtLeast(1),
-            elapsedMs = bucketElapsedMs,
-            minLatencyMs = min,
-            maxLatencyMs = max
-        ))
-            .sortedBy { it.elapsedMs }
-            .takeLast(2400)
+    LaunchedEffect(runtimeConnectionState.revision) {
+        if (runtimeConnectionState.revision <= 0L) return@LaunchedEffect
+        val previousPhase = state.runPhase
+        val previousV4 = state.ipv4Stats
+        val previousV6 = state.ipv6Stats
+        currentTestConfig = runtimeConnectionState.config
+        currentStartedAt = runtimeConnectionState.startedAtEpochMs
+        state = runtimeConnectionState.ui.copy(
+            resolveResult = state.resolveResult,
+            history = state.history
+        )
+        val freezeSessionUi = state.runPhase == RunPhase.Stopping || state.runPhase == RunPhase.Releasing ||
+            state.runPhase == RunPhase.Finished || state.runPhase == RunPhase.Failed
+        if (!freezeSessionUi && previousV4 != state.ipv4Stats) recordChartPoint(state.ipv4Stats)
+        if (!freezeSessionUi && previousV6 != state.ipv6Stats) recordChartPoint(state.ipv6Stats)
+        if (previousPhase != state.runPhase && state.runPhase in listOf(RunPhase.Finished, RunPhase.Failed)) {
+            refreshHistory()
+        }
     }
 
-    fun appendPingSecond(sec: Int, samples: List<Int?>) {
-        appendPingBucket(sec * 1_000L, samples)
+    fun requestClear(title: String, message: String, onConfirm: () -> Unit) {
+        clearConfirmation = ClearConfirmationRequest(title, message, onConfirm)
     }
 
-    fun alignPingWithSessionEnd() {
-        // 不再把最后一个真实点复制到测试结束时间。
-        // 复制点会造成“没有丢包但后半段变虚线”和右侧异常连接。
-        // 图表的 X 轴由真实样本范围决定，结束时间只用于文字统计。
+    fun showClearUndo(message: String, onUndo: suspend () -> Unit) {
+        undoClearJob?.cancel()
+        snackbarHostState.currentSnackbarData?.dismiss()
+        undoClearJob = scope.launch {
+            val undoMessage = "$message · 10秒内可撤销"
+            val timer = launch {
+                while (snackbarHostState.currentSnackbarData?.visuals?.message != undoMessage) {
+                    delay(25L)
+                }
+                delay(10_000L)
+                if (snackbarHostState.currentSnackbarData?.visuals?.message == undoMessage) {
+                    snackbarHostState.currentSnackbarData?.dismiss()
+                }
+            }
+            val result = snackbarHostState.showSnackbar(
+                message = undoMessage,
+                actionLabel = "撤销",
+                withDismissAction = false,
+                duration = SnackbarDuration.Indefinite
+            )
+            timer.cancel()
+            if (result == SnackbarResult.ActionPerformed) {
+                onUndo()
+                snackbarHostState.showSnackbar("已恢复清空前的数据")
+            }
+        }
+    }
+
+    fun ensureNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
     }
 
     fun safePingIntervalMs(): Long = pingIntervalSetting.toLongOrNull()?.coerceIn(30L, 60_000L) ?: 1_000L
@@ -3746,345 +3905,85 @@ private fun NetSessionTesterApp() {
         return clean.toIntOrNull()?.coerceIn(1, 100_000)
     }
 
-    fun appendPingLog(entry: PingLogEntry) {
-        val next = trimPingLogSessions(pingLogs + entry)
-        pingLogs = next
-        displayPingLogCount = next.size
-        persistPingLogs(next)
-    }
-
-    fun appendPingLogs(entries: List<PingLogEntry>) {
-        if (entries.isEmpty()) return
-        val next = trimPingLogSessions(pingLogs + entries)
-        pingLogs = next
-        displayPingLogCount = next.size
-        persistPingLogs(next)
-    }
-
-    fun appendPingPoint(sec: Int, latencyMs: Int?) {
-        val ms = sec * 1_000L
-        pingPoints = (pingPoints.filterNot { it.elapsedMs == ms } + PingPoint(
-            elapsedSec = sec,
-            latencyMs = latencyMs,
-            lossCount = if (latencyMs == null) 1 else 0,
-            highLatency = (latencyMs ?: 0) >= 100,
-            elapsedMs = ms,
-            minLatencyMs = latencyMs,
-            maxLatencyMs = latencyMs
-        ))
-            .sortedBy { it.elapsedMs }
-            .takeLast(2400)
-    }
-
     fun startPingMonitor(reset: Boolean = false, targetOverride: String? = null) {
         val rawTarget = targetOverride?.trim()?.takeIf { it.isNotBlank() } ?: pingTarget.trim().ifBlank { host.ifBlank { "223.5.5.5" } }
         val normalizedTarget = normalizeNetworkTargetInput(rawTarget, "223.5.5.5")
         if (normalizedTarget.error != null) {
-            pingRunning = false
-            pingIntervalLabel = normalizedTarget.error
-            pingActiveTargetLabel = rawTarget
             scope.launch { snackbarHostState.showSnackbar(normalizedTarget.error) }
             return
         }
+        ensureNotificationPermission()
         val target = normalizedTarget.host
-        val interval = safePingIntervalMs()
-        val timeout = safePingTimeoutMs()
-        val maxCount = safePingCount()
-        val requestedProtocol = pingProtocolSetting
-        val sessionId = System.currentTimeMillis()
-        pingJob?.cancel()
-        activePingSessionId = sessionId
-        if (reset) {
-            pingPoints = emptyList()
-            pingJitterMs = null
-            pingSessionStartedAt = 0L
-            pingSessionEndedAt = 0L
-            pingDurationTick = sessionId
-        }
-        pingRunning = true
-        pingIntervalLabel = "准备中"
-        pingActiveTargetLabel = target
         pingTargetHistory = rememberTargetHistoryItem(context.applicationContext, "ping_target_history_v1", target)
-        appendPingLog(PingLogEntry(
-            timeEpochMs = sessionId,
-            target = target,
-            protocol = requestedProtocol.label,
-            latencyMs = null,
-            status = "开始",
-            note = "间隔${interval}ms · 超时${timeout}ms",
-            sessionId = sessionId
-        ))
-        pingJob = scope.launch {
-            val resolved = resolvePingTarget(target, requestedProtocol)
-            if (resolved.error != null) {
-                pingRunning = false
-                pingIntervalLabel = resolved.error
-                pingActiveTargetLabel = "$target · ${resolved.displayProtocol}"
-                appendPingLog(PingLogEntry(target = target, protocol = resolved.displayProtocol, latencyMs = null, status = resolved.error, note = "未开始", sessionId = sessionId))
-                return@launch
-            }
-            pingIntervalLabel = "${resolved.displayProtocol} · ${interval}ms"
-            pingActiveTargetLabel = "$target · ${resolved.displayProtocol}"
-            var startedAt = sessionId
-            var sent = 0
-            val highFrequency = interval < 200L
-            val bucketSizeMs = if (highFrequency) 250L else 1_000L
-            var currentBucketMs = 0L
-            val bucketSamples = mutableListOf<Int?>()
-            val pendingLogs = mutableListOf<PingLogEntry>()
-            val jitterWindow = RttJitterWindow(maxSize = 50)
-            var consecutiveLossStartedAt = 0L
-            var autoInterruptedByLoss = false
+        if (targetOverride != null) {
+            AppTestRuntime.restartPingForConnection(
+                target = target,
+                intervalMs = safePingIntervalMs(),
+                timeoutMs = safePingTimeoutMs(),
+                maxCount = safePingCount(),
+                protocol = pingProtocolSetting,
+                existingLogs = pingLogs
+            )
+        } else if (!AppTestRuntime.startPing(
+                target = target,
+                intervalMs = safePingIntervalMs(),
+                timeoutMs = safePingTimeoutMs(),
+                maxCount = safePingCount(),
+                protocol = pingProtocolSetting,
+                existingLogs = pingLogs,
+                reset = reset
+            )) {
+            scope.launch { snackbarHostState.showSnackbar("Ping 已在后台运行") }
+        }
+    }
 
-            fun markOfficialStart() {
-                val official = System.currentTimeMillis()
-                startedAt = official
-                currentBucketMs = 0L
-                pingSessionStartedAt = official
-                pingSessionEndedAt = 0L
-                pingDurationTick = official
-            }
-
-            fun flushBucket(bucketMs: Long) {
-                if (activePingSessionId != sessionId) {
-                    bucketSamples.clear()
-                    pendingLogs.clear()
-                    return
-                }
-                if (bucketSamples.isNotEmpty()) {
-                    appendPingBucket(bucketMs, bucketSamples.toList())
-                    bucketSamples.clear()
-                }
-                if (pendingLogs.isNotEmpty()) {
-                    appendPingLogs(pendingLogs.toList())
-                    pendingLogs.clear()
-                }
-            }
-
-            fun handlePingResult(latency: Int?, failure: String?, eventTime: Long = System.currentTimeMillis()) {
-                if (activePingSessionId != sessionId) return
-                val elapsedMs = (eventTime - startedAt).coerceAtLeast(0L)
-                val bucketMs = (elapsedMs / bucketSizeMs) * bucketSizeMs
-                if (bucketMs != currentBucketMs) {
-                    flushBucket(currentBucketMs)
-                    currentBucketMs = bucketMs
-                }
-                sent++
-                if (latency != null) {
-                    jitterWindow.onSuccess(latency.toDouble())
-                    pingJitterMs = jitterWindow.currentJitterMs()
-                }
-                bucketSamples.add(latency)
-                if (latency == null) {
-                    if (consecutiveLossStartedAt == 0L) consecutiveLossStartedAt = eventTime
-                    if (!autoInterruptedByLoss && eventTime - consecutiveLossStartedAt >= 5_000L) {
-                        autoInterruptedByLoss = true
-                        pendingLogs.add(PingLogEntry(
-                            timeEpochMs = eventTime,
-                            target = target,
-                            protocol = resolved.displayProtocol,
-                            latencyMs = null,
-                            status = "中断",
-                            note = "连续5秒100%丢包，已自动停止并保存记录",
-                            sessionId = sessionId,
-                            elapsedMs = elapsedMs
-                        ))
-                        pingJob?.cancel(CancellationException("连续5秒100%丢包"))
-                    }
-                } else {
-                    consecutiveLossStartedAt = 0L
-                }
-                val status = when {
-                    latency == null -> failure ?: "超时"
-                    latency >= 100 -> "高延迟"
-                    else -> "成功"
-                }
-                pendingLogs.add(PingLogEntry(
-                    timeEpochMs = eventTime,
-                    target = target,
-                    protocol = resolved.displayProtocol,
-                    latencyMs = latency,
-                    status = status,
-                    note = if (latency == null) (failure ?: "timeout") else "",
-                    sessionId = sessionId,
-                    elapsedMs = elapsedMs
-                ))
-            }
-
-            try {
-                val finiteCount = maxCount
-                if (interval < 200L) {
-                    val tcpProbe = findTcpPingPort(resolved.address, timeout)
-                    if (tcpProbe != null) {
-                        val tcpProtocol = "${resolved.displayProtocol} · TCP:${tcpProbe.port}"
-                        pingIntervalLabel = "TCP高频${interval}ms"
-                        pingActiveTargetLabel = "$target · $tcpProtocol"
-                        pendingLogs.add(PingLogEntry(
-                            target = target,
-                            protocol = tcpProtocol,
-                            latencyMs = tcpProbe.latencyMs,
-                            status = "TCP高频",
-                            note = "普通APP无法使用ICMP Raw Socket，已用TCP Socket高频探测",
-                            sessionId = sessionId
-                        ))
-                        markOfficialStart()
-                        var scheduled = 0
-                        var inFlight = 0
-                        var nextTick = SystemClock.elapsedRealtime()
-                        val tcpTimeout = timeout.coerceIn(180, 5_000)
-                        val maxInFlight = pingMaxInflight(interval, tcpTimeout)
-                        var skippedByInflight = 0
-                        val finiteJobs = mutableListOf<Job>()
-                        while (currentCoroutineContext().isActive && (finiteCount == null || scheduled < finiteCount)) {
-                            val waitMs = nextTick - SystemClock.elapsedRealtime()
-                            if (waitMs > 0L) delay(waitMs)
-                            nextTick += interval
-                            if (inFlight >= maxInFlight) {
-                                skippedByInflight++
-                                if (skippedByInflight == 1 || skippedByInflight % 50 == 0) {
-                                    pendingLogs.add(PingLogEntry(target = target, protocol = tcpProtocol, latencyMs = null, status = "跳过", note = "并发已满：${maxInFlight}，主动跳过，不计入丢包", sessionId = sessionId))
-                                }
-                                continue
-                            }
-                            scheduled++
-                            inFlight++
-                            val job = launch {
-                                try {
-                                    val result = tcpSocketPingResolved(resolved.address, tcpProbe.port, tcpTimeout)
-                                    handlePingResult(result.latencyMs, result.failure, System.currentTimeMillis())
-                                } finally {
-                                    inFlight = (inFlight - 1).coerceAtLeast(0)
-                                }
-                            }
-                            if (finiteCount != null) finiteJobs.add(job)
-                        }
-                        finiteJobs.forEach { it.join() }
-                    } else {
-                        pingIntervalLabel = "ICMP高频${interval}ms"
-                        markOfficialStart()
-                        pendingLogs.add(PingLogEntry(
-                            target = target,
-                            protocol = resolved.displayProtocol,
-                            latencyMs = null,
-                            status = "TCP端口未发现",
-                            note = "已回退系统ping流式探测；实际频率受Android ping命令限制",
-                            sessionId = sessionId
-                        ))
-                        while (currentCoroutineContext().isActive && (finiteCount == null || sent < finiteCount)) {
-                            val remaining = finiteCount?.let { (it - sent).coerceAtLeast(0) } ?: 20_000
-                            if (remaining <= 0) break
-                            val chunk = remaining.coerceAtMost(20_000)
-                            val before = sent
-                            val streamed = streamIcmpPingResolved(resolved.address, timeout, resolved.protocol, interval, chunk) { event ->
-                                handlePingResult(event.latencyMs, event.failure, event.timeEpochMs)
-                            }
-                            if (streamed <= 0 || sent == before) {
-                                pendingLogs.add(PingLogEntry(
-                                    target = target,
-                                    protocol = resolved.displayProtocol,
-                                    latencyMs = null,
-                                    status = "高频受限",
-                                    note = "系统ping不支持该频率，已降级串行ICMP",
-                                    sessionId = sessionId
-                                ))
-                                val loopStart = System.currentTimeMillis()
-                                val result = icmpPingResolved(resolved.address, timeout, resolved.protocol)
-                                handlePingResult(result.latencyMs, result.failure, System.currentTimeMillis())
-                                val cost = System.currentTimeMillis() - loopStart
-                                delay((interval - cost).coerceAtLeast(0L))
-                            }
-                        }
-                    }
-                } else {
-                    markOfficialStart()
-                    while (currentCoroutineContext().isActive && (maxCount == null || sent < maxCount)) {
-                        val loopStart = System.currentTimeMillis()
-                        val result = icmpPingResolved(resolved.address, timeout, resolved.protocol)
-                        handlePingResult(result.latencyMs, result.failure, System.currentTimeMillis())
-                        val cost = System.currentTimeMillis() - loopStart
-                        delay((interval - cost).coerceAtLeast(0L))
-                    }
-                }
-            } finally {
-                if (activePingSessionId == sessionId) {
-                    flushBucket(currentBucketMs)
-                    pingRunning = false
-                    pingSessionEndedAt = System.currentTimeMillis()
-                    pingDurationTick = pingSessionEndedAt
-                    pingIntervalLabel = if (sent > 0) "已停止 · ${sent}次" else "停止"
-                    appendPingLog(PingLogEntry(target = target, protocol = resolved.displayProtocol, latencyMs = null, status = "停止", note = "共${sent}次 · 时长${formatPingDuration((pingSessionEndedAt - startedAt).coerceAtLeast(0L))}", sessionId = sessionId, elapsedMs = (pingSessionEndedAt - startedAt).coerceAtLeast(0L)))
-                }
-            }
+    LaunchedEffect(runtimePingState.revision) {
+        if (runtimePingState.revision <= 0L) return@LaunchedEffect
+        pingRunning = runtimePingState.running
+        activePingSessionId = runtimePingState.sessionId
+        pingActiveTargetLabel = runtimePingState.target
+        pingIntervalLabel = runtimePingState.intervalLabel
+        pingSessionStartedAt = runtimePingState.startedAtEpochMs
+        pingSessionEndedAt = runtimePingState.endedAtEpochMs
+        pingDurationTick = if (runtimePingState.running) System.currentTimeMillis() else runtimePingState.endedAtEpochMs
+        pingPoints = runtimePingState.points
+        pingLogs = runtimePingState.logs
+        pingJitterMs = runtimePingState.jitterMs
+        if (!runtimePingState.running) {
+            displayPingPoints = compactPingPointsForRender(runtimePingState.points)
+            displayPingJitterMs = runtimePingState.jitterMs
         }
     }
 
     fun stopPingMonitor(reason: String = "手动停止") {
-        val wasRunning = pingRunning
-        val sessionId = activePingSessionId
-        val stoppedAt = System.currentTimeMillis()
-        pingJob?.cancel()
-        pingJob = null
-        pingRunning = false
-        pingSessionEndedAt = stoppedAt
-        pingDurationTick = pingSessionEndedAt
-        pingIntervalLabel = if (reason == "手动停止") "已停止" else "已中断"
-        if (wasRunning && reason != "手动停止" && sessionId != 0L) {
-            appendPingLog(PingLogEntry(
-                timeEpochMs = stoppedAt,
-                target = pingTarget.ifBlank { pingActiveTargetLabel.ifBlank { "Ping" } },
-                protocol = pingProtocolSetting.label,
-                latencyMs = null,
-                status = "中断",
-                note = reason,
-                sessionId = sessionId
-            ))
-        }
+        AppTestRuntime.stopPing(reason)
     }
 
     fun clearPingData() {
-        pingPoints = emptyList()
-        displayPingPoints = emptyList()
-        pingLogs = emptyList()
-        displayPingLogCount = 0
-        pingJitterMs = null
-        displayPingJitterMs = null
-        pingSessionStartedAt = 0L
-        pingSessionEndedAt = 0L
-        pingDurationTick = System.currentTimeMillis()
-        persistPingLogs(emptyList())
-        pingIntervalLabel = if (pingRunning) "${pingProtocolSetting.label} · ${safePingIntervalMs()}ms" else "停止"
+        val snapshot = AppTestRuntime.pingState.value.copy(
+            target = pingActiveTargetLabel,
+            intervalLabel = pingIntervalLabel,
+            startedAtEpochMs = pingSessionStartedAt,
+            endedAtEpochMs = pingSessionEndedAt,
+            jitterMs = pingJitterMs,
+            points = pingPoints,
+            logs = pingLogs
+        )
+        if (snapshot.running) {
+            scope.launch { snackbarHostState.showSnackbar("请先停止 Ping 再清空测试历史") }
+            return
+        }
+        AppTestRuntime.clearPing()
+        showClearUndo("Ping 测试历史已清空") {
+            AppTestRuntime.restorePing(snapshot)
+        }
     }
 
     fun deletePingLogSession(sessionId: Long) {
         val next = trimPingLogSessions(pingLogs.filterNot { it.sessionId == sessionId || (it.sessionId == 0L && it.timeEpochMs == sessionId) })
         pingLogs = next
-        displayPingLogCount = next.size
         persistPingLogs(next)
         scope.launch { snackbarHostState.showSnackbar("已删除 1 条 Ping 历史") }
-    }
-
-    DisposableEffect(context, pingRunning, state.isAdding) {
-        val lifecycleOwner = context as? LifecycleOwner
-        if (lifecycleOwner == null) {
-            onDispose { }
-        } else {
-            val observer = LifecycleEventObserver { _, event ->
-                if (event == Lifecycle.Event.ON_STOP && pingRunning && !state.isAdding) {
-                    // 准确优先：普通 Ping 测试退后台/锁屏后不伪装连续数据，直接中断并保存部分记录。
-                    stopPingMonitor("APP进入后台/锁屏，准确优先已中断；后台区间不计入统计")
-                }
-            }
-            lifecycleOwner.lifecycle.addObserver(observer)
-            onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
-        }
-    }
-
-    fun ensureNotificationPermission() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
-        ) {
-            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-        }
     }
 
     fun buildConfig(): SessionConfig? {
@@ -4116,7 +4015,7 @@ private fun NetSessionTesterApp() {
         val target = host.ifBlank { "www.baidu.com" }
         scope.launch {
             appendLog(LogLine(level = LogLevel.INFO, text = "开始解析：$target"))
-            val result = tester.resolveHost(target)
+            val result = AppTestRuntime.resolveHost(target)
             state = state.copy(resolveResult = result)
             if (result.error != null) {
                 appendLog(LogLine(level = LogLevel.ERROR, text = "解析失败：${result.error}"))
@@ -4127,377 +4026,29 @@ private fun NetSessionTesterApp() {
         }
     }
 
-    fun hasFdLimit(stats: ProtocolStats?): Boolean {
-        if (stats == null) return false
-        return stats.phase.contains("FD", ignoreCase = true) ||
-            stats.errorSummary.keys.any { it.contains("FD", ignoreCase = true) }
-    }
-
-    fun hasFdLimit(summary: SessionSummary?): Boolean {
-        if (summary == null) return false
-        return hasFdLimit(summary.ipv4Stats) || hasFdLimit(summary.ipv6Stats)
-    }
-
-    suspend fun appendHistorySafely(summary: SessionSummary) {
-        // 注意：统一收尾函数会先 detach/清空 heldSockets，再调用这里。
-        // 保存历史失败不能影响释放状态。
-        runCatching {
-            historyStore.append(summary)
-            historyStore.trim(100)
-        }.onFailure { error ->
-            appendLog(LogLine(level = LogLevel.ERROR, text = "保存历史失败：${error.message ?: error.javaClass.simpleName}"))
-        }
-    }
-
-    fun stoppedStatsForNetworkChange(current: ProtocolStats, reason: String): ProtocolStats {
-        return current.copy(
-            phase = reason,
-            errorSummary = current.errorSummary + (reason to 1)
-        )
-    }
-
-    fun buildNetworkInterruptedSummary(reason: String): SessionSummary? {
-        val config = currentTestConfig ?: buildConfig() ?: return null
-        val ipv4 = when (config.mode) {
-            TestMode.IPV4_ONLY -> stoppedStatsForNetworkChange(state.ipv4Stats, reason)
-            TestMode.IPV4_THEN_IPV6 -> if (state.ipv4Stats.totalAttempts > 0) stoppedStatsForNetworkChange(state.ipv4Stats, reason) else null
-            TestMode.IPV6_ONLY -> null
-        }
-        val ipv6 = when (config.mode) {
-            TestMode.IPV6_ONLY -> stoppedStatsForNetworkChange(state.ipv6Stats, reason)
-            TestMode.IPV4_THEN_IPV6 -> if (state.ipv6Stats.totalAttempts > 0) stoppedStatsForNetworkChange(state.ipv6Stats, reason) else null
-            TestMode.IPV4_ONLY -> null
-        }
-        return SessionSummary(
-            startedAtEpochMs = if (currentStartedAt > 0L) currentStartedAt else System.currentTimeMillis(),
-            host = config.host,
-            port = config.port,
-            mode = config.mode,
-            ipv4Stats = ipv4,
-            ipv6Stats = ipv6
-        )
-    }
-
-    fun stoppedStatsFor(protocol: IpProtocol, current: ProtocolStats, reason: String = "手动停止"): ProtocolStats {
-        return current.copy(
-            phase = reason,
-            errorSummary = current.errorSummary + (reason to 1)
-        )
-    }
-
-    fun buildStoppedSummary(reason: String): SessionSummary? {
-        val config = currentTestConfig ?: buildConfig() ?: return null
-        val ipv4 = when (config.mode) {
-            TestMode.IPV4_ONLY -> stoppedStatsFor(IpProtocol.IPV4, state.ipv4Stats, reason)
-            TestMode.IPV4_THEN_IPV6 -> if (state.ipv4Stats.totalAttempts > 0) stoppedStatsFor(IpProtocol.IPV4, state.ipv4Stats, reason) else null
-            TestMode.IPV6_ONLY -> null
-        }
-        val ipv6 = when (config.mode) {
-            TestMode.IPV6_ONLY -> stoppedStatsFor(IpProtocol.IPV6, state.ipv6Stats, reason)
-            TestMode.IPV4_THEN_IPV6 -> if (state.ipv6Stats.totalAttempts > 0) stoppedStatsFor(IpProtocol.IPV6, state.ipv6Stats, reason) else null
-            TestMode.IPV4_ONLY -> null
-        }
-        return SessionSummary(
-            startedAtEpochMs = if (currentStartedAt > 0L) currentStartedAt else System.currentTimeMillis(),
-            host = config.host,
-            port = config.port,
-            mode = config.mode,
-            ipv4Stats = ipv4,
-            ipv6Stats = ipv6
-        )
-    }
-
-    fun finishReasonFor(summary: SessionSummary?, config: SessionConfig?): FinishReason {
-        if (summary == null) return FinishReason.Interrupted
-        if (hasFdLimit(summary)) return FinishReason.FdLimit
-        val stats = listOfNotNull(summary.ipv4Stats, summary.ipv6Stats)
-        if (stats.isNotEmpty() && stats.all { it.phase == "解析失败" || it.errorSummary.keys.any { key -> key.contains("DNS") } }) {
-            return FinishReason.DnsFail
-        }
-        if (stats.any { it.phase.contains("无增长") }) return FinishReason.NoGrowth
-        if (stats.any { it.phase.contains("连续失败") }) return FinishReason.ConsecutiveFailure
-        if (stats.any { it.phase.contains("失败上限") }) return FinishReason.FailureLimit
-        return FinishReason.Completed
-    }
-
-    suspend fun releaseAndFinalize(
-        reason: FinishReason,
-        summary: SessionSummary?,
-        saveHistory: Boolean = reason.saveHistory,
-        cancelRunningJob: Boolean = true,
-        toast: Boolean = true
-    ) {
-        if (finishInProgress && reason != FinishReason.ForceRelease) return
-        finishInProgress = true
-        manualStopRequested = true
-
-        val currentJob = currentCoroutineContext()[Job]
-        if (cancelRunningJob && runningJob != currentJob) {
-            runningJob?.cancel()
-            runningJob = null
-        }
-        alignPingWithSessionEnd()
-        if (pingJob != currentJob) pingJob?.cancel()
-        pingJob = null
-        pingIntervalLabel = "AUTO"
-        if (networkWatchJob != currentJob) networkWatchJob?.cancel()
-        networkWatchJob = null
-        activeRunId = 0L
-        currentStartedAt = 0L
-
-        val snapshot = tester.detachForRelease()
-        val finalStatus = if (reason == FinishReason.ForceRelease) "已释放" else "${reason.label} · 已释放"
-        val releaseStatus = if (reason == FinishReason.ForceRelease) "正在释放" else "${reason.label} · 正在释放"
-        val baseIpv4 = summary?.ipv4Stats ?: state.ipv4Stats
-        val baseIpv6 = summary?.ipv6Stats ?: state.ipv6Stats
-        val releaseStart = System.currentTimeMillis()
-        var lastReleaseLogAt = 0L
-
-        state = state.copy(
-            isAdding = false,
-            runPhase = RunPhase.Releasing,
-            status = releaseStatus,
-            summary = summary ?: state.summary,
-            error = null,
-            releaseUi = ReleaseUiState(
-                visible = true,
-                total = snapshot.size,
-                closed = 0,
-                speedPerSecond = 0,
-                elapsedMs = 0L,
-                message = if (snapshot.isEmpty()) "没有需要释放的连接" else "正在关闭 Socket 连接，请勿退出页面"
-            )
-        )
-
-        appendLog(LogLine(level = LogLevel.WARN, text = "${reason.label}：已停止新增，开始释放 ${snapshot.size} 条 socket"))
-        updateForegroundNotice(context, "正在释放连接 0/${snapshot.size}")
-        // 先让 Releasing 状态和释放进度卡片完成一次渲染，再开始批量 close。
-        // 避免停止瞬间和 IPv4->IPv6 切换时出现 UI 短时卡顿/假死感。
-        delay(80L)
-
-        var closed = 0
-        try {
-            closed = runCatching {
-                tester.closeDetachedSockets(snapshot, batchSize = 512, workerCount = 6, progressIntervalMs = 300L) { done, total, elapsedMs ->
-                    val elapsed = elapsedMs.coerceAtLeast(1L)
-                    val speed = if (done <= 0) 0 else (done * 1000L / elapsed).toInt().coerceAtLeast(1)
-                    state = state.copy(
-                        releaseUi = ReleaseUiState(
-                            visible = true,
-                            total = total,
-                            closed = done,
-                            speedPerSecond = speed,
-                            elapsedMs = elapsedMs,
-                            message = if (done >= total) "释放完成，正在更新界面状态" else "正在关闭 Socket 连接，请勿退出页面",
-                            finished = done >= total
-                        )
-                    )
-                    val now = System.currentTimeMillis()
-                    if (now - lastReleaseLogAt >= 1_000L || done >= total) {
-                        lastReleaseLogAt = now
-                        val percent = if (total <= 0) 100 else (done * 100 / total).coerceIn(0, 100)
-                        appendLog(LogLine(level = LogLevel.STAT, text = "释放进度：$done/$total，$percent%，速度约 ${speed}/秒"))
-                        updateForegroundNotice(context, "正在释放连接 $done/$total｜$percent%")
-                    }
-                }
-            }.getOrElse { error ->
-                appendLog(LogLine(level = LogLevel.ERROR, text = "${reason.label}：close 异常：${error.message ?: error.javaClass.simpleName}"))
-                0
-            }
-
-            appendLog(LogLine(level = LogLevel.WARN, text = "${reason.label}：close 完成：$closed 条，耗时 ${((System.currentTimeMillis() - releaseStart) / 1000f).let { String.format("%.1f", it) }} 秒"))
-
-            if (saveHistory && summary != null) {
-                appendHistorySafely(summary)
-                refreshHistory()
-            }
-        } finally {
-            val releaseElapsedMs = System.currentTimeMillis() - releaseStart
-            val failed = reason != FinishReason.Completed && reason != FinishReason.ForceRelease
-            state = state.copy(
-                isAdding = false,
-                runPhase = if (failed) RunPhase.Failed else RunPhase.Finished,
-                status = finalStatus,
-                summary = summary ?: state.summary,
-                error = if (failed) reason.label else null,
-                releaseUi = state.releaseUi.copy(
-                    visible = true,
-                    closed = state.releaseUi.total.takeIf { it > 0 } ?: closed,
-                    elapsedMs = releaseElapsedMs,
-                    finished = true,
-                    message = "释放完成"
-                ),
-                ipv4Stats = baseIpv4.copy(activeSessions = 0, phase = if (baseIpv4.totalAttempts > 0) "已释放" else baseIpv4.phase),
-                ipv6Stats = baseIpv6.copy(activeSessions = 0, phase = if (baseIpv6.totalAttempts > 0) "已释放" else baseIpv6.phase)
-            )
-            notifyLocalReleased(if (reason == FinishReason.ForceRelease) "本机已释放" else "${reason.label}，本机已释放")
-            // 释放完成通知统一走底部白色浮层，避免同时出现系统 Toast 和黑色 Snackbar。
-            stopForegroundNotice(context)
-            finishInProgress = false
-        }
-    }
-
-    suspend fun interruptForNetworkChange(reason: String = "网络环境变化") {
-        if (!state.isAdding) return
-        val summary = buildNetworkInterruptedSummary(reason)
-        appendLog(LogLine(level = LogLevel.ERROR, text = "$reason，已中断测试并保存历史。"))
-        releaseAndFinalize(
-            reason = FinishReason.NetworkChange,
-            summary = summary,
-            saveHistory = true,
-            cancelRunningJob = true
-        )
-    }
-
-    fun startNetworkWatch(startedAt: Long, signature: String) {
-        networkWatchJob?.cancel()
-        networkWatchJob = scope.launch {
-            delay(1500L)
-            var consecutiveChanged = 0
-            while (currentStartedAt == startedAt && state.isAdding) {
-                val now = currentNetworkSignature(context)
-                if (now != signature) {
-                    consecutiveChanged++
-                    if (consecutiveChanged >= 2) {
-                        interruptForNetworkChange("网络环境变化")
-                        break
-                    }
-                } else {
-                    consecutiveChanged = 0
-                }
-                delay(1000L)
-            }
-        }
-    }
-
     fun startTest() {
         val config = buildConfig() ?: return
-        hostHistory = rememberTargetHistoryItem(context.applicationContext, "tcp_target_history_v1", config.host)
         ensureNotificationPermission()
-        runningJob?.cancel()
-        selectedTab = MainTab.TEST
-        startForegroundNotice(context, "建连中：${config.mode.label}，目标 ${config.successLimit}")
-        val startedAt = System.currentTimeMillis()
-        currentStartedAt = startedAt
-        activeRunId = startedAt
-        currentTestConfig = config
-        testNetworkSignature = currentNetworkSignature(context)
-        resetCurrentCharts()
-        // 性能发布版：测试开始时不再触发公网/IP/STUN刷新，避免抢占网络与 IO。
-        manualStopRequested = false
-        state = state.copy(
-            isAdding = true,
-            runPhase = RunPhase.Running,
-            status = "建连中",
-            releaseUi = ReleaseUiState(),
-            ipv4Stats = ProtocolStats(IpProtocol.IPV4),
-            ipv6Stats = ProtocolStats(IpProtocol.IPV6),
-            summary = null,
-            error = null
-        )
-        appendLog(LogLine(level = LogLevel.INFO, text = "目标：${config.host}:${config.port} | 模式：${config.mode.label} | 目标CPS：${config.batchSize}/s | 调度间隔：${config.intervalMs}ms | 固定CPS核心"))
-        // 连接数测试优先级高于 Ping：开始连接数测试时自动停止旧 Ping，并重新开始一轮同步 Ping 监测。
-        if (pingEnabled) startPingMonitor(reset = true, targetOverride = config.host)
-        startNetworkWatch(startedAt, testNetworkSignature)
-
-        runningJob = scope.launch {
-            var summary: SessionSummary? = null
-            var completedNormally = false
-            var failureMsg: String? = null
-            try {
-                val oldClosed = tester.release()
-                if (oldClosed > 0) {
-                    appendLog(LogLine(level = LogLevel.WARN, text = "开始新测试前释放旧连接：$oldClosed 条"))
-                }
-                val pair = tester.runSessionHoldTest(
-                    rawConfig = config,
-                    onStats = statsHandler@ { stats ->
-                        if (activeRunId != startedAt || !state.isAdding) return@statsHandler
-                        recordChartPoint(stats)
-                        val nextPhase = if (stats.phase.contains("无增长") || stats.phase.contains("确认")) RunPhase.TopConfirm else RunPhase.Running
-                        state = when (stats.protocol) {
-                            IpProtocol.IPV4 -> state.copy(ipv4Stats = stats, status = "${stats.protocol.label} ${stats.phase}", runPhase = nextPhase)
-                            IpProtocol.IPV6 -> state.copy(ipv6Stats = stats, status = "${stats.protocol.label} ${stats.phase}", runPhase = nextPhase)
-                        }
-                        updateForegroundNotice(context, "${stats.protocol.label} ${stats.phase}｜活动 ${stats.activeSessions}｜失败 ${stats.totalFailure}")
-                    },
-                    onLog = { line -> appendLog(line) }
-                )
-                summary = SessionSummary(
-                    startedAtEpochMs = startedAt,
-                    host = config.host,
-                    port = config.port,
-                    mode = config.mode,
-                    ipv4Stats = when (config.mode) {
-                        TestMode.IPV4_ONLY -> pair.first ?: state.ipv4Stats
-                        TestMode.IPV4_THEN_IPV6 -> pair.first ?: state.ipv4Stats
-                        TestMode.IPV6_ONLY -> null
-                    },
-                    ipv6Stats = when (config.mode) {
-                        TestMode.IPV6_ONLY -> pair.second ?: state.ipv6Stats
-                        TestMode.IPV4_THEN_IPV6 -> pair.second ?: state.ipv6Stats
-                        TestMode.IPV4_ONLY -> null
-                    }
-                )
-                completedNormally = true
-            } catch (error: Throwable) {
-                if (error is kotlinx.coroutines.CancellationException) throw error
-                if (!manualStopRequested) {
-                    failureMsg = error.message ?: error.javaClass.simpleName
-                    appendLog(LogLine(level = LogLevel.ERROR, text = "测试中断：$failureMsg"))
-                }
-            } finally {
-                alignPingWithSessionEnd()
-                pingJob?.cancel()
-                pingJob = null
-                pingIntervalLabel = "AUTO"
-                networkWatchJob?.cancel()
-                networkWatchJob = null
-                if (!manualStopRequested) {
-                    val finalSummary = summary
-                    val finalReason = finishReasonFor(finalSummary, config).let { reason ->
-                        if (!completedNormally && reason == FinishReason.Completed) FinishReason.Interrupted else reason
-                    }
-                    scope.launch {
-                        releaseAndFinalize(
-                            reason = finalReason,
-                            summary = finalSummary,
-                            saveHistory = finalReason.saveHistory,
-                            cancelRunningJob = false,
-                            toast = true
-                        )
-                    }
-                }
-                runningJob = null
-            }
+        val started = AppTestRuntime.startConnection(config, state.logs)
+        if (!started) {
+            selectedTab = MainTab.TEST
+            scope.launch { snackbarHostState.showSnackbar("已有后台测试正在运行，请先停止当前任务") }
+            return
         }
+        hostHistory = rememberTargetHistoryItem(context.applicationContext, "tcp_target_history_v1", config.host)
+        selectedTab = MainTab.TEST
+        currentTestConfig = config
+        currentStartedAt = System.currentTimeMillis()
+        resetCurrentCharts()
+        if (pingEnabled) startPingMonitor(reset = true, targetOverride = config.host)
     }
 
     fun stopAdding() {
-        val summary = buildStoppedSummary("手动停止")
-        appendLog(LogLine(level = LogLevel.WARN, text = "手动停止；统一收尾，先释放再保存历史。"))
-        scope.launch {
-            releaseAndFinalize(
-                reason = FinishReason.ManualStop,
-                summary = summary,
-                saveHistory = true,
-                cancelRunningJob = true
-            )
-        }
+        AppTestRuntime.stopConnection("手动停止")
     }
 
     fun releaseAll() {
-        val wasRunning = state.isAdding
-        val summary = if (wasRunning) buildStoppedSummary("强制释放") else null
-        appendLog(LogLine(level = LogLevel.WARN, text = "强制释放；统一收尾，立即清空 UI 状态和连接。"))
-        scope.launch {
-            releaseAndFinalize(
-                reason = FinishReason.ForceRelease,
-                summary = summary,
-                saveHistory = false,
-                cancelRunningJob = true
-            )
-        }
+        AppTestRuntime.stopConnection("强制释放", force = true)
     }
 
     fun exportLogs() {
@@ -4509,12 +4060,48 @@ private fun NetSessionTesterApp() {
 
     fun clearHistoryOnly() {
         scope.launch {
-            historyStore.clear()
+            val snapshot = historyStore.clearAndReturn()
+            if (snapshot.isEmpty()) {
+                snackbarHostState.showSnackbar("暂无可清空的测试历史")
+                return@launch
+            }
             historySizeKb = 0
             historySavedCount = 0
             historyCounts = HistoryCounts()
             state = state.copy(history = emptyList())
-            snackbarHostState.showSnackbar("检测历史已清理")
+            showClearUndo("连接测试历史已清空") {
+                val current = historyStore.loadAll()
+                val restored = (snapshot + current).distinctBy { it.id }
+                historyStore.replaceAll(restored)
+                val safeLimit = historyLimit.toIntOrNull()?.coerceIn(10, 100) ?: 30
+                applyHistoryUiSnapshot(loadHistoryUiSnapshot(historyPeriod, safeLimit))
+            }
+        }
+    }
+
+    fun clearRunLogs() {
+        scope.launch {
+            val persistedSnapshot = logStore.clearAndReturn()
+            val snapshot = (persistedSnapshot + state.logs)
+                .distinctBy { it.timeEpochMs to it.text }
+                .sortedBy { it.timeEpochMs }
+                .takeLast(500)
+            if (snapshot.isEmpty()) {
+                snackbarHostState.showSnackbar("暂无可清空的运行日志")
+                return@launch
+            }
+            logSizeKb = 0
+            state = state.copy(logs = emptyList())
+            showClearUndo("运行日志已清空") {
+                val current = state.logs
+                val restored = (snapshot + current)
+                    .distinctBy { it.timeEpochMs to it.text }
+                    .sortedBy { it.timeEpochMs }
+                    .takeLast(500)
+                logStore.replaceAll(restored)
+                logSizeKb = withContext(Dispatchers.IO) { logStore.sizeKb() }
+                state = state.copy(logs = restored)
+            }
         }
     }
 
@@ -4528,6 +4115,18 @@ private fun NetSessionTesterApp() {
         }
     }
 
+
+    clearConfirmation?.let { request ->
+        ClearConfirmationDialog(
+            title = request.title,
+            message = request.message,
+            onDismiss = { clearConfirmation = null },
+            onConfirm = {
+                clearConfirmation = null
+                request.onConfirm()
+            }
+        )
+    }
 
     if (editingRemarkSummary != null) {
         AlertDialog(
@@ -4575,7 +4174,10 @@ private fun NetSessionTesterApp() {
     if (showNatHistoryDialog) {
         NatHistoryDialog(
             records = natHistory,
-            onDismiss = { showNatHistoryDialog = false }
+            onDismiss = { showNatHistoryDialog = false },
+            onDelete = { id ->
+                natHistory = deleteNatHistory(context.applicationContext, id)
+            }
         )
     }
 
@@ -4704,24 +4306,25 @@ private fun NetSessionTesterApp() {
     }
 
 
-    Scaffold(
-        snackbarHost = { OneUiSnackbarHost(snackbarHostState) },
-        bottomBar = {
-            if (!showRunLogDetail && appToolPage == AppToolPage.NONE) {
-                BottomNav(selectedTab = selectedTab, onSelect = {
-                    showRunLogDetail = false
-                    selectedTab = it
-                })
-            }
-        },
-        containerColor = Color.Transparent
-    ) { padding ->
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Brush.verticalGradient(listOf(BgTop, Bg, Color.White)))
-                .padding(padding)
-        ) {
+    Box(modifier = Modifier.fillMaxSize()) {
+        GlassAppBackground()
+        Scaffold(
+            snackbarHost = { OneUiSnackbarHost(snackbarHostState) },
+            bottomBar = {
+                if (!showRunLogDetail && appToolPage == AppToolPage.NONE) {
+                    BottomNav(selectedTab = selectedTab, onSelect = {
+                        showRunLogDetail = false
+                        selectedTab = it
+                    })
+                }
+            },
+            containerColor = Color.Transparent
+        ) { padding ->
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+            ) {
             if (showRunLogDetail) {
                 FullRunLogPage(
                     logs = state.logs,
@@ -4730,11 +4333,11 @@ private fun NetSessionTesterApp() {
                     onBack = { showRunLogDetail = false },
                     onExport = { exportLogs() },
                     onClear = {
-                        scope.launch {
-                            logStore.clear()
-                            logSizeKb = 0
-                            state = state.copy(logs = emptyList())
-                        }
+                        requestClear(
+                            title = "清空运行日志？",
+                            message = "将删除当前保存的运行日志。清空后 10 秒内可以撤销恢复。",
+                            onConfirm = { clearRunLogs() }
+                        )
                     }
                 )
             } else when (appToolPage) {
@@ -4759,7 +4362,19 @@ private fun NetSessionTesterApp() {
                         }
                     }
                 )
-                AppToolPage.PING_HISTORY -> PingHistoryToolPage(logs = pingLogs, onBack = { appToolPage = AppToolPage.NONE }, onDeleteSession = { sessionId -> deletePingLogSession(sessionId) })
+                AppToolPage.PING_HISTORY -> PingHistoryToolPage(
+                    logs = pingLogs,
+                    canClear = !pingRunning,
+                    onBack = { appToolPage = AppToolPage.NONE },
+                    onClear = {
+                        requestClear(
+                            title = "清空 Ping 测试历史？",
+                            message = "将删除 Ping 图表、统计和保存的测试记录。清空后 10 秒内可以撤销恢复。",
+                            onConfirm = { clearPingData() }
+                        )
+                    },
+                    onDeleteSession = { sessionId -> deletePingLogSession(sessionId) }
+                )
                 AppToolPage.NONE -> when (selectedTab) {
                 MainTab.SETTINGS -> SettingsPage(
                     listState = settingsListState,
@@ -4860,6 +4475,10 @@ private fun NetSessionTesterApp() {
                 MainTab.TEST -> TestPage(
                     listState = testListState,
                     pingFocusRequest = testPingFocusRequest,
+                    releaseFocusRunId = pendingReleaseFocusRunId,
+                    onReleaseFocusHandled = { handledRunId ->
+                        if (pendingReleaseFocusRunId == handledRunId) pendingReleaseFocusRunId = 0L
+                    },
                     sessionExpanded = sessionCardExpanded,
                     onSessionExpandedChange = { sessionCardExpanded = it },
                     mode = mode,
@@ -4878,10 +4497,8 @@ private fun NetSessionTesterApp() {
                         ((if (pingRunning) pingDurationTick else (pingSessionEndedAt.takeIf { it > 0L } ?: System.currentTimeMillis())) - pingSessionStartedAt).coerceAtLeast(0L)
                     } else 0L,
                     pingJitterMs = displayPingJitterMs,
-                    pingLogCount = displayPingLogCount,
                     onStartPing = { startPingMonitor(reset = true) },
                     onStopPing = { stopPingMonitor() },
-                    onClearPing = { clearPingData() },
                     onShowPingLog = { appToolPage = AppToolPage.PING_HISTORY },
                     isAdding = state.isAdding,
                     runPhase = state.runPhase,
@@ -4915,7 +4532,13 @@ private fun NetSessionTesterApp() {
                     historyCounts = historyCounts,
                     maskPrivacy = maskPrivacy,
                     onExport = { exportLogs() },
-                    onClear = { clearHistoryOnly() },
+                    onClear = {
+                        requestClear(
+                            title = "清空连接测试历史？",
+                            message = "将删除已保存的连接数测试结果和备注。清空后 10 秒内可以撤销恢复。",
+                            onConfirm = { clearHistoryOnly() }
+                        )
+                    },
                     onHistoryLimitChange = { limit ->
                         historyLimit = limit
                         scope.launch {
@@ -4960,6 +4583,7 @@ private fun NetSessionTesterApp() {
             )
         }
     }
+}
 }
 
 
@@ -5060,7 +4684,7 @@ private fun HistoryDetailDialog(summary: SessionSummary, maskPrivacy: Boolean, o
                         }
                     }) { Text("保存图片", fontSize = 12.sp) }
                 }
-                Text("OneUI / Material 3 卡片详情", color = Muted, fontSize = 11.sp)
+                Text("检测数据 · 趋势与诊断建议", color = Muted, fontSize = 11.sp)
             }
         },
         text = {
@@ -5081,7 +4705,7 @@ private fun HistoryDetailDialog(summary: SessionSummary, maskPrivacy: Boolean, o
                 }
             }
         },
-        shape = ShapeL
+        shape = GlassPopupShape
     )
 }
 
@@ -5298,18 +4922,32 @@ private fun pingPointsFromLogGroup(group: PingLogGroup): List<PingPoint> {
 }
 
 @Composable
-private fun PingHistoryToolPage(logs: List<PingLogEntry>, onBack: () -> Unit, onDeleteSession: (Long) -> Unit) {
+private fun PingHistoryToolPage(
+    logs: List<PingLogEntry>,
+    canClear: Boolean,
+    onBack: () -> Unit,
+    onClear: () -> Unit,
+    onDeleteSession: (Long) -> Unit
+) {
     val groups = remember(logs) { buildPingLogGroups(logs).take(12) }
     val storageText = remember(logs) { formatBytes(estimatePingLogStorageBytes(logs)) }
     var expandedSession by remember(groups.firstOrNull()?.sessionId) { mutableStateOf<Long?>(null) }
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
-            .background(Bg)
             .padding(horizontal = 14.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        item { ToolPageHeader("Ping历史", "${groups.size}/12 · $storageText · 点击卡片展开，单条可删除", onBack) }
+        item {
+            ToolPageHeader(
+                title = "Ping 测试历史",
+                subtitle = "${groups.size}/12 · $storageText · 点击卡片展开",
+                onBack = onBack,
+                actionLabel = "清空",
+                actionEnabled = canClear && groups.isNotEmpty(),
+                onAction = onClear
+            )
+        }
         if (groups.isEmpty()) {
             item {
                 SoftCard {
@@ -5319,12 +4957,13 @@ private fun PingHistoryToolPage(logs: List<PingLogEntry>, onBack: () -> Unit, on
         } else {
             items(groups, key = { it.sessionId }) { group ->
                 val expanded = expandedSession == group.sessionId
-                PingLogSessionCard(
-                    group = group,
-                    expanded = expanded,
-                    onToggle = { expandedSession = if (expanded) null else group.sessionId },
-                    onDelete = { onDeleteSession(group.sessionId) }
-                )
+                SwipeDeleteToolBox(onDelete = { onDeleteSession(group.sessionId) }, stateKey = group.sessionId) {
+                    PingLogSessionCard(
+                        group = group,
+                        expanded = expanded,
+                        onToggle = { expandedSession = if (expanded) null else group.sessionId }
+                    )
+                }
             }
         }
         item { Spacer(Modifier.height(70.dp)) }
@@ -5372,7 +5011,7 @@ private fun PingLogDialog(logs: List<PingLogEntry>, onDismiss: () -> Unit) {
                 } else {
                     Card(
                         shape = ShapeM,
-                        colors = CardDefaults.cardColors(containerColor = Color(0xFFFAF7FF)),
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFFF1F6FD)),
                         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
                         modifier = Modifier.fillMaxWidth()
                     ) {
@@ -5415,8 +5054,7 @@ private fun PingLogDialog(logs: List<PingLogEntry>, onDismiss: () -> Unit) {
 private fun PingLogSessionCard(
     group: PingLogGroup,
     expanded: Boolean,
-    onToggle: () -> Unit,
-    onDelete: (() -> Unit)? = null
+    onToggle: () -> Unit
 ) {
     val items = group.entries.filter { it.status != "开始" && it.status != "停止" && it.status != "高频不可用" }
     val success = items.count { it.status == "成功" || it.status == "高延迟" }
@@ -5440,15 +5078,6 @@ private fun PingLogSessionCard(
                     }
                     Box(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
                         Text("${formatPingDuration(pingLogGroupDurationMs(group))} · ${items.size}次 · 成功$success · 平均${avg?.let { "${it}ms" } ?: "—"} · 丢包$loss%", color = Muted, fontSize = 11.sp, maxLines = 1)
-                    }
-                }
-                if (onDelete != null) {
-                    TextButton(
-                        onClick = onDelete,
-                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
-                        modifier = Modifier.height(28.dp)
-                    ) {
-                        Text("删除", color = ErrorRed, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                     }
                 }
                 Text(if (expanded) "⌃" else "⌄", color = Blue, fontSize = 18.sp, fontWeight = FontWeight.Bold)
@@ -5707,21 +5336,15 @@ private fun ReorderableCardItem(
     val density = LocalDensity.current
     val thresholdPx = with(density) { 124.dp.toPx() }
     var lastReorderAt by remember { mutableStateOf(0L) }
-    val isDragging = draggingId == id
-    val scale by animateFloatAsState(if (isDragging) 1.018f else 1f, tween(220, easing = FastOutSlowInEasing), label = "dragScale")
-    val elevation by animateFloatAsState(if (isDragging) 18f else 0f, tween(220, easing = FastOutSlowInEasing), label = "dragElevation")
 
-    Box(
-        modifier = modifier
-            .zIndex(if (isDragging) 20f else 0f)
-            .shadow(elevation.dp, ShapeL, clip = false)
-            .clip(ShapeL)
-            .graphicsLayer {
-                translationY = if (isDragging) dragOffsetY else 0f
-                scaleX = scale
-                scaleY = scale
-            }
-            .pointerInput(id, order) {
+    Box(modifier = modifier) {
+        content()
+        Box(
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .width(48.dp)
+                .height(16.dp)
+                .pointerInput(id, order) {
                 detectDragGesturesAfterLongPress(
                     onDragStart = {
                         draggingId = id
@@ -5759,9 +5382,17 @@ private fun ReorderableCardItem(
                         }
                     }
                 )
-            }
-    ) {
-        content()
+            },
+            contentAlignment = Alignment.TopCenter
+        ) {
+            Box(
+                Modifier
+                    .padding(top = 4.dp)
+                    .width(24.dp)
+                    .height(3.dp)
+                    .background(Border.copy(alpha = 0.62f), CircleShape)
+            )
+        }
     }
 }
 
@@ -5860,7 +5491,6 @@ private fun SettingsPage(
         items(settingsCardOrder, key = { it }) { cardId ->
             ReorderableCardItem(
                 id = cardId,
-                modifier = Modifier.animateItem(placementSpec = tween(360, easing = FastOutSlowInEasing)),
                 order = settingsCardOrder,
                 onOrderChange = ::updateSettingsOrder
             ) {
@@ -6028,6 +5658,8 @@ private fun SettingsPage(
 private fun TestPage(
     listState: LazyListState,
     pingFocusRequest: Int,
+    releaseFocusRunId: Long,
+    onReleaseFocusHandled: (Long) -> Unit,
     sessionExpanded: Boolean,
     onSessionExpandedChange: (Boolean) -> Unit,
     mode: TestMode,
@@ -6044,10 +5676,8 @@ private fun TestPage(
     pingRunning: Boolean,
     pingDurationMs: Long,
     pingJitterMs: Double?,
-    pingLogCount: Int,
     onStartPing: () -> Unit,
     onStopPing: () -> Unit,
-    onClearPing: () -> Unit,
     onShowPingLog: () -> Unit,
     isAdding: Boolean,
     runPhase: RunPhase,
@@ -6078,10 +5708,10 @@ private fun TestPage(
         isAdding -> "● 运行中"
         else -> status
     }
-    val defaultCards = listOf("sessions", "release", "ping", "diagnosis", "logs")
+    val defaultCards = listOf("ping", "diagnosis", "logs")
     val initialTestOrder = remember {
         val saved = loadCardOrder(context.applicationContext, "test_card_order_v4", defaultCards)
-        (saved.filterNot { it == "control" } + defaultCards.filterNot { it in saved }).distinct()
+        (saved.filter { it in defaultCards } + defaultCards.filterNot { it in saved }).distinct()
     }
     var testCardOrder by remember { mutableStateOf(initialTestOrder) }
     val totalSessionAttempts = ipv4Stats.totalAttempts + ipv6Stats.totalAttempts
@@ -6095,18 +5725,8 @@ private fun TestPage(
         previousSessionAttempts = totalSessionAttempts
     }
 
-    val visibleIds = remember(releaseUi.visible, releaseBusy) {
-        buildList {
-            add("sessions")
-            if (releaseUi.visible || releaseBusy) add("release")
-            add("ping")
-            add("diagnosis")
-            add("logs")
-        }
-    }
-    val visibleOrder = remember(testCardOrder, visibleIds) {
-        (testCardOrder.filter { it in visibleIds } + visibleIds.filterNot { it in testCardOrder }).distinct()
-    }
+    val releaseCardVisible = releaseUi.visible || releaseBusy
+    val visibleOrder = testCardOrder
     val ipv4ChartPoints = remember(chartPoints) { chartPoints.filter { it.protocol == IpProtocol.IPV4 } }
     val ipv6ChartPoints = remember(chartPoints) { chartPoints.filter { it.protocol == IpProtocol.IPV6 } }
     fun updateTestOrder(nextVisible: List<String>) {
@@ -6118,7 +5738,19 @@ private fun TestPage(
     LaunchedEffect(pingFocusRequest, visibleOrder) {
         if (pingFocusRequest <= 0) return@LaunchedEffect
         val pingIndex = visibleOrder.indexOf("ping")
-        if (pingIndex >= 0) listState.animateScrollToItem(pingIndex + 1)
+        if (pingIndex >= 0) {
+            val fixedItemCount = 2 + (if (releaseCardVisible) 1 else 0) + (if (sessionExpanded) 1 else 0)
+            listState.animateScrollToItem(fixedItemCount + pingIndex)
+        }
+    }
+
+    LaunchedEffect(releaseFocusRunId) {
+        if (releaseFocusRunId == 0L) return@LaunchedEffect
+        val targetIndex = 2 // Page title and connection control card precede the release card.
+        snapshotFlow { listState.layoutInfo.totalItemsCount }
+            .first { itemCount -> itemCount > targetIndex }
+        if (!listState.isScrollInProgress) listState.scrollToItem(targetIndex)
+        onReleaseFocusHandled(releaseFocusRunId)
     }
 
     LazyColumn(
@@ -6136,10 +5768,8 @@ private fun TestPage(
                 StatusChip("◎ 目标 $target", Color.White, TextDark)
             }
         }
-        items(visibleOrder, key = { it }) { cardId ->
-            ReorderableCardItem(id = cardId, order = visibleOrder, onOrderChange = ::updateTestOrder) {
-                when (cardId) {
-                    "sessions" -> SoftCard {
+        item(key = "connection_control_card") {
+            SoftCard {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             SectionTitle("connection_tree", "连接数测试", Blue)
                             Spacer(Modifier.weight(1f))
@@ -6187,24 +5817,30 @@ private fun TestPage(
                                 Text("导出", fontSize = 13.sp)
                             }
                         }
-                        if (sessionExpanded) {
-                            HorizontalDivider(color = Border.copy(alpha = 0.72f))
-                            CombinedSessionStatsCard(
-                                ipv4Stats = ipv4Stats,
-                                ipv6Stats = ipv6Stats,
-                                maskPrivacy = maskPrivacy,
-                                ipv4Points = ipv4ChartPoints,
-                                ipv6Points = ipv6ChartPoints,
-                                showIpv4 = showIpv4,
-                                showIpv6 = showIpv6,
-                                chartMode = chartMode,
-                                onChartModeChange = onChartModeChange,
-                                testActive = isAdding,
-                                embedded = true
-                            )
-                        }
-                    }
-                    "release" -> ReleaseProgressCard(releaseUi)
+            }
+        }
+        if (releaseCardVisible) {
+            item(key = "release_card") { ReleaseProgressCard(releaseUi) }
+        }
+        if (sessionExpanded) {
+            item(key = "session_card") {
+                CombinedSessionStatsCard(
+                    ipv4Stats = ipv4Stats,
+                    ipv6Stats = ipv6Stats,
+                    maskPrivacy = maskPrivacy,
+                    ipv4Points = ipv4ChartPoints,
+                    ipv6Points = ipv6ChartPoints,
+                    showIpv4 = showIpv4,
+                    showIpv6 = showIpv6,
+                    chartMode = chartMode,
+                    onChartModeChange = onChartModeChange,
+                    testActive = isAdding
+                )
+            }
+        }
+        items(visibleOrder, key = { "test_card_$it" }) { cardId ->
+            ReorderableCardItem(id = cardId, order = visibleOrder, onOrderChange = ::updateTestOrder) {
+                when (cardId) {
                     "ping" -> PingCompactChartCard(
                         pingPoints = pingPoints,
                         intervalLabel = pingIntervalLabel,
@@ -6212,10 +5848,8 @@ private fun TestPage(
                         running = pingRunning,
                         durationMs = pingDurationMs,
                         jitterMs = pingJitterMs,
-                        logCount = pingLogCount,
                         onStart = onStartPing,
                         onStop = onStopPing,
-                        onClear = onClearPing,
                         onLog = onShowPingLog
                     )
                     "diagnosis" -> DiagnosisAdviceInlineCard(mode, ipv4Stats, ipv6Stats)
@@ -6341,26 +5975,21 @@ private fun FullRunLogPage(
         verticalArrangement = Arrangement.spacedBy(7.dp)
     ) {
         item {
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 4.dp, bottom = 5.dp)) {
-                TextButton(onClick = onBack, modifier = Modifier.width(52.dp)) {
-                    Text("‹", fontSize = 26.sp, fontWeight = FontWeight.Bold, color = TextDark)
-                }
-                Text("运行日志", fontSize = 21.sp, fontWeight = FontWeight.ExtraBold, color = TextDark, modifier = Modifier.weight(1f))
-            }
+            ToolPageHeader(
+                title = "运行日志",
+                subtitle = "最近 500 条运行记录",
+                onBack = onBack,
+                actionLabel = "清空",
+                actionEnabled = logs.isNotEmpty(),
+                onAction = onClear
+            )
         }
         item {
             SoftCard {
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    OutlinedButton(onClick = onExport, modifier = Modifier.weight(1f).height(38.dp), shape = ShapeM) {
-                        Icon(Icons.Filled.Download, contentDescription = null, modifier = Modifier.width(16.dp).height(16.dp))
-                        Spacer(Modifier.width(4.dp))
-                        Text("导出日志", fontSize = 12.sp)
-                    }
-                    OutlinedButton(onClick = onClear, modifier = Modifier.weight(1f).height(38.dp), shape = ShapeM) {
-                        Icon(Icons.Filled.DeleteOutline, contentDescription = null, modifier = Modifier.width(16.dp).height(16.dp))
-                        Spacer(Modifier.width(4.dp))
-                        Text("清理日志", fontSize = 12.sp)
-                    }
+                OutlinedButton(onClick = onExport, modifier = Modifier.fillMaxWidth().height(38.dp), shape = ShapeM) {
+                    Icon(Icons.Filled.Download, contentDescription = null, modifier = Modifier.width(16.dp).height(16.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("导出日志", fontSize = 12.sp)
                 }
             }
         }
@@ -6419,10 +6048,10 @@ private fun LogsPage(
                     Text("检测历史", fontSize = 19.sp, fontWeight = FontWeight.ExtraBold, color = TextDark)
                     Text("已保存 ${historySavedCount} 条 · 占用 ${historySizeKb}KB", color = Muted, fontSize = 11.sp)
                 }
-                OutlinedButton(onClick = onClear, shape = ShapeM, modifier = Modifier.height(36.dp)) {
+                OutlinedButton(onClick = onClear, enabled = historySavedCount > 0, shape = ShapeM, modifier = Modifier.height(36.dp)) {
                     Icon(Icons.Filled.DeleteOutline, contentDescription = null, modifier = Modifier.width(15.dp).height(15.dp))
                     Spacer(Modifier.width(4.dp))
-                    Text("清理", fontSize = 11.sp)
+                    Text("清空", fontSize = 11.sp)
                 }
             }
         }
@@ -6455,10 +6084,10 @@ private fun LogsPage(
         if (history.isEmpty()) {
             item { SoftCard { Text("暂无历史记录", color = TextDark, fontSize = 13.sp) } }
         } else {
-            itemsIndexed(
+            items(
                 history.take(historyLimit.toIntOrNull()?.coerceIn(10, 100) ?: 30),
-                key = { index, item -> "${item.id}_${item.startedAtEpochMs}_$index" }
-            ) { _, item ->
+                key = { item -> "${item.id}_${item.startedAtEpochMs}" }
+            ) { item ->
                 SwipeDeleteHistoryCard(
                     item = item,
                     maskPrivacy = maskPrivacy,
@@ -6567,12 +6196,11 @@ private fun VersionInfoDialog(
                     Text("当前版本", color = Muted, fontSize = 12.sp, modifier = Modifier.weight(1f))
                     StatusChip(displayVersionName(currentAppVersionName(LocalContext.current)), BlueSoft, Blue, compact = true)
                 }
-                VersionLine(displayVersionName(currentAppVersionName(LocalContext.current)), "正式版：修复 Ping IPv4/AUTO 解析、0ms异常、目标历史与图表目标显示。")
-                VersionLine("V1.0.6", "目标与模式合并，网络信息折叠，Ping日志持久化，卡片长按拖动排序。")
-                VersionLine("V1.0.5", "Ping采集和界面展示分离，图表按秒聚合，日志弹窗分组优化。")
-                VersionLine("V1.0.4", "新增独立Ping、Ping参数、响应日志与NAT兼容判定。")
-                VersionLine("V1.0.3", "修复版本显示、释放通知重复和底部通知样式。")
-                VersionLine("V1.0.0", "正式版：定速发射核心、释放耗时、网络检测与更新流程。")
+                VersionLine(displayVersionName(currentAppVersionName(LocalContext.current)), "历史清空增加二次确认与10秒撤销，优化删除按钮，并修复NAT、漫游历史交互。")
+                VersionLine("v1.0.17", "统一各页面滑动删除交互，公网IP改为网络变化驱动刷新。")
+                VersionLine("v1.0.16", "修复弹窗、二级页面与底部栏叠图透图，MTU暂停改为停止。")
+                VersionLine("v1.0.15", "修复后台Ping终止、连接测试页面跳转与运行状态残留。")
+                VersionLine("v1.0.14", "引入蓝白紫毛玻璃界面，优化页面滑动、图层和切换动画。")
                 HorizontalDivider(color = Border)
                 Button(
                     onClick = onCheckUpdate,
@@ -6586,7 +6214,7 @@ private fun VersionInfoDialog(
                 }
             }
         },
-        shape = ShapeL
+        shape = GlassPopupShape
     )
 }
 
@@ -6642,7 +6270,7 @@ private fun UpdateAvailableDialog(
                 Text("后台下载时顶部会显示下载横幅；如果速度较慢，可打开 GitHub 手动下载。", color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
             }
         },
-        shape = ShapeL
+        shape = GlassPopupShape
     )
 }
 
@@ -6745,20 +6373,22 @@ private fun UpdateDownloadDialog(
                 Text(note, color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
             }
         },
-        shape = ShapeL
+        shape = GlassPopupShape
     )
 }
 
 @Composable
 private fun OneUiSnackbarHost(hostState: SnackbarHostState) {
     SnackbarHost(hostState = hostState) { data ->
+        val hasAction = data.visuals.actionLabel != null
         Card(
             modifier = Modifier
                 .padding(horizontal = 16.dp, vertical = 10.dp)
-                .fillMaxWidth(),
+                .fillMaxWidth()
+                .border(1.dp, GlassPopupBorder, RoundedCornerShape(18.dp)),
             shape = RoundedCornerShape(18.dp),
-            colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.98f)),
-            elevation = CardDefaults.cardElevation(defaultElevation = 12.dp)
+            colors = CardDefaults.cardColors(containerColor = GlassPopupSurface),
+            elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
         ) {
             Row(
                 modifier = Modifier
@@ -6770,13 +6400,13 @@ private fun OneUiSnackbarHost(hostState: SnackbarHostState) {
                     modifier = Modifier
                         .width(32.dp)
                         .height(32.dp)
-                        .background(BlueSoft, RoundedCornerShape(13.dp)),
+                        .background(if (hasAction) RedSoft else BlueSoft, RoundedCornerShape(13.dp)),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
-                        imageVector = Icons.Filled.CheckCircle,
+                        imageVector = if (hasAction) Icons.Filled.DeleteOutline else Icons.Filled.CheckCircle,
                         contentDescription = null,
-                        tint = Blue,
+                        tint = if (hasAction) ErrorRed else Blue,
                         modifier = Modifier.width(19.dp).height(19.dp)
                     )
                 }
@@ -6791,6 +6421,27 @@ private fun OneUiSnackbarHost(hostState: SnackbarHostState) {
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f)
                 )
+                data.visuals.actionLabel?.let { label ->
+                    Spacer(Modifier.width(9.dp))
+                    Surface(
+                        shape = RoundedCornerShape(13.dp),
+                        color = BlueSoft,
+                        border = BorderStroke(1.dp, Blue.copy(alpha = 0.18f)),
+                        tonalElevation = 0.dp,
+                        shadowElevation = 0.dp,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(13.dp))
+                            .clickable(onClick = data::performAction)
+                    ) {
+                        Text(
+                            label,
+                            color = Blue,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            modifier = Modifier.padding(horizontal = 13.dp, vertical = 9.dp)
+                        )
+                    }
+                }
             }
         }
     }
@@ -6804,8 +6455,8 @@ private fun BottomNoticeBanner(
     AnimatedVisibility(
         visible = state.visible && state.message.isNotBlank(),
         modifier = modifier,
-        enter = fadeIn(animationSpec = tween(160)) + slideInVertically(animationSpec = tween(220)) { it / 2 },
-        exit = fadeOut(animationSpec = tween(180)) + slideOutVertically(animationSpec = tween(200)) { it / 2 }
+        enter = slideInVertically(animationSpec = tween(220)) { it / 2 },
+        exit = slideOutVertically(animationSpec = tween(200)) { it / 2 }
     ) {
         val tint = when (state.tone) {
             BottomNoticeTone.Success -> Green
@@ -6822,10 +6473,11 @@ private fun BottomNoticeBanner(
         Card(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 6.dp),
+                .padding(horizontal = 6.dp)
+                .border(1.dp, GlassPopupBorder, RoundedCornerShape(18.dp)),
             shape = RoundedCornerShape(18.dp),
-            colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.98f)),
-            elevation = CardDefaults.cardElevation(defaultElevation = 12.dp)
+            colors = CardDefaults.cardColors(containerColor = GlassPopupSurface),
+            elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
         ) {
             Row(
                 modifier = Modifier
@@ -6882,36 +6534,60 @@ private fun UpdateDownloadBanner(
         state.failed -> ErrorRed
         else -> Blue
     }
+    val dragScope = rememberCoroutineScope()
+    val dragAnimation = remember { Animatable(0f) }
     var dragX by remember { mutableStateOf(0f) }
-    val dragOffset by animateFloatAsState(
-        targetValue = dragX,
-        animationSpec = tween(140, easing = FastOutSlowInEasing),
-        label = "update_banner_drag"
-    )
+    var isDragging by remember { mutableStateOf(false) }
+    val displayedOffset = if (isDragging) dragX else dragAnimation.value
     val dismissible = state.failed || state.finished || state.message.contains("取消")
 
     Card(
         modifier = modifier
             .fillMaxWidth()
-            .offset { IntOffset(dragOffset.roundToInt(), 0) }
+            .offset { IntOffset(displayedOffset.roundToInt(), 0) }
             .pointerInput(dismissible) {
                 if (dismissible) {
                     detectHorizontalDragGestures(
+                        onDragStart = {
+                            dragX = dragAnimation.value
+                            isDragging = true
+                            dragScope.launch { dragAnimation.stop() }
+                        },
                         onHorizontalDrag = { change, amount ->
                             change.consume()
-                            dragX += amount
+                            dragX = (dragX + amount).coerceIn(-240f, 240f)
                         },
                         onDragEnd = {
-                            if (kotlin.math.abs(dragX) > 80f) onDismiss() else dragX = 0f
+                            if (kotlin.math.abs(dragX) > 80f) {
+                                isDragging = false
+                                onDismiss()
+                            } else {
+                                val releaseX = dragX
+                                dragScope.launch {
+                                    dragAnimation.snapTo(releaseX)
+                                    isDragging = false
+                                    dragAnimation.animateTo(0f, tween(140, easing = FastOutSlowInEasing))
+                                    dragX = 0f
+                                }
+                            }
                         },
-                        onDragCancel = { dragX = 0f }
+                        onDragCancel = {
+                            val releaseX = dragX
+                            dragScope.launch {
+                                dragAnimation.snapTo(releaseX)
+                                isDragging = false
+                                dragAnimation.animateTo(0f, tween(140, easing = FastOutSlowInEasing))
+                                dragX = 0f
+                            }
+                        }
                     )
                 }
             }
             .clickable { if (state.finished) onInstall() else onOpen() },
         shape = ShapeM,
-        colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.98f)),
-        elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
+        colors = CardDefaults.cardColors(containerColor = GlassPopupSurface),
+        border = BorderStroke(1.dp, GlassPopupBorder),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
     ) {
         Column(Modifier.padding(horizontal = 12.dp, vertical = 9.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -6964,17 +6640,123 @@ private fun VersionLine(version: String, text: String) {
 }
 
 @Composable
+private fun AlertDialog(
+    onDismissRequest: () -> Unit,
+    confirmButton: @Composable () -> Unit,
+    dismissButton: @Composable (() -> Unit)? = null,
+    title: @Composable (() -> Unit)? = null,
+    text: @Composable (() -> Unit)? = null,
+    shape: androidx.compose.ui.graphics.Shape = GlassPopupShape
+) {
+    MaterialAlertDialog(
+        onDismissRequest = onDismissRequest,
+        confirmButton = confirmButton,
+        dismissButton = dismissButton,
+        title = title,
+        text = text,
+        shape = shape,
+        containerColor = GlassPopupSurface,
+        iconContentColor = Blue,
+        titleContentColor = TextDark,
+        textContentColor = TextDark,
+        tonalElevation = 0.dp
+    )
+}
+
+@Composable
+private fun ClearConfirmationDialog(
+    title: String,
+    message: String,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = {
+            Button(
+                onClick = onConfirm,
+                colors = ButtonDefaults.buttonColors(containerColor = ErrorRed, contentColor = Color.White),
+                shape = ShapeM
+            ) {
+                Icon(Icons.Filled.DeleteOutline, contentDescription = null, modifier = Modifier.width(16.dp).height(16.dp))
+                Spacer(Modifier.width(5.dp))
+                Text("确认清空", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss, shape = ShapeM) {
+                Text("取消", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+            }
+        },
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier.width(38.dp).height(38.dp).background(RedSoft, RoundedCornerShape(14.dp)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(Icons.Filled.WarningAmber, contentDescription = null, tint = ErrorRed, modifier = Modifier.width(21.dp).height(21.dp))
+                }
+                Spacer(Modifier.width(10.dp))
+                Text(title, fontWeight = FontWeight.ExtraBold, color = TextDark)
+            }
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(message, color = TextDark, fontSize = 13.sp, lineHeight = 18.sp)
+                Row(
+                    modifier = Modifier.fillMaxWidth().background(BlueSoft.copy(alpha = 0.72f), ShapeM).padding(10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Filled.History, contentDescription = null, tint = Blue, modifier = Modifier.width(18.dp).height(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("确认后底部会出现 10 秒撤销按钮", color = Blue, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+        },
+        shape = GlassPopupShape
+    )
+}
+
+@Composable
 private fun SoftCard(content: @Composable ColumnScope.() -> Unit) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = ShapeL,
-        colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.96f)),
-        elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
-    ) {
-        Column(
-            modifier = Modifier.padding(9.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
-            content = content
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(ShapeL)
+            .background(GlassCardBrush)
+            .border(1.dp, GlassBorderBrush, ShapeL)
+            .padding(9.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+        content = content
+    )
+}
+
+/**
+ * One ambient draw layer for the whole page. Glass panels stay translucent but
+ * never capture or blur each other, avoiding nested RenderEffect/z-order bugs.
+ */
+@Composable
+private fun GlassAppBackground() {
+    Canvas(modifier = Modifier.fillMaxSize()) {
+        drawRect(brush = Brush.verticalGradient(listOf(GlassBackgroundTop, GlassBackgroundMid, GlassBackgroundBottom)))
+        val base = size.minDimension
+        drawCircle(
+            brush = Brush.radialGradient(
+                colors = listOf(GlassBlueGlow, Color.Transparent),
+                center = Offset(size.width * 0.10f, size.height * 0.08f),
+                radius = base * 0.72f
+            ),
+            radius = base * 0.72f,
+            center = Offset(size.width * 0.10f, size.height * 0.08f)
+        )
+        drawCircle(
+            brush = Brush.radialGradient(
+                colors = listOf(GlassPurpleGlow, Color.Transparent),
+                center = Offset(size.width * 0.92f, size.height * 0.42f),
+                radius = base * 0.64f
+            ),
+            radius = base * 0.64f,
+            center = Offset(size.width * 0.92f, size.height * 0.42f)
         )
     }
 }
@@ -7367,7 +7149,13 @@ private fun HistoryTextField(
                 }
             },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 480.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(7.dp)
+                ) {
                     if (presets.isNotEmpty()) {
                         Row(
                             modifier = Modifier.fillMaxWidth().clickable { presetsExpanded = !presetsExpanded },
@@ -7398,20 +7186,24 @@ private fun HistoryTextField(
                         }
                         val shownHistory = if (historyExpanded) history.take(10) else history.take(3)
                         shownHistory.forEach { item ->
-                            Row(
-                                modifier = Modifier.fillMaxWidth().background(Color(0xFFF8FAFC), ShapeM).clickable { onPick(item); open = false }.padding(horizontal = 12.dp, vertical = 9.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(item, color = TextDark, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-                                IconButton(onClick = { onDelete(item) }, modifier = Modifier.width(32.dp).height(32.dp)) {
-                                    Icon(Icons.Filled.Close, contentDescription = null, tint = Muted, modifier = Modifier.width(16.dp).height(16.dp))
+                            SwipeDeleteToolBox(onDelete = { onDelete(item) }, stateKey = item) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .heightIn(min = 56.dp)
+                                        .background(Color(0xFFF8FAFC), ShapeM)
+                                        .clickable { onPick(item); open = false }
+                                        .padding(horizontal = 12.dp, vertical = 9.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(item, color = TextDark, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
                                 }
                             }
                         }
                     }
                 }
             },
-            shape = ShapeL
+            shape = GlassPopupShape
         )
     }
     if (addOpen && onAdd != null) {
@@ -7440,7 +7232,7 @@ private fun HistoryTextField(
                 }) { Text("添加", fontWeight = FontWeight.Bold) }
             },
             dismissButton = { TextButton(onClick = { addOpen = false }) { Text("取消") } },
-            shape = ShapeL
+            shape = GlassPopupShape
         )
     }
 }
@@ -7652,7 +7444,6 @@ private fun SessionProtocolSelector(
             Box(
                 modifier = Modifier
                     .weight(1f)
-                    .shadow(if (isSelected) 4.dp else 0.dp, ShapeM, clip = false)
                     .clip(ShapeM)
                     .background(if (isSelected) BlueSoft else Color.Transparent, ShapeM)
                     .clickable(
@@ -8193,16 +7984,41 @@ private fun CombinedSessionGrowthChart(series: List<SessionChartSeries>) {
         }.filter { it.points.isNotEmpty() }
     }
     val allPoints = remember(renderedSeries) { renderedSeries.flatMap { it.points }.sortedBy { it.elapsedSec } }
-    val minX = 0
+    val fullMinX = 0
     val maxXRaw = allPoints.maxOfOrNull { it.elapsedSec } ?: 1
-    val maxX = maxOf(1, maxXRaw)
+    val fullMaxX = maxOf(1, maxXRaw)
+    val fullSpanX = (fullMaxX - fullMinX).coerceAtLeast(1)
+    var zoomSpanX by remember { mutableStateOf<Int?>(null) }
+    var viewEndX by remember { mutableStateOf(fullMaxX) }
+    val horizontalPanRemainderX = remember { floatArrayOf(0f) }
+    var chartWidthPx by remember { mutableStateOf(1f) }
+    val spanX = (zoomSpanX ?: fullSpanX).coerceIn(1, fullSpanX)
+    val minViewEndX = fullMinX + spanX
+    val maxViewEndX = fullMaxX.coerceAtLeast(minViewEndX)
+    val effectiveViewEndX = viewEndX.coerceIn(minViewEndX, maxViewEndX)
+    val minX = effectiveViewEndX - spanX
+    val maxX = effectiveViewEndX
+    val visibleSeries = remember(renderedSeries, minX, maxX) {
+        renderedSeries.map { item -> item.copy(points = item.points.filter { it.elapsedSec in minX..maxX }) }
+    }
+    val visiblePoints = remember(visibleSeries) { visibleSeries.flatMap { it.points }.sortedBy { it.elapsedSec } }
     val maxSessionY = remember(allPoints) { sessionYAxisMax(allPoints.maxOfOrNull { it.active } ?: 0) }
     val step = chartXAxisStep(maxX - minX)
     val yLabels = remember(maxSessionY) { axisLabels(maxSessionY) }
     val xLabels = remember(minX, maxX, step) { timeLabels(minX, maxX, step) }
-    val stageRanges = remember(allPoints, minX, maxX) { buildSessionStageRanges(allPoints, minX, maxX) }
-    val failSummary = remember(allPoints) { failureIntervalSummary(allPoints) }
+    val stageRanges = remember(visiblePoints, minX, maxX) { buildSessionStageRanges(visiblePoints, minX, maxX) }
+    val failSummary = remember(visiblePoints) { failureIntervalSummary(visiblePoints) }
     val latest = allPoints.lastOrNull()
+
+    LaunchedEffect(allPoints.firstOrNull()?.elapsedSec, allPoints.firstOrNull()?.protocol) {
+        zoomSpanX = null
+        viewEndX = fullMaxX
+        horizontalPanRemainderX[0] = 0f
+    }
+    LaunchedEffect(fullMaxX, spanX) {
+        if (zoomSpanX == null) viewEndX = fullMaxX
+        else viewEndX = viewEndX.coerceIn(fullMinX + spanX, fullMaxX.coerceAtLeast(fullMinX + spanX))
+    }
 
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -8238,6 +8054,34 @@ private fun CombinedSessionGrowthChart(series: List<SessionChartSeries>) {
                     .height(163.dp)
                     .background(Color(0xFFF8FAFC), ShapeS)
                     .padding(6.dp)
+                    .onSizeChanged { chartWidthPx = it.width.toFloat().coerceAtLeast(1f) }
+                    .chartGestureModifier(
+                        onHorizontalPan = { dragAmount ->
+                            val preciseDeltaX = dragAmount / chartWidthPx.coerceAtLeast(1f) * spanX + horizontalPanRemainderX[0]
+                            val deltaX = preciseDeltaX.toInt()
+                            horizontalPanRemainderX[0] = preciseDeltaX - deltaX
+                            if (deltaX != 0) {
+                                val nextEndX = (effectiveViewEndX - deltaX).coerceIn(minViewEndX, maxViewEndX)
+                                if (nextEndX == effectiveViewEndX) horizontalPanRemainderX[0] = 0f
+                                viewEndX = nextEndX
+                            }
+                        },
+                        onPinchTransform = { centroidX, panX, zoom ->
+                            horizontalPanRemainderX[0] = 0f
+                            val width = chartWidthPx.coerceAtLeast(1f)
+                            val focalRatio = (centroidX / width).coerceIn(0f, 1f)
+                            val focalX = minX + (spanX * focalRatio).toInt()
+                            val newSpan = (spanX / zoom.coerceIn(0.25f, 4f)).toInt().coerceIn(1, fullSpanX)
+                            zoomSpanX = newSpan
+                            val newEnd = focalX + (newSpan * (1f - focalRatio)).toInt() - (panX / width * newSpan).toInt()
+                            viewEndX = newEnd.coerceIn(fullMinX + newSpan, fullMaxX.coerceAtLeast(fullMinX + newSpan))
+                        },
+                        onDoubleTap = {
+                            zoomSpanX = null
+                            viewEndX = fullMaxX
+                            horizontalPanRemainderX[0] = 0f
+                        }
+                    )
             ) {
                 val w = size.width
                 val h = size.height
@@ -8260,8 +8104,8 @@ private fun CombinedSessionGrowthChart(series: List<SessionChartSeries>) {
                     drawLine(Border.copy(alpha = 0.55f), Offset(0f, y), Offset(w, y), strokeWidth = 1f)
                 }
 
-                renderedSeries.forEach { item ->
-                    val ordered = item.points.sortedBy { it.elapsedSec }
+                visibleSeries.forEach { item ->
+                    val ordered = item.points
                     if (ordered.size > 1) {
                         val path = Path()
                         ordered.forEachIndexed { index, point ->
@@ -8276,8 +8120,8 @@ private fun CombinedSessionGrowthChart(series: List<SessionChartSeries>) {
                     }
                 }
 
-                val maxFailureDelta = renderedSeries.maxOfOrNull { item ->
-                    val ordered = item.points.sortedBy { it.elapsedSec }
+                val maxFailureDelta = visibleSeries.maxOfOrNull { item ->
+                    val ordered = item.points
                     var previous = ordered.firstOrNull()?.failure ?: 0
                     var maxDelta = 0
                     ordered.drop(1).forEach { point ->
@@ -8287,13 +8131,13 @@ private fun CombinedSessionGrowthChart(series: List<SessionChartSeries>) {
                     maxDelta
                 }?.coerceAtLeast(1) ?: 1
 
-                renderedSeries.forEachIndexed { seriesIndex, item ->
-                    val ordered = item.points.sortedBy { it.elapsedSec }
+                visibleSeries.forEachIndexed { seriesIndex, item ->
+                    val ordered = item.points
                     var previousFailure = ordered.firstOrNull()?.failure ?: 0
                     ordered.drop(1).forEach { point ->
                         val delta = (point.failure - previousFailure).coerceAtLeast(0)
                         if (delta > 0) {
-                            val xOffset = if (renderedSeries.size > 1) (seriesIndex * 3f - 1.5f) else 0f
+                            val xOffset = if (visibleSeries.size > 1) (seriesIndex * 3f - 1.5f) else 0f
                             val barHeight = (6f + 20f * delta.toFloat() / maxFailureDelta.toFloat()).coerceIn(7f, 26f)
                             val x = xOfSec(point.elapsedSec) + xOffset
                             drawLine(
@@ -8653,6 +8497,7 @@ private fun NatDiagnosticDialog(
     onRun: () -> Unit,
     onDismiss: () -> Unit
 ) {
+    var editingServerIndex by remember { mutableStateOf<Int?>(null) }
     AlertDialog(
         onDismissRequest = { if (!running) onDismiss() },
         confirmButton = {
@@ -8696,7 +8541,18 @@ private fun NatDiagnosticDialog(
                     Text("未填写端口时默认 3478", color = Muted, fontSize = 10.sp)
                 }
                 servers.forEachIndexed { index, item ->
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    SwipeDeleteToolBox(
+                        onDelete = {
+                            val next = if (servers.size > 1) {
+                                servers.filterIndexed { i, _ -> i != index }
+                            } else {
+                                listOf("")
+                            }
+                            onServersChange(next)
+                        },
+                        stateKey = index to servers.size,
+                        swipeEnabled = editingServerIndex != index
+                    ) {
                         OutlinedTextField(
                             value = item,
                             onValueChange = { value ->
@@ -8708,20 +8564,16 @@ private fun NatDiagnosticDialog(
                             placeholder = { Text(defaultNatServer(mode), fontSize = 12.sp) },
                             singleLine = true,
                             shape = ShapeM,
-                            modifier = Modifier.weight(1f)
-                        )
-                        IconButton(
-                            onClick = {
-                                val next = if (servers.size > 1) {
-                                    servers.filterIndexed { i, _ -> i != index }
-                                } else {
-                                    listOf("")
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .onFocusChanged { focusState ->
+                                    if (focusState.isFocused) {
+                                        editingServerIndex = index
+                                    } else if (editingServerIndex == index) {
+                                        editingServerIndex = null
+                                    }
                                 }
-                                onServersChange(next)
-                            }
-                        ) {
-                            Icon(Icons.Filled.DeleteOutline, contentDescription = null, tint = ErrorRed)
-                        }
+                        )
                     }
                 }
                 OutlinedButton(
@@ -8781,7 +8633,8 @@ private fun NatDiagnosticDialog(
 @Composable
 private fun NatHistoryDialog(
     records: List<NatHistoryRecord>,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    onDelete: (Long) -> Unit
 ) {
     var expandedIds by remember(records) { mutableStateOf<Set<Long>>(emptySet()) }
     val sizeKb = remember(records) { natHistorySizeKb(records) }
@@ -8807,45 +8660,53 @@ private fun NatHistoryDialog(
                 } else {
                     records.forEach { record ->
                         val expanded = record.id in expandedIds
-                        Surface(
-                            shape = ShapeM,
-                            color = Color(0xFFF8FAFC),
-                            border = BorderStroke(0.7.dp, Border.copy(alpha = 0.75f)),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable {
-                                    expandedIds = if (expanded) expandedIds - record.id else expandedIds + record.id
-                                }
-                        ) {
-                            Column(
-                                modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 9.dp),
-                                verticalArrangement = Arrangement.spacedBy(5.dp)
-                            ) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Column(Modifier.weight(1f)) {
-                                        Text(record.timeText, color = Muted, fontSize = 10.sp)
-                                        Text(
-                                            "${record.mode} · ${record.natType}",
-                                            color = TextDark,
-                                            fontSize = 12.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
+                        SwipeDeleteToolBox(onDelete = { onDelete(record.id) }, stateKey = record.id, shape = ShapeM) {
+                            Surface(
+                                shape = ShapeM,
+                                color = Color(0xFFF8FAFC),
+                                tonalElevation = 0.dp,
+                                shadowElevation = 0.dp,
+                                border = BorderStroke(0.7.dp, Border.copy(alpha = 0.75f)),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(ShapeM)
+                                    .clickable(
+                                        interactionSource = remember(record.id) { MutableInteractionSource() },
+                                        indication = null
+                                    ) {
+                                        expandedIds = if (expanded) expandedIds - record.id else expandedIds + record.id
                                     }
-                                    Text(if (expanded) "收起" else "展开", color = Blue, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                                }
-                                if (expanded) {
-                                    HorizontalDivider(color = Border.copy(alpha = 0.7f))
-                                    MiniResultLine("映射行为", record.mappingBehavior.ifBlank { "—" })
-                                    MiniResultLine("过滤行为", record.filteringBehavior.ifBlank { "—" })
-                                    MiniResultLine("本地地址", record.localAddress.ifBlank { "—" })
-                                    MiniResultLine("公网地址", record.publicAddress.ifBlank { "—" })
-                                    MiniResultLine("测试方法", record.method.ifBlank { record.mode })
-                                    MiniResultLine("服务器", record.server.ifBlank { "—" })
-                                    MiniResultLine("检测耗时", if (record.durationMs > 0L) "${record.durationMs}ms" else "—")
-                                    if (record.message.isNotBlank()) {
-                                        Text(record.message, color = Muted, fontSize = 10.sp, lineHeight = 14.sp)
+                            ) {
+                                Column(
+                                    modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 9.dp),
+                                    verticalArrangement = Arrangement.spacedBy(5.dp)
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Column(Modifier.weight(1f)) {
+                                            Text(record.timeText, color = Muted, fontSize = 10.sp)
+                                            Text(
+                                                "${record.mode} · ${record.natType}",
+                                                color = TextDark,
+                                                fontSize = 12.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+                                        Text(if (expanded) "收起" else "展开", color = Blue, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                    }
+                                    if (expanded) {
+                                        HorizontalDivider(color = Border.copy(alpha = 0.7f))
+                                        MiniResultLine("映射行为", record.mappingBehavior.ifBlank { "—" })
+                                        MiniResultLine("过滤行为", record.filteringBehavior.ifBlank { "—" })
+                                        MiniResultLine("本地地址", record.localAddress.ifBlank { "—" })
+                                        MiniResultLine("公网地址", record.publicAddress.ifBlank { "—" })
+                                        MiniResultLine("测试方法", record.method.ifBlank { record.mode })
+                                        MiniResultLine("服务器", record.server.ifBlank { "—" })
+                                        MiniResultLine("检测耗时", if (record.durationMs > 0L) "${record.durationMs}ms" else "—")
+                                        if (record.message.isNotBlank()) {
+                                            Text(record.message, color = Muted, fontSize = 10.sp, lineHeight = 14.sp)
+                                        }
                                     }
                                 }
                             }
@@ -8884,7 +8745,7 @@ private fun NatModeChip(label: String, selected: Boolean, modifier: Modifier, on
 
 @Composable
 private fun MiniResultTile(label: String, value: String, modifier: Modifier = Modifier) {
-    Column(modifier = modifier.background(Color.White.copy(alpha = 0.8f), ShapeM).padding(10.dp)) {
+    Column(modifier = modifier.background(Color.White, ShapeM).padding(10.dp)) {
         Text(label, color = Muted, fontSize = 11.sp)
         Text(value, color = TextDark, fontWeight = FontWeight.Bold, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis, lineHeight = 15.sp)
     }
@@ -9426,6 +9287,8 @@ private suspend fun runTracketToolLive(
     } catch (e: CancellationException) {
         withContext(Dispatchers.Main) { onEvent("路由追踪已停止") }
         throw e
+    } catch (error: Error) {
+        throw error
     } catch (e: Throwable) {
         val msg = e.message ?: "追踪失败"
         withContext(Dispatchers.Main) { onHop("错误：$msg") }
@@ -9639,7 +9502,14 @@ private fun NetworkToolShortcutCard(
 }
 
 @Composable
-private fun ToolPageHeader(title: String, subtitle: String, onBack: () -> Unit) {
+private fun ToolPageHeader(
+    title: String,
+    subtitle: String,
+    onBack: () -> Unit,
+    actionLabel: String? = null,
+    actionEnabled: Boolean = true,
+    onAction: (() -> Unit)? = null
+) {
     Row(
         modifier = Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 6.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -9656,8 +9526,8 @@ private fun ToolPageHeader(title: String, subtitle: String, onBack: () -> Unit) 
                     onClick = onBack
                 ),
             shape = backShape,
-            color = Color.White,
-            border = BorderStroke(1.dp, Border),
+            color = GlassPopupSurface,
+            border = BorderStroke(1.dp, GlassPopupBorder),
             tonalElevation = 0.dp,
             shadowElevation = 0.dp
         ) {
@@ -9669,6 +9539,20 @@ private fun ToolPageHeader(title: String, subtitle: String, onBack: () -> Unit) 
         Column(Modifier.weight(1f)) {
             Text(title, color = TextDark, fontWeight = FontWeight.ExtraBold, fontSize = 20.sp, maxLines = 1)
             Text(subtitle, color = Muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        if (actionLabel != null && onAction != null) {
+            Spacer(Modifier.width(8.dp))
+            OutlinedButton(
+                onClick = onAction,
+                enabled = actionEnabled,
+                shape = RoundedCornerShape(14.dp),
+                modifier = Modifier.height(36.dp),
+                contentPadding = PaddingValues(horizontal = 11.dp, vertical = 0.dp)
+            ) {
+                Icon(Icons.Filled.DeleteOutline, contentDescription = null, modifier = Modifier.width(15.dp).height(15.dp))
+                Spacer(Modifier.width(4.dp))
+                Text(actionLabel, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            }
         }
     }
 }
@@ -10057,7 +9941,7 @@ private fun NsLookupToolPage(onBack: () -> Unit) {
                 SwipeDeleteToolBox(onDelete = {
                     store.deleteNsLookup(record.id)
                     records = store.loadNsLookup()
-                }) {
+                }, stateKey = record.id) {
                     NsLookupRecordCard(record, compact = true, onCopy = {
                         clipboard.setText(AnnotatedString(record.copyText()))
                         Toast.makeText(context, "已复制解析结果", Toast.LENGTH_SHORT).show()
@@ -10168,10 +10052,14 @@ private fun TracketToolPage(onBack: () -> Unit) {
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         item {
-            ToolPageHeader("追踪配置", "逐跳追踪域名经过的 IP；结果以系统返回为准") {
-                stopTrace("返回页面，路由追踪已停止")
-                onBack()
-            }
+            ToolPageHeader(
+                title = "追踪配置",
+                subtitle = "逐跳追踪域名经过的 IP；结果以系统返回为准",
+                onBack = {
+                    stopTrace("返回页面，路由追踪已停止")
+                    onBack()
+                }
+            )
         }
         item {
             SoftCard {
@@ -10317,7 +10205,7 @@ private fun TracketToolPage(onBack: () -> Unit) {
                     store.deleteTracket(record.id)
                     records = store.loadTracket()
                     expandedIds = expandedIds - record.id
-                }) {
+                }, stateKey = record.id) {
                     TracketRecordCard(
                         record = record,
                         expanded = expanded,
@@ -10381,7 +10269,8 @@ private data class RoamingWifiSample(
     val ssid: String = "未知",
     val unavailableReason: String? = null,
     val candidateBssid: String? = null,
-    val candidateRssi: Int? = null
+    val candidateRssi: Int? = null,
+    val segmentId: Int = 0
 )
 
 private data class RoamingPingSample(
@@ -10391,7 +10280,8 @@ private data class RoamingPingSample(
     val completedElapsedMs: Long,
     val attempted: Boolean,
     val latencyMs: Int?,
-    val failureReason: String? = null
+    val failureReason: String? = null,
+    val segmentId: Int = 0
 )
 
 private data class RoamingSwitchEvent(
@@ -10477,6 +10367,27 @@ private data class RoamingHistoryRecord(
     val networkEventLines: List<String>
 )
 
+private fun RoamingHistoryRecord.toJson(): JSONObject = JSONObject()
+    .put("id", id)
+    .put("timeText", timeText)
+    .put("targetText", targetText)
+    .put("durationText", durationText)
+    .put("sampleCount", sampleCount)
+    .put("lossCount", lossCount)
+    .put("gatewaySummary", gatewaySummary)
+    .put("externalSummary", externalSummary)
+    .put("rssiSummary", rssiSummary)
+    .put("speedSummary", speedSummary)
+    .put("roamingSummary", roamingSummary)
+    .put("eventLines", JSONArray(eventLines))
+    .put("networkEventLines", JSONArray(networkEventLines))
+
+private fun roamingHistorySizeKb(records: List<RoamingHistoryRecord>): Double {
+    val array = JSONArray()
+    records.forEach { array.put(it.toJson()) }
+    return array.toString().toByteArray(Charsets.UTF_8).size / 1024.0
+}
+
 private enum class RoamingTargetMode(val label: String) {
     GATEWAY_AND_EXTERNAL("路由器+外网"),
     GATEWAY("仅路由器"),
@@ -10551,7 +10462,8 @@ private suspend fun runTcpBusinessMtuProbe(
     hostInput: String,
     ipv6: Boolean,
     timeoutMs: Int,
-    port: Int = 443
+    port: Int = 443,
+    activeSocket: java.util.concurrent.atomic.AtomicReference<Socket?>? = null
 ): MtuTcpProbe = withContext(Dispatchers.IO) {
     val host = cleanToolHost(hostInput)
     val address = resolveMtuFamilyAddress(host, ipv6)
@@ -10560,12 +10472,18 @@ private suspend fun runTcpBusinessMtuProbe(
     val localMtu = readLocalInterfaceMtu(context).first
     val start = SystemClock.elapsedRealtime()
     val socket = Socket()
-    val ok = runCatching {
-        socket.tcpNoDelay = true
-        socket.connect(InetSocketAddress(address, port), timeoutMs.coerceIn(500, 10000))
-        true
-    }.getOrElse { false }
-    runCatching { socket.close() }
+    activeSocket?.set(socket)
+    val ok = try {
+        runCatching {
+            socket.tcpNoDelay = true
+            socket.connect(InetSocketAddress(address, port), timeoutMs.coerceIn(500, 10000))
+            true
+        }.getOrElse { false }
+    } finally {
+        activeSocket?.compareAndSet(socket, null)
+        runCatching { socket.close() }
+    }
+    currentCoroutineContext().ensureActive()
     val cost = SystemClock.elapsedRealtime() - start
     val estimatedMss = if (ok) localMtu?.let { (it - if (ipv6) 60 else 40).coerceAtLeast(0) } else null
     val detail = if (ok) {
@@ -10580,7 +10498,7 @@ private fun pmtuModeNote(ipv6: Boolean): String {
     return if (ipv6) "PMTU增强：IPv6 使用大包探测，依赖路径 Packet Too Big 语义；若系统 ping/网络策略限制，结果会降级参考。" else "PMTU增强：IPv4 优先使用 DF 禁止分片语义探测；若系统 ping 不支持 -M do，会显示降级或失败原因。"
 }
 
-private fun runMtuPing(address: String, ipv6: Boolean, mtu: Int, timeoutMs: Int, mode: MtuProbeMode): Pair<Boolean, String> {
+private suspend fun runMtuPing(address: String, ipv6: Boolean, mtu: Int, timeoutMs: Int, mode: MtuProbeMode): Pair<Boolean, String> {
     val waitSec = ((timeoutMs.coerceIn(500, 10000) + 999) / 1000).coerceIn(1, 10).toString()
     val payload = if (ipv6) (mtu - 48).coerceAtLeast(0) else (mtu - 28).coerceAtLeast(0)
     val pmtuCommands = if (ipv6) {
@@ -10613,12 +10531,31 @@ private fun runMtuPing(address: String, ipv6: Boolean, mtu: Int, timeoutMs: Int,
     var last = ""
     var unsupported = false
     for (cmd in commands) {
+        currentCoroutineContext().ensureActive()
         val result = runCatching {
             val process = ProcessBuilder(cmd).redirectErrorStream(true).start()
-            val finished = process.waitFor((timeoutMs + 900).toLong(), TimeUnit.MILLISECONDS)
-            if (!finished) process.destroyForcibly()
-            process.inputStream.bufferedReader().use { it.readText() }
-        }.getOrDefault("")
+            try {
+                val deadline = SystemClock.elapsedRealtime() + timeoutMs + 900L
+                var finished = false
+                while (currentCoroutineContext().isActive && SystemClock.elapsedRealtime() < deadline) {
+                    if (process.waitFor(50L, TimeUnit.MILLISECONDS)) {
+                        finished = true
+                        break
+                    }
+                }
+                currentCoroutineContext().ensureActive()
+                if (!finished) process.destroyForcibly()
+                process.inputStream.bufferedReader().use { it.readText() }
+            } finally {
+                if (process.isAlive) {
+                    runCatching { process.destroy() }
+                    if (process.waitFor(80L, TimeUnit.MILLISECONDS).not()) runCatching { process.destroyForcibly() }
+                }
+            }
+        }.getOrElse { error ->
+            if (error is CancellationException) throw error
+            ""
+        }
         if (result.isBlank()) continue
         last = result
         val lower = result.lowercase(Locale.getDefault())
@@ -10888,6 +10825,7 @@ private suspend fun runMtuProbeLive(
     probeMode: MtuProbeMode,
     timeoutMs: Int,
     pauseRequested: () -> Boolean,
+    activeSocket: java.util.concurrent.atomic.AtomicReference<Socket?>,
     onStep: suspend (MtuStep) -> Unit
 ): MtuResult = withContext(Dispatchers.IO) {
     val host = cleanToolHost(hostInput)
@@ -10912,7 +10850,7 @@ private suspend fun runMtuProbeLive(
     for (ipv6 in families) {
         waitWhileMtuPaused(pauseRequested)
         if (probeMode == MtuProbeMode.TCP) {
-            val tcp = runTcpBusinessMtuProbe(context, host, ipv6, timeoutMs)
+            val tcp = runTcpBusinessMtuProbe(context, host, ipv6, timeoutMs, activeSocket = activeSocket)
             tcpResults += tcp
             checkLines += MtuCheckLine(
                 name = "${tcp.protocol} TCP",
@@ -10959,7 +10897,7 @@ private suspend fun runMtuProbeLive(
         }
 
         if (probeMode == MtuProbeMode.FAILOVER && path.mtu == null) {
-            val tcp = runTcpBusinessMtuProbe(context, host, ipv6, timeoutMs)
+            val tcp = runTcpBusinessMtuProbe(context, host, ipv6, timeoutMs, activeSocket = activeSocket)
             tcpResults += tcp
             checkLines += MtuCheckLine(
                 name = "${tcp.protocol} TCP辅助",
@@ -11158,13 +11096,18 @@ private fun readWifiSnapshot(context: Context): WifiSnapshot {
     }.getOrElse { WifiSnapshot(null, null, null, "未知", null, "系统限制：无法读取当前 Wi-Fi 信息") }
 }
 
-private fun readRoamingWifiSample(context: Context, runStartNanos: Long): RoamingWifiSample {
+private fun readRoamingWifiSample(
+    context: Context,
+    runStartNanos: Long,
+    pausedDurationMs: Long = 0L,
+    segmentId: Int = 0
+): RoamingWifiSample {
     val capturedNanos = SystemClock.elapsedRealtimeNanos()
     val snapshot = readWifiSnapshot(context)
     return RoamingWifiSample(
         timeText = SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()).format(Date()),
         elapsedRealtimeNanos = capturedNanos,
-        elapsedMs = ((capturedNanos - runStartNanos) / 1_000_000L).coerceAtLeast(0L),
+        elapsedMs = (((capturedNanos - runStartNanos) / 1_000_000L) - pausedDurationMs).coerceAtLeast(0L),
         bssid = snapshot.bssid,
         rssi = snapshot.rssi,
         frequencyMhz = snapshot.frequencyMhz,
@@ -11173,7 +11116,8 @@ private fun readRoamingWifiSample(context: Context, runStartNanos: Long): Roamin
         ssid = snapshot.ssid,
         unavailableReason = snapshot.unavailableReason,
         candidateBssid = snapshot.candidateBssid,
-        candidateRssi = snapshot.candidateRssi
+        candidateRssi = snapshot.candidateRssi,
+        segmentId = segmentId
     )
 }
 
@@ -11221,6 +11165,13 @@ private fun buildRoamingSwitchEvents(
     wifiSamples: List<RoamingWifiSample>,
     pingSamples: List<RoamingPingSample>
 ): List<RoamingSwitchEvent> {
+    val segmentGroups = wifiSamples.groupBy { it.segmentId }.values
+    if (segmentGroups.size > 1) {
+        return segmentGroups.flatMap { segment ->
+            val segmentId = segment.firstOrNull()?.segmentId ?: 0
+            buildRoamingSwitchEvents(segment, pingSamples.filter { it.segmentId == segmentId })
+        }
+    }
     val validSamples = wifiSamples.filter { isUsableWifiBssid(it.bssid) }
     if (validSamples.size < 2) return emptyList()
 
@@ -11352,7 +11303,7 @@ private fun buildStickyApEvents(
             if (existingStart == null) {
                 start = sample
                 last = sample
-            } else if (existingStart.bssid.equals(sample.bssid, ignoreCase = true)) {
+            } else if (existingStart.segmentId == sample.segmentId && existingStart.bssid.equals(sample.bssid, ignoreCase = true)) {
                 last = sample
             } else {
                 flush()
@@ -11488,6 +11439,7 @@ private fun computeRoamingQuality(
 }
 
 private fun buildRoamingHistoryRecord(
+    recordId: Long = System.currentTimeMillis(),
     targetMode: RoamingTargetMode,
     externalTarget: String,
     wifiSamples: List<RoamingWifiSample>,
@@ -11506,7 +11458,7 @@ private fun buildRoamingHistoryRecord(
     val networkLines = networkEvents.map { "${it.timeText}  ${it.label}" }
     val trueLossCount = pingSamples.count { it.attempted && it.latencyMs == null }
     return RoamingHistoryRecord(
-        id = System.currentTimeMillis(),
+        id = recordId,
         timeText = SimpleDateFormat("MM-dd HH:mm:ss", Locale.getDefault()).format(Date()),
         targetText = targetText,
         durationText = roamingDurationText(wifiSamples, pingSamples),
@@ -11567,25 +11519,24 @@ private fun deleteRoamingHistory(context: Context, id: Long) {
 
 private fun writeRoamingHistory(context: Context, records: List<RoamingHistoryRecord>) {
     val arr = JSONArray()
-    records.forEach { r ->
-        arr.put(
-            JSONObject()
-                .put("id", r.id)
-                .put("timeText", r.timeText)
-                .put("targetText", r.targetText)
-                .put("durationText", r.durationText)
-                .put("sampleCount", r.sampleCount)
-                .put("lossCount", r.lossCount)
-                .put("gatewaySummary", r.gatewaySummary)
-                .put("externalSummary", r.externalSummary)
-                .put("rssiSummary", r.rssiSummary)
-                .put("speedSummary", r.speedSummary)
-                .put("roamingSummary", r.roamingSummary)
-                .put("eventLines", JSONArray(r.eventLines))
-                .put("networkEventLines", JSONArray(r.networkEventLines))
-        )
-    }
+    records.forEach { arr.put(it.toJson()) }
     context.getSharedPreferences("net_tools_history", Context.MODE_PRIVATE).edit().putString("roaming_history_v1", arr.toString()).apply()
+}
+
+private fun recoverInterruptedRoamingCheckpoint(context: Context) {
+    val prefs = context.getSharedPreferences("roaming_runtime_checkpoint", Context.MODE_PRIVATE)
+    val runId = prefs.getLong("run_id", 0L)
+    val backgroundWallMs = prefs.getLong("background_wall_ms", 0L)
+    if (runId == 0L || backgroundWallMs == 0L) return
+    val elapsed = (System.currentTimeMillis() - backgroundWallMs).coerceAtLeast(0L)
+    val reason = if (elapsed > 10_000L) "进入后台超过10秒" else "Activity重建，后台漫游任务已安全结束"
+    val updated = loadRoamingHistory(context).map { record ->
+        if (record.id == runId && record.networkEventLines.none { it.contains(reason) }) {
+            record.copy(networkEventLines = record.networkEventLines + reason)
+        } else record
+    }
+    writeRoamingHistory(context, updated)
+    prefs.edit().clear().apply()
 }
 
 private fun roamingPingAxisMax(values: List<Int>): Int {
@@ -11613,21 +11564,21 @@ private fun roamingXTicks(size: Int): List<Int> {
 private fun MtuToolPage(onBack: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val pauseFlag = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
+    val activeSocket = remember { java.util.concurrent.atomic.AtomicReference<Socket?>(null) }
     var host by remember { mutableStateOf("www.qq.com") }
     var timeoutMs by remember { mutableStateOf("1200") }
     var runMode by remember { mutableStateOf(MtuRunMode.IPV4) }
     var probeMode by remember { mutableStateOf(MtuProbeMode.FAILOVER) }
     var running by remember { mutableStateOf(false) }
-    var paused by remember { mutableStateOf(false) }
+    var manuallyStopped by remember { mutableStateOf(false) }
     var job by remember { mutableStateOf<Job?>(null) }
     var steps by remember { mutableStateOf<List<MtuStep>>(emptyList()) }
     var result by remember { mutableStateOf<MtuResult?>(null) }
 
     DisposableEffect(Unit) {
         onDispose {
-            pauseFlag.set(false)
             job?.cancel()
+            activeSocket.getAndSet(null)?.let { socket -> runCatching { socket.close() } }
         }
     }
 
@@ -11681,12 +11632,12 @@ private fun MtuToolPage(onBack: () -> Unit) {
                 Button(
                     onClick = {
                         if (running) {
-                            paused = !paused
-                            pauseFlag.set(paused)
+                            manuallyStopped = true
+                            job?.cancel(CancellationException("手动停止 MTU 测试"))
+                            activeSocket.getAndSet(null)?.let { socket -> runCatching { socket.close() } }
                         } else {
                             running = true
-                            paused = false
-                            pauseFlag.set(false)
+                            manuallyStopped = false
                             steps = emptyList()
                             result = null
                             job = scope.launch {
@@ -11697,15 +11648,14 @@ private fun MtuToolPage(onBack: () -> Unit) {
                                         runMode = runMode,
                                         probeMode = probeMode,
                                         timeoutMs = timeoutMs.safeInt(1200, 500, 10000),
-                                        pauseRequested = { pauseFlag.get() }
+                                        pauseRequested = { false },
+                                        activeSocket = activeSocket
                                     ) { step ->
                                         steps = steps + step
                                     }
                                 } catch (_: CancellationException) {
-                                    // 页面退出时结束当前检测，不写入错误结果。
+                                    // 手动停止或离开页面时结束本轮，不写入伪失败结果。
                                 } finally {
-                                    pauseFlag.set(false)
-                                    paused = false
                                     running = false
                                     job = null
                                 }
@@ -11713,12 +11663,12 @@ private fun MtuToolPage(onBack: () -> Unit) {
                         }
                     },
                     modifier = Modifier.fillMaxWidth().height(48.dp),
-                    shape = RoundedCornerShape(18.dp)
+                    shape = RoundedCornerShape(18.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = if (running) ErrorRed else Blue)
                 ) {
                     Text(
                         when {
-                            running && paused -> "继续测试"
-                            running -> "暂停"
+                            running -> "停止测试"
                             result != null -> "重新测试"
                             else -> "开始测试"
                         },
@@ -11727,27 +11677,27 @@ private fun MtuToolPage(onBack: () -> Unit) {
                 }
             }
         }
-        item { MtuProcessCard(running = running, paused = paused, steps = steps, result = result) }
+        item { MtuProcessCard(running = running, manuallyStopped = manuallyStopped, steps = steps, result = result) }
         item { Spacer(Modifier.height(16.dp)) }
     }
 }
 
 @Composable
-private fun MtuProcessCard(running: Boolean, paused: Boolean, steps: List<MtuStep>, result: MtuResult?) {
+private fun MtuProcessCard(running: Boolean, manuallyStopped: Boolean, steps: List<MtuStep>, result: MtuResult?) {
     SoftCompactToolCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("检测过程", color = TextDark, fontWeight = FontWeight.ExtraBold, fontSize = 14.sp, modifier = Modifier.weight(1f))
             val stateText = when {
-                paused -> "已暂停"
                 running -> "运行中"
                 result != null -> "完成"
+                manuallyStopped -> "已停止"
                 else -> "等待"
             }
-            Text(stateText, color = if (running) Blue else Muted, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            Text(stateText, color = if (running) Blue else if (manuallyStopped) ErrorRed else Muted, fontSize = 11.sp, fontWeight = FontWeight.Bold)
         }
         if (steps.isEmpty()) {
             Text(
-                if (paused) "检测已暂停，点击继续测试后从当前进度恢复。" else "开始后会自动寻找路径可稳定通过的最大数据包。",
+                if (manuallyStopped) "本轮 MTU 测试已手动停止，点击开始测试可重新检测。" else "开始后会自动寻找路径可稳定通过的最大数据包。",
                 color = Muted,
                 fontSize = 11.sp,
                 lineHeight = 15.sp
@@ -11806,13 +11756,23 @@ private fun RoamingToolPage(onBack: () -> Unit) {
     var customPingTimeout by remember { mutableStateOf(false) }
     var networkLostAtMs by remember { mutableStateOf<Long?>(null) }
     var running by remember { mutableStateOf(false) }
+    var pausedForBackground by remember { mutableStateOf(false) }
+    var backgroundAtElapsedMs by remember { mutableStateOf<Long?>(null) }
+    var totalPausedMs by remember { mutableStateOf(0L) }
+    var roamingSegmentId by remember { mutableStateOf(0) }
+    var backgroundTimeoutJob by remember { mutableStateOf<Job?>(null) }
     var job by remember { mutableStateOf<Job?>(null) }
+    val rawWifiSamples = remember { mutableListOf<RoamingWifiSample>() }
+    val rawPingSamples = remember { mutableListOf<RoamingPingSample>() }
     val wifiSamples = remember { mutableStateListOf<RoamingWifiSample>() }
     val pingSamples = remember { mutableStateListOf<RoamingPingSample>() }
     var networkEvents by remember { mutableStateOf<List<RoamingNetworkEvent>>(emptyList()) }
     var runStartMs by remember { mutableStateOf<Long?>(null) }
     var savedRunId by remember { mutableStateOf<Long?>(null) }
-    var history by remember { mutableStateOf(loadRoamingHistory(context.applicationContext)) }
+    var history by remember {
+        recoverInterruptedRoamingCheckpoint(context.applicationContext)
+        mutableStateOf(loadRoamingHistory(context.applicationContext))
+    }
     var showHistory by remember { mutableStateOf(false) }
     var expandedHistoryIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
     var lastCapabilitySignature by remember { mutableStateOf("") }
@@ -11824,7 +11784,8 @@ private fun RoamingToolPage(onBack: () -> Unit) {
 
     fun appendNetworkEvent(label: String) {
         val now = SystemClock.elapsedRealtime()
-        val elapsed = runStartMs?.let { ((now - it) / 1000L).toInt().coerceAtLeast(0) } ?: 0
+        val currentPauseMs = backgroundAtElapsedMs?.let { (now - it).coerceAtLeast(0L) } ?: 0L
+        val elapsed = runStartMs?.let { ((now - it - totalPausedMs - currentPauseMs) / 1000L).toInt().coerceAtLeast(0) } ?: 0
         // 事件去重：ConnectivityManager 可能连续回调完全相同的能力/链路内容，避免事件区刷屏。
         val last = networkEvents.lastOrNull()
         if (last?.label == label) return
@@ -11835,22 +11796,45 @@ private fun RoamingToolPage(onBack: () -> Unit) {
         )).takeLast(40)
     }
 
-    fun saveCurrentRunIfNeeded() {
+    fun saveCurrentRunIfNeeded(finalSave: Boolean = true) {
         val runId = runStartMs ?: return
-        if (savedRunId == runId || (wifiSamples.isEmpty() && pingSamples.isEmpty())) return
-        val events = buildRoamingSwitchEvents(wifiSamples, pingSamples)
-        val record = buildRoamingHistoryRecord(targetMode, externalTarget, wifiSamples, pingSamples, events, networkEvents)
+        if ((finalSave && savedRunId == runId) || (rawWifiSamples.isEmpty() && rawPingSamples.isEmpty())) return
+        val events = buildRoamingSwitchEvents(rawWifiSamples, rawPingSamples)
+        val record = buildRoamingHistoryRecord(
+            recordId = runId,
+            targetMode = targetMode,
+            externalTarget = externalTarget,
+            wifiSamples = rawWifiSamples,
+            pingSamples = rawPingSamples,
+            events = events,
+            networkEvents = networkEvents
+        )
         saveRoamingHistory(context.applicationContext, record)
         history = loadRoamingHistory(context.applicationContext)
-        savedRunId = runId
+        if (finalSave) savedRunId = runId
     }
 
     fun stop(reason: String = "手动停止") {
         job?.cancel()
         job = null
+        backgroundTimeoutJob?.cancel()
+        backgroundTimeoutJob = null
         if (running && reason != "手动停止") appendNetworkEvent("网络事件：$reason")
         if (running) saveCurrentRunIfNeeded()
         running = false
+        pausedForBackground = false
+        backgroundAtElapsedMs = null
+        context.applicationContext.getSharedPreferences("roaming_runtime_checkpoint", Context.MODE_PRIVATE).edit().clear().apply()
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            backgroundTimeoutJob?.cancel()
+            if (running) {
+                saveCurrentRunIfNeeded(finalSave = true)
+                job?.cancel()
+            }
+        }
     }
 
     DisposableEffect(running, runStartMs) {
@@ -11861,6 +11845,7 @@ private fun RoamingToolPage(onBack: () -> Unit) {
             val callback = object : ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: Network) {
                     scope.launch {
+                        if (pausedForBackground) return@launch
                         val lostAt = networkLostAtMs
                         networkLostAtMs = null
                         if (lostAt != null) {
@@ -11874,6 +11859,7 @@ private fun RoamingToolPage(onBack: () -> Unit) {
 
                 override fun onLost(network: Network) {
                     scope.launch {
+                        if (pausedForBackground) return@launch
                         val lostAt = SystemClock.elapsedRealtime()
                         networkLostAtMs = lostAt
                         appendNetworkEvent("网络事件：网络丢失/可能切换，等待 ${ROAMING_NETWORK_LOST_GRACE_MS / 1000}s 恢复")
@@ -11886,6 +11872,7 @@ private fun RoamingToolPage(onBack: () -> Unit) {
                 }
 
                 override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
+                    if (pausedForBackground) return
                     val transport = when {
                         networkCapabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "WiFi"
                         networkCapabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "蜂窝"
@@ -11905,6 +11892,7 @@ private fun RoamingToolPage(onBack: () -> Unit) {
                 }
 
                 override fun onLinkPropertiesChanged(network: Network, linkProperties: LinkProperties) {
+                    if (pausedForBackground) return
                     val dnsCount = linkProperties.dnsServers.size
                     val iface = linkProperties.interfaceName ?: "未知接口"
                     val mtu = linkProperties.mtu.takeIf { it > 0 }
@@ -11928,12 +11916,54 @@ private fun RoamingToolPage(onBack: () -> Unit) {
             onDispose { }
         } else {
             val observer = LifecycleEventObserver { _, event ->
-                if (event == Lifecycle.Event.ON_STOP && running) {
-                    stop("APP进入后台/锁屏，漫游测试已中断并保存")
+                when (event) {
+                    Lifecycle.Event.ON_STOP -> if (running && !pausedForBackground) {
+                        val backgroundAt = SystemClock.elapsedRealtime()
+                        backgroundAtElapsedMs = backgroundAt
+                        pausedForBackground = true
+                        appendNetworkEvent("APP进入后台/锁屏，采样与辅助 Ping 已暂停")
+                        saveCurrentRunIfNeeded(finalSave = false)
+                        context.applicationContext.getSharedPreferences("roaming_runtime_checkpoint", Context.MODE_PRIVATE).edit()
+                            .putLong("run_id", runStartMs ?: 0L)
+                            .putLong("background_wall_ms", System.currentTimeMillis())
+                            .apply()
+                        backgroundTimeoutJob?.cancel()
+                        backgroundTimeoutJob = scope.launch {
+                            delay(10_000L)
+                            if (running && pausedForBackground && backgroundAtElapsedMs == backgroundAt) {
+                                stop("进入后台超过10秒")
+                            }
+                        }
+                    }
+                    Lifecycle.Event.ON_START -> if (running && pausedForBackground) {
+                        val backgroundAt = backgroundAtElapsedMs ?: SystemClock.elapsedRealtime()
+                        val pausedMs = (SystemClock.elapsedRealtime() - backgroundAt).coerceAtLeast(0L)
+                        if (pausedMs > 10_000L) {
+                            stop("进入后台超过10秒")
+                        } else {
+                            backgroundTimeoutJob?.cancel()
+                            backgroundTimeoutJob = null
+                            totalPausedMs += pausedMs
+                            roamingSegmentId += 1
+                            pausedForBackground = false
+                            backgroundAtElapsedMs = null
+                            appendNetworkEvent("返回前台，重新建立 Wi-Fi 基线并开始新片段；后台 ${pausedMs}ms 不计入统计")
+                            context.applicationContext.getSharedPreferences("roaming_runtime_checkpoint", Context.MODE_PRIVATE).edit().clear().apply()
+                        }
+                    }
+                    else -> Unit
                 }
             }
             lifecycleOwner.lifecycle.addObserver(observer)
             onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+        }
+    }
+
+    DisposableEffect(running, context) {
+        val activity = context as? ComponentActivity
+        if (running) activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        onDispose {
+            activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         }
     }
 
@@ -12046,11 +12076,17 @@ private fun RoamingToolPage(onBack: () -> Unit) {
                                 }
                                 wifiSamples.clear()
                                 pingSamples.clear()
+                                rawWifiSamples.clear()
+                                rawPingSamples.clear()
                                 networkEvents = emptyList()
                                 val startNanos = SystemClock.elapsedRealtimeNanos()
                                 val startElapsedMs = SystemClock.elapsedRealtime()
                                 runStartMs = startElapsedMs
                                 savedRunId = null
+                                pausedForBackground = false
+                                backgroundAtElapsedMs = null
+                                totalPausedMs = 0L
+                                roamingSegmentId = 0
                                 running = true
                                 appendNetworkEvent("开始监听网络事件")
                                 val interval = pingIntervalMs.safeInt(500, 100, 10_000)
@@ -12064,52 +12100,94 @@ private fun RoamingToolPage(onBack: () -> Unit) {
                                 job = scope.launch {
                                     launch {
                                         while (currentCoroutineContext().isActive) {
+                                            if (pausedForBackground) {
+                                                delay(500L)
+                                                continue
+                                            }
+                                            wifiSamples.clear()
+                                            wifiSamples.addAll(downsampleRoamingSignalForDisplay(rawWifiSamples, bucketMs = 500L).takeLast(4_000))
+                                            pingSamples.clear()
+                                            pingSamples.addAll(rawPingSamples.takeLast(4_000))
+                                            delay(500L)
+                                        }
+                                    }
+                                    launch {
+                                        while (currentCoroutineContext().isActive) {
+                                            if (pausedForBackground) {
+                                                delay(50L)
+                                                continue
+                                            }
                                             val tickAt = SystemClock.elapsedRealtime()
-                                            wifiSamples.add(readRoamingWifiSample(context.applicationContext, startNanos))
-                                            if (wifiSamples.size > 72_000) wifiSamples.removeAt(0)
+                                            rawWifiSamples.add(readRoamingWifiSample(context.applicationContext, startNanos, totalPausedMs, roamingSegmentId))
+                                            if (rawWifiSamples.size > 72_000) rawWifiSamples.removeAt(0)
                                             val spent = SystemClock.elapsedRealtime() - tickAt
                                             delay((ROAMING_WIFI_SAMPLE_INTERVAL_MS - spent).coerceAtLeast(1L))
                                         }
                                     }
                                     if (activeMode != RoamingTargetMode.EXTERNAL) launch {
                                         while (currentCoroutineContext().isActive) {
+                                            if (pausedForBackground) {
+                                                delay(50L)
+                                                continue
+                                            }
                                             val tickClock = SystemClock.elapsedRealtime()
-                                            val tickAt = (tickClock - startElapsedMs).coerceAtLeast(0L)
+                                            val segmentAtStart = roamingSegmentId
+                                            val tickAt = (tickClock - startElapsedMs - totalPausedMs).coerceAtLeast(0L)
                                             val gateway = if (isWifiNetworkReady(context.applicationContext, requireValidated = false)) readGatewayAddress(context.applicationContext) else null
                                             if (!gateway.isNullOrBlank()) {
                                                 val result = pingForRoaming(gateway, timeout)
-                                                pingSamples.add(RoamingPingSample(
+                                                if (pausedForBackground || roamingSegmentId != segmentAtStart) continue
+                                                rawPingSamples.add(RoamingPingSample(
                                                     timeText = SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()).format(Date()),
                                                     target = RoamingPingTarget.GATEWAY,
                                                     startedElapsedMs = tickAt,
-                                                    completedElapsedMs = (SystemClock.elapsedRealtime() - startElapsedMs).coerceAtLeast(tickAt),
+                                                    completedElapsedMs = (SystemClock.elapsedRealtime() - startElapsedMs - totalPausedMs).coerceAtLeast(tickAt),
                                                     attempted = true,
                                                     latencyMs = result.latencyMs,
-                                                    failureReason = result.failure
+                                                    failureReason = result.failure,
+                                                    segmentId = segmentAtStart
                                                 ))
-                                                if (pingSamples.size > 10_000) pingSamples.removeAt(0)
+                                                if (rawPingSamples.size > 10_000) rawPingSamples.removeAt(0)
                                             }
                                             delay((interval - (SystemClock.elapsedRealtime() - tickClock)).coerceAtLeast(1L))
                                         }
                                     }
                                     if (activeMode != RoamingTargetMode.GATEWAY) launch {
                                         while (currentCoroutineContext().isActive) {
+                                            if (pausedForBackground) {
+                                                delay(50L)
+                                                continue
+                                            }
                                             val tickClock = SystemClock.elapsedRealtime()
-                                            val tickAt = (tickClock - startElapsedMs).coerceAtLeast(0L)
+                                            val segmentAtStart = roamingSegmentId
+                                            val tickAt = (tickClock - startElapsedMs - totalPausedMs).coerceAtLeast(0L)
                                             if (isWifiNetworkReady(context.applicationContext, requireValidated = true)) {
                                                 val result = pingForRoaming(activeExternalTarget, timeout)
-                                                pingSamples.add(RoamingPingSample(
+                                                if (pausedForBackground || roamingSegmentId != segmentAtStart) continue
+                                                rawPingSamples.add(RoamingPingSample(
                                                     timeText = SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()).format(Date()),
                                                     target = RoamingPingTarget.EXTERNAL,
                                                     startedElapsedMs = tickAt,
-                                                    completedElapsedMs = (SystemClock.elapsedRealtime() - startElapsedMs).coerceAtLeast(tickAt),
+                                                    completedElapsedMs = (SystemClock.elapsedRealtime() - startElapsedMs - totalPausedMs).coerceAtLeast(tickAt),
                                                     attempted = true,
                                                     latencyMs = result.latencyMs,
-                                                    failureReason = result.failure
+                                                    failureReason = result.failure,
+                                                    segmentId = segmentAtStart
                                                 ))
-                                                if (pingSamples.size > 10_000) pingSamples.removeAt(0)
+                                                if (rawPingSamples.size > 10_000) rawPingSamples.removeAt(0)
                                             }
                                             delay((interval - (SystemClock.elapsedRealtime() - tickClock)).coerceAtLeast(1L))
+                                        }
+                                    }
+                                }
+                                job?.invokeOnCompletion { error ->
+                                    if (error != null) {
+                                        scope.launch {
+                                            if (running && !pausedForBackground) {
+                                                appendNetworkEvent("漫游任务异常结束：${error.message ?: error.javaClass.simpleName}")
+                                                saveCurrentRunIfNeeded(finalSave = true)
+                                                running = false
+                                            }
                                         }
                                     }
                                 }
@@ -12208,24 +12286,33 @@ private fun RoamingHistoryDialog(
     onToggle: (Long) -> Unit,
     onDelete: (Long) -> Unit
 ) {
+    val sizeKb = remember(records) { roamingHistorySizeKb(records) }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("漫游历史", fontWeight = FontWeight.ExtraBold) },
         text = {
-            if (records.isEmpty()) {
-                Text("暂无漫游测试历史。停止一次测试后会自动保存，最多保留10条。", color = Muted, fontSize = 12.sp)
-            } else {
-                LazyColumn(
-                    modifier = Modifier.heightIn(max = 460.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    items(records, key = { it.id }) { record ->
-                        RoamingHistoryItem(
-                            record = record,
-                            expanded = record.id in expandedIds,
-                            onToggle = { onToggle(record.id) },
-                            onDelete = { onDelete(record.id) }
-                        )
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(
+                    "已保存 ${records.size}/10 条 · 占用 ${String.format(Locale.US, "%.1f", sizeKb)} KB",
+                    color = Muted,
+                    fontSize = 11.sp
+                )
+                if (records.isEmpty()) {
+                    Text("暂无漫游测试历史。停止一次测试后会自动保存，最多保留10条。", color = Muted, fontSize = 12.sp)
+                } else {
+                    LazyColumn(
+                        modifier = Modifier.heightIn(max = 430.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        items(records, key = { it.id }) { record ->
+                            SwipeDeleteToolBox(onDelete = { onDelete(record.id) }, stateKey = record.id) {
+                                RoamingHistoryItem(
+                                    record = record,
+                                    expanded = record.id in expandedIds,
+                                    onToggle = { onToggle(record.id) }
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -12238,15 +12325,14 @@ private fun RoamingHistoryDialog(
 private fun RoamingHistoryItem(
     record: RoamingHistoryRecord,
     expanded: Boolean,
-    onToggle: () -> Unit,
-    onDelete: () -> Unit
+    onToggle: () -> Unit
 ) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = ShapeM,
         color = Color.White,
-        tonalElevation = 1.dp,
-        shadowElevation = 1.dp,
+        tonalElevation = 0.dp,
+        shadowElevation = 0.dp,
         border = BorderStroke(1.dp, Border.copy(alpha = 0.72f))
     ) {
         Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
@@ -12255,7 +12341,6 @@ private fun RoamingHistoryItem(
                     Text(record.timeText, color = TextDark, fontWeight = FontWeight.Bold, fontSize = 13.sp)
                     Text("${record.durationText} · ${record.targetText} · 漫游${record.eventLines.size}次", color = Muted, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
-                IconButton(onClick = onDelete) { Icon(Icons.Filled.DeleteOutline, contentDescription = null, tint = ErrorRed) }
                 TextButton(onClick = onToggle) { Text(if (expanded) "收起" else "展开", fontSize = 11.sp) }
             }
             if (expanded) {
@@ -12427,14 +12512,17 @@ private fun RoamingPingCanvas(
         }
         fun y(v: Int) = bottom - (v.coerceIn(0, axisMax) / axisMax.toFloat()) * h
         fun drawLatencyLine(target: RoamingPingTarget, color: Color) {
-            val path = Path()
-            var started = false
-            plot.filter { it.target == target }.forEach { sample ->
-                val latency = sample.latencyMs ?: return@forEach
-                if (!started) { path.moveTo(x(sample.startedElapsedMs), y(latency)); started = true }
-                else path.lineTo(x(sample.startedElapsedMs), y(latency))
+            plot.filter { it.target == target }.groupBy { it.segmentId }.values.forEach { segment ->
+                val path = Path()
+                var started = false
+                segment.forEach { sample ->
+                    sample.latencyMs?.let { latency ->
+                        if (!started) { path.moveTo(x(sample.startedElapsedMs), y(latency)); started = true }
+                        else path.lineTo(x(sample.startedElapsedMs), y(latency))
+                    }
+                }
+                if (started) drawPath(path, color, style = Stroke(width = 3f, cap = StrokeCap.Round))
             }
-            drawPath(path, color, style = Stroke(width = 3f, cap = StrokeCap.Round))
         }
         drawLatencyLine(RoamingPingTarget.GATEWAY, Blue)
         drawLatencyLine(RoamingPingTarget.EXTERNAL, Purple)
@@ -12524,6 +12612,7 @@ private fun RoamingSignalCanvas(
                 moveTo(x(before.elapsedMs), yRssi(beforeRssi))
                 lineTo(x(after.elapsedMs), yRssi(afterRssi))
             }
+            if (before.segmentId != after.segmentId) return@forEach
             val switched = !beforeBssid.equals(afterBssid, ignoreCase = true)
             drawPath(
                 segment,
@@ -12680,7 +12769,15 @@ private fun RoamingIntervalField(value: String, onValueChange: (String) -> Unit)
         }
         Box {
             TextButton(onClick = { expanded = true }) { Text("预设", fontSize = 11.sp) }
-            DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            DropdownMenu(
+                expanded = expanded,
+                onDismissRequest = { expanded = false },
+                shape = RoundedCornerShape(16.dp),
+                containerColor = GlassPopupSurface,
+                tonalElevation = 0.dp,
+                shadowElevation = 0.dp,
+                border = BorderStroke(1.dp, GlassPopupBorder)
+            ) {
                 RoamingPingIntervalPresets.forEach { preset ->
                     DropdownMenuItem(
                         text = { Text("${preset}ms", fontSize = 12.sp) },
@@ -12706,7 +12803,15 @@ private fun RoamingTimeoutField(
         }
         Box {
             TextButton(onClick = { expanded = true }) { Text(if (custom) "预设" else "自动", fontSize = 11.sp) }
-            DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            DropdownMenu(
+                expanded = expanded,
+                onDismissRequest = { expanded = false },
+                shape = RoundedCornerShape(16.dp),
+                containerColor = GlassPopupSurface,
+                tonalElevation = 0.dp,
+                shadowElevation = 0.dp,
+                border = BorderStroke(1.dp, GlassPopupBorder)
+            ) {
                 DropdownMenuItem(
                     text = { Text("自动", fontSize = 12.sp) },
                     onClick = { onAuto(); expanded = false }
@@ -12825,48 +12930,125 @@ private fun PolicyPicker(current: ToolIpPolicy, onPick: (ToolIpPolicy) -> Unit) 
                         }
                     }
                 },
-                shape = ShapeL
+                shape = GlassPopupShape
             )
         }
     }
 }
 
 @Composable
-private fun SwipeDeleteToolBox(onDelete: () -> Unit, content: @Composable () -> Unit) {
+private fun SwipeDeleteToolBox(
+    onDelete: () -> Unit,
+    stateKey: Any? = Unit,
+    shape: androidx.compose.ui.graphics.Shape = RoundedCornerShape(16.dp),
+    swipeEnabled: Boolean = true,
+    deleteActionHeight: Dp = 56.dp,
+    content: @Composable () -> Unit
+) {
     val revealWidthPx = with(LocalDensity.current) { 58.dp.toPx() }
     val thresholdPx = revealWidthPx * 0.42f
-    var dragOffset by remember { mutableStateOf(0f) }
-    val animatedOffset by animateFloatAsState(dragOffset, tween(190, easing = FastOutSlowInEasing), label = "toolSwipe")
-    Box(modifier = Modifier.fillMaxWidth()) {
+    val scope = rememberCoroutineScope()
+    val offsetAnimation = remember(stateKey) { Animatable(0f) }
+    var dragOffset by remember(stateKey) { mutableStateOf(0f) }
+    var isDragging by remember(stateKey) { mutableStateOf(false) }
+    val displayedOffset = if (isDragging) dragOffset else offsetAnimation.value
+    val isRevealed = displayedOffset <= -revealWidthPx * 0.9f
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(shape)
+            .background(Color.Transparent)
+    ) {
         Box(
             modifier = Modifier
                 .align(Alignment.CenterEnd)
                 .width(52.dp)
-                .height(56.dp)
-                .background(RedSoft, RoundedCornerShape(16.dp))
-                .border(1.dp, ErrorRed.copy(alpha = 0.20f), RoundedCornerShape(16.dp))
+                .height(deleteActionHeight)
+                .background(DeleteActionSurface, RoundedCornerShape(16.dp))
                 .clickable(onClick = onDelete),
             contentAlignment = Alignment.Center
         ) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Icon(Icons.Filled.DeleteOutline, contentDescription = "删除", tint = ErrorRed, modifier = Modifier.width(17.dp).height(17.dp))
-                Text("删除", color = ErrorRed, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                Icon(Icons.Filled.DeleteOutline, contentDescription = "删除", tint = Color.White, modifier = Modifier.width(17.dp).height(17.dp))
+                Text("删除", color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold)
             }
         }
         Box(
             modifier = Modifier
-                .offset { IntOffset(animatedOffset.roundToInt(), 0) }
-                .pointerInput(Unit) {
-                    detectHorizontalDragGestures(
-                        onDragEnd = { dragOffset = if (dragOffset <= -thresholdPx) -revealWidthPx else 0f },
-                        onDragCancel = { dragOffset = 0f },
-                        onHorizontalDrag = { change, dragAmount ->
-                            change.consume()
-                            dragOffset = (dragOffset + dragAmount).coerceIn(-revealWidthPx, 0f)
+                .fillMaxWidth()
+                .heightIn(min = 56.dp)
+                .offset { IntOffset(displayedOffset.roundToInt(), 0) }
+                .clip(shape)
+                .background(GlassSwipeSurface)
+                .pointerInput(stateKey, swipeEnabled) {
+                    if (!swipeEnabled) return@pointerInput
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                        var totalX = 0f
+                        var totalY = 0f
+                        var horizontalDrag = false
+                        while (true) {
+                            val event = awaitPointerEvent(PointerEventPass.Initial)
+                            val change = event.changes.firstOrNull { it.id == down.id }
+                            if (change == null || !change.pressed) break
+                            val delta = change.positionChange()
+                            totalX += delta.x
+                            totalY += delta.y
+
+                            if (!horizontalDrag) {
+                                val touchSlop = viewConfiguration.touchSlop
+                                if (kotlin.math.abs(totalY) > touchSlop && kotlin.math.abs(totalY) >= kotlin.math.abs(totalX)) {
+                                    break
+                                }
+                                val opening = totalX < -touchSlop
+                                val closing = offsetAnimation.value < -0.5f && totalX > touchSlop
+                                if (!opening && !closing) {
+                                    if (totalX > touchSlop) break
+                                    continue
+                                }
+                                dragOffset = offsetAnimation.value
+                                isDragging = true
+                                horizontalDrag = true
+                                dragOffset = (dragOffset + totalX).coerceIn(-revealWidthPx, 0f)
+                                change.consume()
+                            } else {
+                                dragOffset = (dragOffset + delta.x).coerceIn(-revealWidthPx, 0f)
+                                change.consume()
+                            }
                         }
-                    )
+
+                        if (horizontalDrag) {
+                            val releaseOffset = dragOffset
+                            val targetOffset = if (releaseOffset <= -thresholdPx) -revealWidthPx else 0f
+                            scope.launch {
+                                offsetAnimation.snapTo(releaseOffset)
+                                isDragging = false
+                                offsetAnimation.animateTo(targetOffset, tween(190, easing = FastOutSlowInEasing))
+                                dragOffset = targetOffset
+                            }
+                        }
+                    }
                 }
-        ) { content() }
+        ) {
+            content()
+            if (isRevealed && !isDragging) {
+                Box(
+                    modifier = Modifier
+                        .matchParentSize()
+                        .clickable(
+                            interactionSource = remember(stateKey) { MutableInteractionSource() },
+                            indication = null
+                        ) {
+                            val releaseOffset = offsetAnimation.value
+                            scope.launch {
+                                offsetAnimation.snapTo(releaseOffset)
+                                offsetAnimation.animateTo(0f, tween(190, easing = FastOutSlowInEasing))
+                                dragOffset = 0f
+                            }
+                        }
+                )
+            }
+        }
     }
 }
 
@@ -12951,14 +13133,18 @@ private fun TracketRecordCard(record: TracketToolRecord, expanded: Boolean, onTo
 
 @Composable
 private fun SoftCompactToolCard(modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) {
-    Card(
-        modifier = modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.98f)),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
-    ) {
-        Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp), content = content)
-    }
+    val shape = RoundedCornerShape(16.dp)
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(shape)
+            .background(GlassCompactBrush)
+            .border(1.dp, GlassBorderBrush, shape)
+            .then(modifier)
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+        content = content
+    )
 }
 
 @Composable
@@ -13170,6 +13356,97 @@ private fun InfoMetricTile(
 }
 
 
+private enum class ChartGestureMode { Undecided, VerticalScroll, HorizontalPan, PinchZoom, Finished }
+
+private fun Modifier.chartGestureModifier(
+    onHorizontalPan: (Float) -> Unit,
+    onPinchTransform: (centroidX: Float, panX: Float, zoom: Float) -> Unit,
+    onTap: ((Offset) -> Unit)? = null,
+    onDoubleTap: (() -> Unit)? = null
+): Modifier = composed {
+    val currentHorizontalPan by rememberUpdatedState(onHorizontalPan)
+    val currentPinchTransform by rememberUpdatedState(onPinchTransform)
+    val currentTap by rememberUpdatedState(onTap)
+    val currentDoubleTap by rememberUpdatedState(onDoubleTap)
+
+    pointerInput(Unit) {
+        var lastTapAt = 0L
+        var lastTapPosition = Offset.Unspecified
+        awaitEachGesture {
+            var event = awaitPointerEvent()
+            while (event.changes.none { it.pressed }) event = awaitPointerEvent()
+
+            val down = event.changes.first { it.pressed }
+            val downPosition = down.position
+            var lastPosition = downPosition
+            var upPosition = downPosition
+            var totalDx = 0f
+            var totalDy = 0f
+            var mode = ChartGestureMode.Undecided
+            var hadMultiplePointers = false
+
+            while (event.changes.any { it.pressed }) {
+                val pressed = event.changes.filter { it.pressed }
+                if (pressed.size >= 2) {
+                    hadMultiplePointers = true
+                    mode = ChartGestureMode.PinchZoom
+                    val zoom = event.calculateZoom()
+                    val pan = event.calculatePan()
+                    val centroid = event.calculateCentroid(useCurrent = true)
+                    if (zoom != 1f || pan.x != 0f) {
+                        currentPinchTransform(centroid.x, pan.x, zoom)
+                    }
+                    event.changes.forEach { change ->
+                        if (change.pressed) change.consume()
+                    }
+                } else if (hadMultiplePointers) {
+                    // A pinch stays a pinch until every pointer is up; do not turn the remaining finger into a pan.
+                    mode = ChartGestureMode.Finished
+                } else {
+                    val change = pressed.firstOrNull()
+                    if (change != null) {
+                        val delta = change.position - lastPosition
+                        lastPosition = change.position
+                        upPosition = change.position
+                        totalDx += delta.x
+                        totalDy += delta.y
+                        if (mode == ChartGestureMode.Undecided &&
+                            kotlin.math.hypot(totalDx.toDouble(), totalDy.toDouble()) > viewConfiguration.touchSlop.toDouble()
+                        ) {
+                            mode = if (kotlin.math.abs(totalDx) > kotlin.math.abs(totalDy) * 1.2f) {
+                                ChartGestureMode.HorizontalPan
+                            } else {
+                                ChartGestureMode.VerticalScroll
+                            }
+                        }
+                        if (mode == ChartGestureMode.HorizontalPan) {
+                            currentHorizontalPan(delta.x)
+                            change.consume()
+                        }
+                    }
+                }
+                event = awaitPointerEvent()
+            }
+
+            if (mode == ChartGestureMode.Undecided && !hadMultiplePointers) {
+                val tapAt = event.changes.maxOfOrNull { it.uptimeMillis } ?: down.uptimeMillis
+                val isDoubleTap = lastTapAt > 0L &&
+                    tapAt - lastTapAt in viewConfiguration.doubleTapMinTimeMillis..viewConfiguration.doubleTapTimeoutMillis &&
+                    (upPosition - lastTapPosition).getDistance() <= viewConfiguration.touchSlop * 2f
+                if (isDoubleTap) {
+                    currentDoubleTap?.invoke()
+                    lastTapAt = 0L
+                    lastTapPosition = Offset.Unspecified
+                } else {
+                    currentTap?.invoke(upPosition)
+                    lastTapAt = tapAt
+                    lastTapPosition = upPosition
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun PingCompactChartCard(
     pingPoints: List<PingPoint>,
@@ -13178,10 +13455,8 @@ private fun PingCompactChartCard(
     running: Boolean,
     durationMs: Long,
     jitterMs: Double?,
-    logCount: Int,
     onStart: () -> Unit,
     onStop: () -> Unit,
-    onClear: () -> Unit,
     onLog: () -> Unit
 ) {
     val stats = remember(pingPoints) {
@@ -13237,15 +13512,10 @@ private fun PingCompactChartCard(
                 Spacer(Modifier.width(4.dp))
                 Text(if (running) "停止 Ping" else "开始 Ping", fontSize = 12.sp, fontWeight = FontWeight.Bold)
             }
-            OutlinedButton(onClick = onLog, modifier = Modifier.weight(0.8f).height(38.dp), shape = ShapeM) {
+            OutlinedButton(onClick = onLog, modifier = Modifier.weight(1f).height(38.dp), shape = ShapeM) {
                 Icon(Icons.Filled.Article, contentDescription = null, modifier = Modifier.width(16.dp).height(16.dp))
                 Spacer(Modifier.width(4.dp))
-                Text("历史 $logCount", fontSize = 12.sp)
-            }
-            OutlinedButton(onClick = onClear, modifier = Modifier.weight(0.65f).height(38.dp), shape = ShapeM) {
-                Icon(Icons.Filled.DeleteOutline, contentDescription = null, modifier = Modifier.width(16.dp).height(16.dp))
-                Spacer(Modifier.width(4.dp))
-                Text("清空", fontSize = 12.sp)
+                Text("测试历史", fontSize = 12.sp)
             }
         }
     }
@@ -13272,8 +13542,9 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
         running -> 60_000L
         else -> fullSpanMs
     }
-    var stoppedZoomSpanMs by remember { mutableStateOf<Long?>(null) }
-    val windowSpanMs = if (running) liveWindowSpanMs else (stoppedZoomSpanMs ?: fullSpanMs).coerceIn(1_000L, fullSpanMs)
+    var zoomSpanMs by remember { mutableStateOf<Long?>(null) }
+    val defaultWindowSpanMs = if (running) liveWindowSpanMs else fullSpanMs
+    val windowSpanMs = (zoomSpanMs ?: defaultWindowSpanMs).coerceIn(1_000L, fullSpanMs)
     var autoFollow by remember { mutableStateOf(true) }
     var viewEndMs by remember { mutableStateOf(windowSpanMs) }
     var chartWidthPx by remember { mutableStateOf(1f) }
@@ -13283,13 +13554,13 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
     LaunchedEffect(firstPointKey, allPoints.isEmpty()) {
         selectedPoint = null
         autoFollow = true
-        stoppedZoomSpanMs = null
+        zoomSpanMs = null
     }
 
     LaunchedEffect(running, latestMs, fullSpanMs) {
         if (!running && allPoints.isNotEmpty()) {
             // 测试停止后自动缩放到全局概览。
-            stoppedZoomSpanMs = fullSpanMs
+            zoomSpanMs = fullSpanMs
             autoFollow = false
             viewEndMs = latestMs.coerceAtLeast(fullSpanMs)
         }
@@ -13382,9 +13653,10 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
                     onClick = {
                         if (running) autoFollow = true
                         else {
-                            stoppedZoomSpanMs = fullSpanMs
+                            zoomSpanMs = fullSpanMs
                             viewEndMs = latestMs.coerceAtLeast(fullSpanMs)
                         }
+                        if (running) zoomSpanMs = null
                     },
                     compact = true
                 )
@@ -13401,55 +13673,44 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
                 modifier = Modifier
                     .fillMaxSize()
                     .onSizeChanged { chartWidthPx = it.width.toFloat().coerceAtLeast(1f) }
-                    .pointerInput(visible, viewStartMs, effectiveViewEndMs, windowSpanMs, latestMs) {
-                        detectTapGestures(
-                            onDoubleTap = {
-                                if (running) autoFollow = true
-                                else {
-                                    stoppedZoomSpanMs = fullSpanMs
-                                    viewEndMs = latestMs.coerceAtLeast(fullSpanMs)
-                                }
-                            },
-                            onTap = { offset ->
-                                val left = 82f
-                                val right = size.width - 34f
-                                val plotW = (right - left).coerceAtLeast(1f)
-                                val x = offset.x.coerceIn(left, right)
-                                val targetMs = viewStartMs + (((x - left) / plotW) * windowSpanMs).toLong()
-                                selectedPoint = visible.minByOrNull { kotlin.math.abs(it.elapsedMs - targetMs) }
-                            }
-                        )
-                    }
-                    .pointerInput(latestMs, earliestMs, windowSpanMs, chartWidthPx, running) {
-                        detectHorizontalDragGestures { _, dragAmount ->
-                            val left = 82f
-                            val rightPad = 34f
-                            val plotW = (chartWidthPx - left - rightPad).coerceAtLeast(1f)
+                    .chartGestureModifier(
+                        onHorizontalPan = { dragAmount ->
+                            val plotW = (chartWidthPx - 82f - 34f).coerceAtLeast(1f)
                             val deltaMs = (dragAmount / plotW * windowSpanMs).toLong()
                             autoFollow = false
                             val minEnd = (earliestMs + windowSpanMs).coerceAtLeast(windowSpanMs)
                             val maxEnd = latestMs.coerceAtLeast(minEnd)
                             viewEndMs = (viewEndMs - deltaMs).coerceIn(minEnd, maxEnd)
-                        }
-                    }
-                    .pointerInput(running, fullSpanMs, windowSpanMs, latestMs, chartWidthPx) {
-                        if (!running) {
-                            detectTransformGestures { centroid, pan, zoom, _ ->
-                                val left = 82f
-                                val rightPad = 34f
-                                val plotW = (chartWidthPx - left - rightPad).coerceAtLeast(1f)
-                                val focalRatio = ((centroid.x - left) / plotW).coerceIn(0f, 1f)
-                                val focalMs = viewStartMs + (windowSpanMs * focalRatio).toLong()
-                                val newSpan = (windowSpanMs / zoom.coerceIn(0.25f, 4.0f)).toLong().coerceIn(1_000L, fullSpanMs)
-                                stoppedZoomSpanMs = newSpan
-                                val newEnd = (focalMs + ((newSpan) * (1f - focalRatio)).toLong() - (pan.x / plotW * newSpan).toLong())
-                                val minEnd = (earliestMs + newSpan).coerceAtLeast(newSpan)
-                                val maxEnd = latestMs.coerceAtLeast(minEnd)
-                                viewEndMs = newEnd.coerceIn(minEnd, maxEnd)
-                                autoFollow = false
+                        },
+                        onPinchTransform = { centroidX, panX, zoom ->
+                            val plotW = (chartWidthPx - 82f - 34f).coerceAtLeast(1f)
+                            val focalRatio = ((centroidX - 82f) / plotW).coerceIn(0f, 1f)
+                            val focalMs = viewStartMs + (windowSpanMs * focalRatio).toLong()
+                            val newSpan = (windowSpanMs / zoom.coerceIn(0.25f, 4.0f)).toLong().coerceIn(1_000L, fullSpanMs)
+                            zoomSpanMs = newSpan
+                            val newEnd = focalMs + (newSpan * (1f - focalRatio)).toLong() - (panX / plotW * newSpan).toLong()
+                            val minEnd = (earliestMs + newSpan).coerceAtLeast(newSpan)
+                            val maxEnd = latestMs.coerceAtLeast(minEnd)
+                            viewEndMs = newEnd.coerceIn(minEnd, maxEnd)
+                            autoFollow = false
+                        },
+                        onTap = { offset ->
+                            val left = 82f
+                            val right = chartWidthPx - 34f
+                            val plotW = (right - left).coerceAtLeast(1f)
+                            val x = offset.x.coerceIn(left, right)
+                            val targetMs = viewStartMs + (((x - left) / plotW) * windowSpanMs).toLong()
+                            selectedPoint = visible.minByOrNull { kotlin.math.abs(it.elapsedMs - targetMs) }
+                        },
+                        onDoubleTap = {
+                            if (running) autoFollow = true
+                            else {
+                                zoomSpanMs = fullSpanMs
+                                viewEndMs = latestMs.coerceAtLeast(fullSpanMs)
                             }
+                            if (running) zoomSpanMs = null
                         }
-                    }
+                    )
             ) {
                 val left = 82f
                 val top = 42f
@@ -13807,65 +14068,18 @@ private fun SwipeDeleteHistoryCard(
     onEditRemark: () -> Unit,
     onDelete: () -> Unit
 ) {
-    val revealWidthPx = with(LocalDensity.current) { 78.dp.toPx() }
-    val thresholdPx = revealWidthPx * 0.35f
-    var dragOffset by remember(item.id) { mutableStateOf(0f) }
-    val isRevealed = kotlin.math.abs(dragOffset) >= revealWidthPx * 0.9f
-    val revealLeft = dragOffset > 0f
-
-    Box(modifier = Modifier.fillMaxWidth()) {
-        if (isRevealed) {
-            Box(
-                modifier = Modifier
-                    .align(if (revealLeft) Alignment.CenterStart else Alignment.CenterEnd)
-                    .width(72.dp)
-                    .heightIn(min = 156.dp)
-                    .background(
-                        ErrorRed,
-                        if (revealLeft) {
-                            RoundedCornerShape(topStart = 28.dp, bottomStart = 28.dp, topEnd = 14.dp, bottomEnd = 14.dp)
-                        } else {
-                            RoundedCornerShape(topEnd = 28.dp, bottomEnd = 28.dp, topStart = 14.dp, bottomStart = 14.dp)
-                        }
-                    )
-                    .clickable(onClick = onDelete),
-                contentAlignment = Alignment.Center
-            ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Icon(Icons.Filled.DeleteOutline, contentDescription = "删除", tint = Color.White, modifier = Modifier.width(22.dp).height(22.dp))
-                    Text("删除", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                }
-            }
-        }
-
-        Box(
-            modifier = Modifier
-                .offset { IntOffset(dragOffset.roundToInt(), 0) }
-                .pointerInput(item.id) {
-                    detectHorizontalDragGestures(
-                        onDragEnd = {
-                            dragOffset = when {
-                                dragOffset <= -thresholdPx -> -revealWidthPx
-                                dragOffset >= thresholdPx -> revealWidthPx
-                                else -> 0f
-                            }
-                        },
-                        onDragCancel = { dragOffset = 0f },
-                        onHorizontalDrag = { _, dragAmount ->
-                            dragOffset = (dragOffset + dragAmount).coerceIn(-revealWidthPx, revealWidthPx)
-                        }
-                    )
-                }
-        ) {
-            HistoryCard(
-                item = item,
-                maskPrivacy = maskPrivacy,
-                onClick = {
-                    if (isRevealed) dragOffset = 0f else onClick()
-                },
-                onEditRemark = onEditRemark
-            )
-        }
+    SwipeDeleteToolBox(
+        onDelete = onDelete,
+        stateKey = item.id,
+        shape = ShapeL,
+        deleteActionHeight = 88.dp
+    ) {
+        HistoryCard(
+            item = item,
+            maskPrivacy = maskPrivacy,
+            onClick = onClick,
+            onEditRemark = onEditRemark
+        )
     }
 }
 
@@ -14124,7 +14338,7 @@ private fun BottomNav(selectedTab: MainTab, onSelect: (MainTab) -> Unit) {
         modifier = Modifier
             .fillMaxWidth()
             .height(58.dp)
-            .background(Color(0xFFEAF2FF))
+            .background(GlassNavSurface)
             .padding(horizontal = 18.dp, vertical = 4.dp),
         horizontalArrangement = Arrangement.spacedBy(10.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -14138,12 +14352,18 @@ private fun BottomNav(selectedTab: MainTab, onSelect: (MainTab) -> Unit) {
             }
             val shape = RoundedCornerShape(24.dp)
             val interactionSource = remember(tab) { MutableInteractionSource() }
+            val selectionModifier = if (selected) {
+                Modifier
+                    .background(GlassNavSelectionSurface, shape)
+            } else {
+                Modifier
+            }
             Column(
                 modifier = Modifier
                     .weight(1f)
                     .height(50.dp)
                     .clip(shape)
-                    .background(if (selected) Color(0xFFEBDCFD) else Color.Transparent, shape)
+                    .then(selectionModifier)
                     .clickable(
                         interactionSource = interactionSource,
                         indication = null,
@@ -14172,27 +14392,6 @@ private fun BottomNav(selectedTab: MainTab, onSelect: (MainTab) -> Unit) {
         }
     }
 }
-
-private fun startForegroundNotice(context: Context, text: String) {
-    val intent = Intent(context, TestForegroundService::class.java)
-        .setAction(TestForegroundService.ACTION_START)
-        .putExtra(TestForegroundService.EXTRA_TEXT, text)
-    ContextCompat.startForegroundService(context, intent)
-}
-
-private fun updateForegroundNotice(context: Context, text: String) {
-    val intent = Intent(context, TestForegroundService::class.java)
-        .setAction(TestForegroundService.ACTION_UPDATE)
-        .putExtra(TestForegroundService.EXTRA_TEXT, text)
-    ContextCompat.startForegroundService(context, intent)
-}
-
-private fun stopForegroundNotice(context: Context) {
-    val intent = Intent(context, TestForegroundService::class.java)
-        .setAction(TestForegroundService.ACTION_STOP)
-    runCatching { context.startService(intent) }
-}
-
 
 private fun compactLogText(text: String): String {
     return text
@@ -14285,8 +14484,6 @@ private fun String.onlyDigits(): String = filter { it.isDigit() }
 private val IPV4_REGEX = Regex("""\b(?:\d{1,3}\.){3}\d{1,3}\b""")
 private val IPV6_REGEX = Regex("""(?i)(?<![\w.])(?:[0-9a-f]{1,4}:){2,}[0-9a-f]{0,4}(?:%[\w.]+)?(?![\w.])""")
 
-private val BgTop = Color(0xFFF8FBFF)
-private val Bg = Color(0xFFF6F8FC)
 private val TextDark = Color(0xFF111827)
 private val Muted = Color(0xFF64748B)
 private val Border = Color(0xFFE5E7EB)
@@ -14302,3 +14499,27 @@ private val Navy = Color(0xFF0F2F6E)
 private val ShapeL = RoundedCornerShape(20.dp)
 private val ShapeM = RoundedCornerShape(14.dp)
 private val ShapeS = RoundedCornerShape(10.dp)
+
+// Apple-inspired glass tokens. A single page background plus translucent
+// surfaces keeps the visual depth without stacking multiple blur render layers.
+private val GlassBackgroundTop = Color(0xFFF4F8FF)
+private val GlassBackgroundMid = Color(0xFFF8F7FF)
+private val GlassBackgroundBottom = Color(0xFFF7F9FF)
+private val GlassBlueGlow = Color(0x5960A5FA)
+private val GlassPurpleGlow = Color(0x4FBEA7FF)
+private val GlassCardBrush = Brush.verticalGradient(
+    listOf(Color.White.copy(alpha = 0.86f), Color(0xFFF8FBFF).copy(alpha = 0.68f))
+)
+private val GlassCompactBrush = Brush.verticalGradient(
+    listOf(Color.White.copy(alpha = 0.90f), Color(0xFFF8FBFF).copy(alpha = 0.74f))
+)
+private val GlassBorderBrush = Brush.linearGradient(
+    listOf(Color.White.copy(alpha = 0.96f), Color(0xFFCBDCF4).copy(alpha = 0.58f))
+)
+private val GlassSwipeSurface = Color(0xFFF8FBFF)
+private val DeleteActionSurface = Color(0xFFE5484D)
+private val GlassNavSurface = Color(0xFFF8FBFF)
+private val GlassNavSelectionSurface = Color(0xFFE7ECFF)
+private val GlassPopupSurface = Color(0xFFF8FBFF)
+private val GlassPopupBorder = Color(0xFFD8E3F1)
+private val GlassPopupShape = RoundedCornerShape(26.dp)
