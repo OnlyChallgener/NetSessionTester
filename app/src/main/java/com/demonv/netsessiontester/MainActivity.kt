@@ -26,6 +26,10 @@ import android.os.SystemClock
 import android.provider.MediaStore
 import android.provider.Settings
 import android.telephony.TelephonyManager
+import android.telephony.CellInfo
+import android.telephony.CellInfoLte
+import android.telephony.CellInfoWcdma
+import android.telephony.CellInfoGsm
 import android.widget.Toast
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
@@ -256,7 +260,9 @@ private enum class AppToolPage {
     MTU,
     ROAMING,
     IPV6_DIAGNOSTIC,
-    PING_HISTORY
+    PING_HISTORY,
+    BUFFERBLOAT,
+    CELLULAR_INFO
 }
 
 private enum class ChartMode(val label: String) {
@@ -661,8 +667,8 @@ private fun currentAppVersionCode(context: Context): Long = runCatching {
 private fun currentAppVersionName(context: Context): String {
     return runCatching {
         val pkg = context.packageManager.getPackageInfo(context.packageName, 0)
-        pkg.versionName?.takeIf { it.isNotBlank() } ?: "v1.0.20"
-    }.getOrDefault("v1.0.20")
+        pkg.versionName?.takeIf { it.isNotBlank() } ?: "v1.0.21-beta1"
+    }.getOrDefault("v1.0.21-beta1")
 }
 
 private fun displayVersionName(raw: String): String {
@@ -4375,6 +4381,8 @@ private fun NetSessionTesterApp() {
                     },
                     onDeleteSession = { sessionId -> deletePingLogSession(sessionId) }
                 )
+                AppToolPage.BUFFERBLOAT -> BufferbloatToolPage(onBack = { appToolPage = AppToolPage.NONE })
+                AppToolPage.CELLULAR_INFO -> CellularInfoToolPage(onBack = { appToolPage = AppToolPage.NONE })
                 AppToolPage.NONE -> when (selectedTab) {
                 MainTab.SETTINGS -> SettingsPage(
                     listState = settingsListState,
@@ -4405,6 +4413,8 @@ private fun NetSessionTesterApp() {
                     onOpenTracket = { appToolPage = AppToolPage.TRACKET },
                     onOpenMtu = { appToolPage = AppToolPage.MTU },
                     onOpenRoaming = { appToolPage = AppToolPage.ROAMING },
+                    onOpenBufferbloat = { appToolPage = AppToolPage.BUFFERBLOAT },
+                    onOpenCellularInfo = { appToolPage = AppToolPage.CELLULAR_INFO },
                     onOpenIpv6Diagnostics = {
                         // 从网络信息进入时，不切到测试页；专项页退出后强制回到设置页网络信息卡片。
                         selectedTab = MainTab.SETTINGS
@@ -5423,6 +5433,8 @@ private fun SettingsPage(
     onOpenMtu: () -> Unit,
     onOpenRoaming: () -> Unit,
     onOpenIpv6Diagnostics: () -> Unit,
+    onOpenBufferbloat: () -> Unit,
+    onOpenCellularInfo: () -> Unit,
     onOpenPingSettings: () -> Unit,
     maskPrivacy: Boolean,
     onMaskPrivacyChange: (Boolean) -> Unit,
@@ -5525,6 +5537,8 @@ private fun SettingsPage(
                         onOpenMtu = onOpenMtu,
                         onOpenRoaming = onOpenRoaming,
                         onOpenIpv6Diagnostics = onOpenIpv6Diagnostics,
+                        onOpenBufferbloat = onOpenBufferbloat,
+                        onOpenCellularInfo = onOpenCellularInfo,
                         expanded = networkInfoExpanded,
                         onExpandedChange = onNetworkInfoExpandedChange
                     )
@@ -6196,7 +6210,8 @@ private fun VersionInfoDialog(
                     Text("当前版本", color = Muted, fontSize = 12.sp, modifier = Modifier.weight(1f))
                     StatusChip(displayVersionName(currentAppVersionName(LocalContext.current)), BlueSoft, Blue, compact = true)
                 }
-                VersionLine(displayVersionName(currentAppVersionName(LocalContext.current)), "连接测试与Ping调度线程池物理隔离，启用极简Socket缓冲区与Channel异步回收。")
+                VersionLine(displayVersionName(currentAppVersionName(LocalContext.current)), "新增Bufferbloat缓冲膨胀评级与5G/4G基站射频工参看板，快捷矩阵升级3行2列。")
+                VersionLine("v1.0.20", "连接测试与Ping调度线程池物理隔离，启用极简Socket缓冲区与Channel异步回收。")
                 VersionLine("v1.0.18", "历史清空增加二次确认与10秒撤销，优化删除按钮，并修复NAT、漫游历史交互。")
                 VersionLine("v1.0.17", "统一各页面滑动删除交互，公网IP改为网络变化驱动刷新。")
                 VersionLine("v1.0.16", "修复弹窗、二级页面与底部栏叠图透图，MTU暂停改为停止。")
@@ -6817,7 +6832,7 @@ private fun usesCustomNetGlyph(mark: String): Boolean = mark in setOf(
     "egress", "dns", "nslookup", "tracket", "mtu", "roaming", "ping", "∿",
     "target", "mode", "tune", "≡", "port", "host", "address", "□", "log",
     "latency", "time", "hourglass", "count", "privacy", "privacy_on", "carrier", "wifi", "confidence",
-    "note", "download", "chart"
+    "note", "download", "chart", "bufferbloat", "cellular"
 )
 
 @Composable
@@ -7061,6 +7076,18 @@ private fun NetGlyph(mark: String, color: Color, modifier: Modifier = Modifier) 
             }
             "download" -> { arrow(0.50f,0.18f,0.50f,0.62f); line(0.28f,0.78f,0.72f,0.78f) }
             "chart" -> { line(0.18f,0.74f,0.18f,0.58f); line(0.39f,0.74f,0.39f,0.42f); line(0.60f,0.74f,0.60f,0.28f); line(0.81f,0.74f,0.81f,0.50f) }
+            "bufferbloat" -> {
+                drawArc(color, 150f, 240f, false, topLeft = Offset(0.20f * w, 0.22f * h), size = androidx.compose.ui.geometry.Size(0.60f * w, 0.60f * h), style = stroke)
+                line(0.50f, 0.52f, 0.68f, 0.36f, 1f, stroke)
+                dot(0.50f, 0.52f, 0.055f)
+            }
+            "cellular" -> {
+                line(0.50f, 0.22f, 0.28f, 0.82f, 1f, stroke)
+                line(0.50f, 0.22f, 0.72f, 0.82f, 1f, stroke)
+                line(0.36f, 0.58f, 0.64f, 0.58f, 1f, stroke)
+                drawArc(color, 210f, 120f, false, topLeft = Offset(0.32f * w, 0.12f * h), size = androidx.compose.ui.geometry.Size(0.36f * w, 0.36f * h), style = thin)
+                dot(0.50f, 0.22f, 0.045f)
+            }
             else -> dot(0.50f,0.50f,0.18f)
         }
     }
@@ -9417,7 +9444,9 @@ private fun NetworkToolShortcutRow(
     onOpenNsLookup: () -> Unit,
     onOpenTracket: () -> Unit,
     onOpenMtu: () -> Unit,
-    onOpenRoaming: () -> Unit
+    onOpenRoaming: () -> Unit,
+    onOpenBufferbloat: () -> Unit,
+    onOpenCellularInfo: () -> Unit
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -9458,6 +9487,26 @@ private fun NetworkToolShortcutRow(
                 bg = GreenSoft,
                 modifier = Modifier.weight(1f),
                 onClick = onOpenRoaming
+            )
+        }
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            NetworkToolShortcutCard(
+                title = "缓冲评级",
+                subtitle = "Bufferbloat",
+                mark = "bufferbloat",
+                color = Orange,
+                bg = Color(0xFFFFF3E0),
+                modifier = Modifier.weight(1f),
+                onClick = onOpenBufferbloat
+            )
+            NetworkToolShortcutCard(
+                title = "基站看板",
+                subtitle = "5G/4G射频",
+                mark = "cellular",
+                color = Blue,
+                bg = BlueSoft,
+                modifier = Modifier.weight(1f),
+                onClick = onOpenCellularInfo
             )
         }
     }
@@ -12828,6 +12877,625 @@ private fun RoamingTimeoutField(
     }
 }
 
+private enum class BufferbloatPhase {
+    IDLE,
+    BASELINE,
+    LOADED,
+    DONE
+}
+
+private enum class BufferbloatGrade(
+    val grade: String,
+    val title: String,
+    val desc: String,
+    val color: Color,
+    val bg: Color
+) {
+    A_PLUS("A+", "极佳", "几乎无缓冲排队，电竞级极品低时延", Color(0xFF16A34A), Color(0xFFEAFBF0)),
+    A("A", "优良", "轻微缓冲排队，游戏语音无感卡顿", Color(0xFF2563EB), Color(0xFFEFF6FF)),
+    B("B", "良好", "普通家庭宽带典型水准，轻度波动", Color(0xFF0284C7), Color(0xFFE0F2FE)),
+    C("C", "较差", "高负载下出现跳Ping卡顿，建议开启路由器SQM", Color(0xFFD97706), Color(0xFFFEF3C7)),
+    D("D", "严重", "排队延迟过高，多任务重载时严重影响实时体验", Color(0xFFEA580C), Color(0xFFFFEDD5)),
+    F("F", "极差", "缓冲严重超载溢出或高丢包，网络拥塞恶劣", Color(0xFFDC2626), Color(0xFFFEE2E2))
+}
+
+private data class BufferbloatResult(
+    val baselineMin: Int,
+    val baselineAvg: Int,
+    val baselineMax: Int,
+    val baselineJitter: Int,
+    val loadedAvg: Int,
+    val loadedMax: Int,
+    val loadedJitter: Int,
+    val deltaRtt: Int,
+    val lossPercent: Int,
+    val grade: BufferbloatGrade
+)
+
+@Composable
+private fun BufferbloatToolPage(onBack: () -> Unit) {
+    val scope = rememberCoroutineScope()
+    var host by remember { mutableStateOf("223.5.5.5") }
+    var phase by remember { mutableStateOf(BufferbloatPhase.IDLE) }
+    var progressText by remember { mutableStateOf("") }
+    var progressFraction by remember { mutableFloatStateOf(0f) }
+    var currentPingMs by remember { mutableStateOf<Int?>(null) }
+    var result by remember { mutableStateOf<BufferbloatResult?>(null) }
+    var testJob by remember { mutableStateOf<Job?>(null) }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            testJob?.cancel()
+        }
+    }
+
+    fun stopTest() {
+        testJob?.cancel()
+        testJob = null
+        phase = BufferbloatPhase.IDLE
+        progressText = "测试已停止"
+    }
+
+    fun startTest() {
+        testJob?.cancel()
+        result = null
+        phase = BufferbloatPhase.BASELINE
+        progressText = "正在初始化探测目标：$host"
+        progressFraction = 0f
+
+        testJob = scope.launch(AppTestRuntime.PingDispatcher) {
+            val baselineSamples = mutableListOf<Int>()
+            val totalBaseline = 15
+            for (i in 1..totalBaseline) {
+                if (!isActive) break
+                progressText = "阶段 1/2：测量空载基线延迟 ($i/$totalBaseline)..."
+                progressFraction = i.toFloat() / (totalBaseline + 30).toFloat()
+                val ping = icmpPingResolved(host, 1500, PingProtocolMode.IPV4)
+                if (ping.latencyMs != null) {
+                    baselineSamples.add(ping.latencyMs)
+                    currentPingMs = ping.latencyMs
+                }
+                delay(100L)
+            }
+
+            if (!isActive) return@launch
+            if (baselineSamples.isEmpty()) {
+                progressText = "探测失败：无法连通目标主机 $host"
+                phase = BufferbloatPhase.IDLE
+                return@launch
+            }
+
+            phase = BufferbloatPhase.LOADED
+            val loadedSamples = mutableListOf<Int>()
+            var loadedDropped = 0
+            val totalLoaded = 30
+
+            // 启动轻量可控并发握手打压链路队列
+            val loadJob = launch(Dispatchers.IO) {
+                val pool = mutableListOf<Socket>()
+                try {
+                    while (isActive) {
+                        runCatching {
+                            val sock = Socket()
+                            sock.tcpNoDelay = true
+                            sock.connect(InetSocketAddress(host, 80), 800)
+                            pool.add(sock)
+                            if (pool.size > 24) {
+                                pool.removeAt(0).runCatching { close() }
+                            }
+                        }
+                        delay(25L)
+                    }
+                } finally {
+                    pool.forEach { runCatching { it.close() } }
+                }
+            }
+
+            for (i in 1..totalLoaded) {
+                if (!isActive) break
+                progressText = "阶段 2/2：并发加压并测量缓冲排队时延 ($i/$totalLoaded)..."
+                progressFraction = (totalBaseline + i).toFloat() / (totalBaseline + totalLoaded).toFloat()
+                val ping = icmpPingResolved(host, 2000, PingProtocolMode.IPV4)
+                if (ping.latencyMs != null) {
+                    loadedSamples.add(ping.latencyMs)
+                    currentPingMs = ping.latencyMs
+                } else {
+                    loadedDropped++
+                    currentPingMs = null
+                }
+                delay(100L)
+            }
+
+            loadJob.cancel()
+            if (!isActive) return@launch
+
+            val bMin = baselineSamples.minOrNull() ?: 0
+            val bAvg = baselineSamples.average().roundToInt()
+            val bMax = baselineSamples.maxOrNull() ?: 0
+            val bJitter = (bMax - bMin).coerceAtLeast(0)
+
+            val lAvg = if (loadedSamples.isNotEmpty()) loadedSamples.average().roundToInt() else (bAvg + 300)
+            val lMax = loadedSamples.maxOrNull() ?: (lAvg + 100)
+            val lMin = loadedSamples.minOrNull() ?: bMin
+            val lJitter = (lMax - lMin).coerceAtLeast(0)
+
+            val delta = (lAvg - bAvg).coerceAtLeast(0)
+            val lossPct = if (totalLoaded > 0) (loadedDropped * 100 / totalLoaded) else 0
+
+            val grade = when {
+                lossPct >= 15 || delta > 250 -> BufferbloatGrade.F
+                delta > 120 -> BufferbloatGrade.D
+                delta > 60 -> BufferbloatGrade.C
+                delta > 25 -> BufferbloatGrade.B
+                delta > 5 -> BufferbloatGrade.A
+                else -> BufferbloatGrade.A_PLUS
+            }
+
+            result = BufferbloatResult(
+                baselineMin = bMin,
+                baselineAvg = bAvg,
+                baselineMax = bMax,
+                baselineJitter = bJitter,
+                loadedAvg = lAvg,
+                loadedMax = lMax,
+                loadedJitter = lJitter,
+                deltaRtt = delta,
+                lossPercent = lossPct,
+                grade = grade
+            )
+            progressText = "测试完成！综合评级：${grade.grade}（${grade.title}）"
+            progressFraction = 1f
+            phase = BufferbloatPhase.DONE
+        }
+    }
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize().padding(horizontal = 14.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        item {
+            ToolPageHeader("缓冲评级", "测量网络 Bufferbloat 排队膨胀与电竞评级", onBack)
+        }
+
+        item {
+            SoftCard {
+                ConfigLongRow("目标") {
+                    CleanField(host, { host = it }, "223.5.5.5", leadingMark = "host", enabled = (phase == BufferbloatPhase.IDLE || phase == BufferbloatPhase.DONE))
+                }
+                Spacer(Modifier.height(6.dp))
+                Button(
+                    onClick = {
+                        if (phase == BufferbloatPhase.BASELINE || phase == BufferbloatPhase.LOADED) stopTest() else startTest()
+                    },
+                    modifier = Modifier.fillMaxWidth().height(42.dp),
+                    shape = ShapeM,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (phase == BufferbloatPhase.BASELINE || phase == BufferbloatPhase.LOADED) ErrorRed else Blue
+                    )
+                ) {
+                    Text(
+                        if (phase == BufferbloatPhase.BASELINE || phase == BufferbloatPhase.LOADED) "停止测试" else "开始评测",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 14.sp
+                    )
+                }
+            }
+        }
+
+        if (phase == BufferbloatPhase.BASELINE || phase == BufferbloatPhase.LOADED) {
+            item {
+                SoftCard {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        SectionTitle("hourglass", "正在评测", Blue)
+                        Spacer(Modifier.weight(1f))
+                        currentPingMs?.let { StatusChip("${it}ms", BlueSoft, Blue, compact = true) }
+                    }
+                    LinearProgressIndicator(
+                        progress = { progressFraction },
+                        modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)),
+                        color = Blue,
+                        trackColor = BlueSoft
+                    )
+                    Text(progressText, color = Muted, fontSize = 12.sp)
+                }
+            }
+        }
+
+        result?.let { res ->
+            item {
+                SoftCard {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Surface(
+                            shape = RoundedCornerShape(16.dp),
+                            color = res.grade.bg,
+                            border = BorderStroke(1.5.dp, res.grade.color.copy(alpha = 0.5f)),
+                            modifier = Modifier.width(64.dp).height(64.dp)
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Text(
+                                    res.grade.grade,
+                                    color = res.grade.color,
+                                    fontWeight = FontWeight.Black,
+                                    fontSize = 28.sp
+                                )
+                            }
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        Column(Modifier.weight(1f)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(res.grade.title, color = TextDark, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                                Spacer(Modifier.width(6.dp))
+                                StatusChip("排队 +${res.deltaRtt}ms", res.grade.bg, res.grade.color, compact = true)
+                            }
+                            Spacer(Modifier.height(2.dp))
+                            Text(res.grade.desc, color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
+                        }
+                    }
+                }
+            }
+
+            item {
+                SoftCard {
+                    SectionTitle("chart", "指标对比", Orange)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        InfoMetricTile("latency", "空载基准", "${res.baselineAvg}ms (抖动${res.baselineJitter}ms)", Color(0xFFEFF6FF), Blue, Modifier.weight(1f))
+                        InfoMetricTile("hourglass", "满载时延", "${res.loadedAvg}ms (峰值${res.loadedMax}ms)", Color(0xFFFFF3E0), Orange, Modifier.weight(1f))
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        val deltaColor = if (res.deltaRtt <= 30) Green else Orange
+                        val deltaBg = if (res.deltaRtt <= 30) GreenSoft else Color(0xFFFFF3E0)
+                        InfoMetricTile("bufferbloat", "排队增量", "+${res.deltaRtt}ms", deltaBg, deltaColor, Modifier.weight(1f))
+                        val lossColor = if (res.lossPercent == 0) Green else ErrorRed
+                        val lossBg = if (res.lossPercent == 0) GreenSoft else RedSoft
+                        InfoMetricTile("!", "负载丢包", "${res.lossPercent}%", lossBg, lossColor, Modifier.weight(1f))
+                    }
+                }
+            }
+
+            item {
+                SoftCard {
+                    SectionTitle("tune", "排障与优化建议", Purple)
+                    val tip = when (res.grade) {
+                        BufferbloatGrade.A_PLUS, BufferbloatGrade.A ->
+                            "极佳的网络状态！空口与路由器几乎不存在不良队列堆积，大带宽并发时依然能保持极佳的超低时延，非常适合电竞游戏、实时语音和高清推流。"
+                        BufferbloatGrade.B, BufferbloatGrade.C ->
+                            "存在中轻度缓冲膨胀。在多设备同时高速下载或上传时，游戏或语音会出现偶发性延迟升高跳Ping。建议在主路由器中开启 SQM 智能队列管理（CAKE 或 FQ-CoDel 算法），或在路由器后台将最高上下行速率限制在总宽带的 90%~95% 以消除排队。"
+                        BufferbloatGrade.D, BufferbloatGrade.F ->
+                            "检测到严重缓冲排队与报文堆积！在网络并发加载时，基带芯片、光猫或低性能路由器队列被塞满，导致延迟剧增甚至丢包。建议开启路由器 SQM、优化 WiFi 频段信道、或检查是否有设备占用全部上传带宽。"
+                    }
+                    Text(tip, color = Muted, fontSize = 12.sp, lineHeight = 17.sp)
+                }
+            }
+        }
+    }
+}
+
+private data class ParsedCellData(
+    val isServing: Boolean,
+    val networkType: String,
+    val band: String,
+    val pci: String,
+    val tac: String,
+    val cellId: String,
+    val rsrp: Int?,
+    val rsrq: Int?,
+    val sinr: Int?,
+    val ratingText: String,
+    val ratingColor: Color,
+    val ratingBg: Color
+)
+
+private fun mapNrArfcnToBand(arfcn: Int): String = when (arfcn) {
+    in 158000..160000 -> "Band n28 (700MHz 广覆盖)"
+    in 499200..537999 -> "Band n41 (2.6GHz 中国移动)"
+    in 620000..653333 -> "Band n78 (3.5GHz 黄金频段)"
+    in 693334..733333 -> "Band n79 (4.9GHz 高容量)"
+    in 422000..434000 -> "Band n1 (2.1GHz 重耕)"
+    in 361000..376000 -> "Band n3 (1.8GHz 重耕)"
+    in 173800..178800 -> "Band n8 (900MHz 低频)"
+    else -> if (arfcn > 0) "5G NR (ARFCN $arfcn)" else "5G NR"
+}
+
+private fun mapLteEarfcnToBand(earfcn: Int): String = when (earfcn) {
+    in 0..599 -> "Band 1 (2100MHz)"
+    in 1200..1949 -> "Band 3 (1800MHz 黄金频段)"
+    in 2400..2649 -> "Band 5 (850MHz)"
+    in 3450..3799 -> "Band 8 (900MHz)"
+    in 36200..36349 -> "Band 34 (2000MHz)"
+    in 37750..38249 -> "Band 38 (2600MHz)"
+    in 38250..38649 -> "Band 39 (1900MHz)"
+    in 38650..39649 -> "Band 40 (2300MHz)"
+    in 39650..41589 -> "Band 41 (2600MHz)"
+    else -> if (earfcn > 0) "4G LTE (EARFCN $earfcn)" else "4G LTE"
+}
+
+private fun cellSignalRating(rsrp: Int?): Triple<String, Color, Color> = when {
+    rsrp == null -> Triple("待检测", Muted, Color(0xFFF8FAFC))
+    rsrp >= -85 -> Triple("极佳 (极优覆盖)", Green, GreenSoft)
+    rsrp >= -95 -> Triple("优良 (良好覆盖)", Blue, BlueSoft)
+    rsrp >= -105 -> Triple("一般 (中度覆盖)", Orange, Color(0xFFFFF3E0))
+    else -> Triple("较弱 (边缘覆盖)", ErrorRed, RedSoft)
+}
+
+private fun parseAllCellInfo(context: Context): List<ParsedCellData> {
+    if (ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+        return emptyList()
+    }
+    val tm = context.getSystemService(Context.TELEPHONY_SERVICE) as? TelephonyManager ?: return emptyList()
+    val rawList = runCatching { tm.allCellInfo }.getOrNull().orEmpty()
+    val parsed = mutableListOf<ParsedCellData>()
+
+    for (info in rawList) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && info is android.telephony.CellInfoNr) {
+            val identity = info.cellIdentity as? android.telephony.CellIdentityNr
+            val strength = info.cellSignalStrength as? android.telephony.CellSignalStrengthNr
+            val pci = identity?.pci?.takeIf { it in 0..1007 }?.toString() ?: "—"
+            val tac = identity?.tac?.takeIf { it in 0..16777215 }?.toString() ?: "—"
+            val nci = identity?.nci?.takeIf { it in 0..68719476735L }?.toString() ?: "—"
+            val nrarfcn = identity?.nrarfcn ?: 0
+            val band = mapNrArfcnToBand(nrarfcn)
+            val rsrp = strength?.ssRsrp?.takeIf { it in -140..(-44) }
+            val rsrq = strength?.ssRsrq?.takeIf { it in -43..20 }
+            val sinr = strength?.ssSinr?.takeIf { it in -23..40 }
+            val rating = cellSignalRating(rsrp)
+            parsed.add(
+                ParsedCellData(
+                    isServing = info.isRegistered,
+                    networkType = "5G NR",
+                    band = band,
+                    pci = pci,
+                    tac = tac,
+                    cellId = "NCI: $nci",
+                    rsrp = rsrp,
+                    rsrq = rsrq,
+                    sinr = sinr,
+                    ratingText = rating.first,
+                    ratingColor = rating.second,
+                    ratingBg = rating.third
+                )
+            )
+            continue
+        }
+
+        if (info is CellInfoLte) {
+            val identity = info.cellIdentity
+            val strength = info.cellSignalStrength
+            val pci = identity.pci.takeIf { it in 0..503 }?.toString() ?: "—"
+            val tac = identity.tac.takeIf { it in 0..65535 }?.toString() ?: "—"
+            val ci = identity.ci.takeIf { it in 0..268435455 }?.toString() ?: "—"
+            val earfcn = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) identity.earfcn else 0
+            val band = mapLteEarfcnToBand(earfcn)
+            val rsrp = strength.rsrp.takeIf { it in -140..(-44) }
+            val rsrq = strength.rsrq.takeIf { it in -20..(-3) }
+            val rssnr = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) strength.rssnr.takeIf { it in -200..300 }?.div(10) else null
+            val rating = cellSignalRating(rsrp)
+            parsed.add(
+                ParsedCellData(
+                    isServing = info.isRegistered,
+                    networkType = "4G LTE",
+                    band = band,
+                    pci = pci,
+                    tac = tac,
+                    cellId = "ECI: $ci",
+                    rsrp = rsrp,
+                    rsrq = rsrq,
+                    sinr = rssnr,
+                    ratingText = rating.first,
+                    ratingColor = rating.second,
+                    ratingBg = rating.third
+                )
+            )
+            continue
+        }
+
+        if (info is CellInfoWcdma) {
+            val identity = info.cellIdentity
+            val strength = info.cellSignalStrength
+            val psc = identity.psc.takeIf { it in 0..511 }?.toString() ?: "—"
+            val lac = identity.lac.takeIf { it in 0..65535 }?.toString() ?: "—"
+            val cid = identity.cid.takeIf { it in 0..268435455 }?.toString() ?: "—"
+            val rscp = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) strength.rscp.takeIf { it in -120..(-24) } else null
+            val rating = cellSignalRating(rscp)
+            parsed.add(
+                ParsedCellData(
+                    isServing = info.isRegistered,
+                    networkType = "3G WCDMA",
+                    band = "UARFCN ${if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) identity.uarfcn else "—"}",
+                    pci = psc,
+                    tac = lac,
+                    cellId = "CID: $cid",
+                    rsrp = rscp,
+                    rsrq = null,
+                    sinr = null,
+                    ratingText = rating.first,
+                    ratingColor = rating.second,
+                    ratingBg = rating.third
+                )
+            )
+            continue
+        }
+
+        if (info is CellInfoGsm) {
+            val identity = info.cellIdentity
+            val strength = info.cellSignalStrength
+            val lac = identity.lac.takeIf { it in 0..65535 }?.toString() ?: "—"
+            val cid = identity.cid.takeIf { it in 0..65535 }?.toString() ?: "—"
+            val dbm = strength.dbm.takeIf { it in -120..(-50) }
+            val rating = cellSignalRating(dbm)
+            parsed.add(
+                ParsedCellData(
+                    isServing = info.isRegistered,
+                    networkType = "2G GSM",
+                    band = "ARFCN ${if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) identity.arfcn else "—"}",
+                    pci = "—",
+                    tac = lac,
+                    cellId = "CID: $cid",
+                    rsrp = dbm,
+                    rsrq = null,
+                    sinr = null,
+                    ratingText = rating.first,
+                    ratingColor = rating.second,
+                    ratingBg = rating.third
+                )
+            )
+        }
+    }
+    return parsed
+}
+
+@Composable
+private fun CellularInfoToolPage(onBack: () -> Unit) {
+    val context = LocalContext.current
+    var hasLocationPermission by remember {
+        mutableStateOf(ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED)
+    }
+    val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        hasLocationPermission = granted
+    }
+
+    var cells by remember { mutableStateOf<List<ParsedCellData>>(emptyList()) }
+    var operatorName by remember { mutableStateOf("未知运营商") }
+    var autoRefresh by remember { mutableStateOf(false) }
+
+    fun refreshCells() {
+        if (!hasLocationPermission) return
+        val tm = context.getSystemService(Context.TELEPHONY_SERVICE) as? TelephonyManager
+        operatorName = tm?.networkOperatorName.orEmpty().ifBlank { tm?.simOperatorName.orEmpty().ifBlank { "未知运营商" } }
+        cells = parseAllCellInfo(context)
+    }
+
+    LaunchedEffect(hasLocationPermission) {
+        if (hasLocationPermission) refreshCells()
+    }
+
+    LaunchedEffect(autoRefresh) {
+        while (autoRefresh && isActive) {
+            delay(3000L)
+            if (hasLocationPermission) refreshCells()
+        }
+    }
+
+    val serving = cells.firstOrNull { it.isServing } ?: cells.firstOrNull()
+    val neighbors = cells.filterNot { it == serving }
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize().padding(horizontal = 14.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        item {
+            ToolPageHeader("基站看板", "5G/4G 移动蜂窝射频与工参诊断", onBack, actionLabel = "刷新", onAction = { refreshCells() })
+        }
+
+        if (!hasLocationPermission) {
+            item {
+                SoftCard {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        MarkBox("cellular", BlueSoft, Blue)
+                        Spacer(Modifier.width(10.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text("需要精确定位权限", color = TextDark, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                            Text("Android 系统安全策略规定，读取物理基站识别码（PCI、频段与射频工参）必须具有精确定位权限。", color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Button(
+                        onClick = { permissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION) },
+                        modifier = Modifier.fillMaxWidth().height(40.dp),
+                        shape = ShapeM,
+                        colors = ButtonDefaults.buttonColors(containerColor = Blue)
+                    ) {
+                        Text("授权以读取基站工参", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                    }
+                }
+            }
+        } else {
+            item {
+                SoftCard {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("自动刷新 (3秒/次)", color = TextDark, fontWeight = FontWeight.SemiBold, fontSize = 13.sp, modifier = Modifier.weight(1f))
+                        Switch(checked = autoRefresh, onCheckedChange = { autoRefresh = it })
+                    }
+                }
+            }
+
+            if (serving != null) {
+                item {
+                    SoftCard {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            StatusChip(serving.networkType, BlueSoft, Blue, compact = true)
+                            Spacer(Modifier.width(6.dp))
+                            StatusChip(operatorName, Color(0xFFF3E8FF), Purple, compact = true)
+                            Spacer(Modifier.weight(1f))
+                            StatusChip(serving.ratingText, serving.ratingBg, serving.ratingColor, compact = true)
+                        }
+                        Spacer(Modifier.height(6.dp))
+                        Text(serving.band, color = TextDark, fontWeight = FontWeight.Black, fontSize = 18.sp)
+                        Text(serving.cellId, color = Muted, fontSize = 11.sp)
+                    }
+                }
+
+                item {
+                    SoftCard {
+                        SectionTitle("carrier", "主基站工参矩阵", Blue)
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                            InfoMetricTile("latency", "RSRP接收功率", serving.rsrp?.let { "$it dBm" } ?: "—", serving.ratingBg, serving.ratingColor, Modifier.weight(1f))
+                            val sinrText = serving.sinr?.let { "$it dB" } ?: "—"
+                            InfoMetricTile("∿", "SINR信噪比", sinrText, Color(0xFFEFF6FF), Blue, Modifier.weight(1f))
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                            InfoMetricTile("port", "物理小区PCI", serving.pci, Color(0xFFF8FAFC), TextDark, Modifier.weight(1f))
+                            InfoMetricTile("target", "追踪区域TAC", serving.tac, Color(0xFFF8FAFC), TextDark, Modifier.weight(1f))
+                        }
+                        serving.rsrq?.let { rsrqVal ->
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                                InfoMetricTile("hourglass", "RSRQ接收质量", "$rsrqVal dB", Color(0xFFFFF3E0), Orange, Modifier.weight(1f))
+                                InfoMetricTile("confidence", "驻留状态", if (serving.isServing) "主服务小区 (Serving)" else "邻区候选", GreenSoft, Green, Modifier.weight(1f))
+                            }
+                        }
+                    }
+                }
+            } else {
+                item {
+                    SoftCard {
+                        Text("未检测到当前连接的蜂窝基站数据。请确保已开启移动蜂窝数据并插入有效 SIM 卡。", color = Muted, fontSize = 12.sp, lineHeight = 16.sp)
+                    }
+                }
+            }
+
+            if (neighbors.isNotEmpty()) {
+                item {
+                    SoftCard {
+                        SectionTitle("cellular", "周围候选基站（${neighbors.size}个）", Purple)
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            neighbors.forEach { n ->
+                                Surface(
+                                    shape = ShapeS,
+                                    color = Color(0xFFF8FAFC),
+                                    border = BorderStroke(1.dp, Border.copy(alpha = 0.5f)),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp)
+                                    ) {
+                                        Column(Modifier.weight(1f)) {
+                                            Text("PCI ${n.pci} · ${n.networkType}", color = TextDark, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                                            Text(n.band, color = Muted, fontSize = 10.sp)
+                                        }
+                                        n.rsrp?.let {
+                                            StatusChip("$it dBm", n.ratingBg, n.ratingColor, compact = true)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun ConfigLongRow(label: String, content: @Composable () -> Unit) {
     Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -13181,6 +13849,8 @@ private fun NetworkEnvironmentSettingsCard(
     onOpenMtu: () -> Unit,
     onOpenRoaming: () -> Unit,
     onOpenIpv6Diagnostics: () -> Unit,
+    onOpenBufferbloat: () -> Unit,
+    onOpenCellularInfo: () -> Unit,
     expanded: Boolean,
     onExpandedChange: (Boolean) -> Unit
 ) {
@@ -13251,7 +13921,14 @@ private fun NetworkEnvironmentSettingsCard(
             InfoMetricTile("confidence", "NAT置信度", probeInfo.confidence, Color(0xFFF8FAFC), Muted, Modifier.weight(1f))
             InfoMetricTile("carrier", "运营商", probeInfo.carrier, Color(0xFFF3E8FF), Purple, Modifier.weight(1f))
         }
-        NetworkToolShortcutRow(onOpenNsLookup = onOpenNsLookup, onOpenTracket = onOpenTracket, onOpenMtu = onOpenMtu, onOpenRoaming = onOpenRoaming)
+        NetworkToolShortcutRow(
+            onOpenNsLookup = onOpenNsLookup,
+            onOpenTracket = onOpenTracket,
+            onOpenMtu = onOpenMtu,
+            onOpenRoaming = onOpenRoaming,
+            onOpenBufferbloat = onOpenBufferbloat,
+            onOpenCellularInfo = onOpenCellularInfo
+        )
         Text(
             probeInfo.diagnosis,
             color = if (probeInfo.proxyNotice.isNotBlank()) Purple else Muted,

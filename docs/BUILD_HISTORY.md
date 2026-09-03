@@ -3,6 +3,10 @@
 This file keeps short historical notes for local self-test and release-fix builds.
 Formal user-facing release notes stay in `CHANGELOG.md`; current validation notes stay in `TEST_NOTES_current.md`.
 
+## v1.0.21 beta line
+
+- build150: introduced Bufferbloat rating diagnostic with unloaded/loaded queue delay evaluation and 5G/4G cellular RF diagnostics for base station frequency bands and signal parameters.
+
 ## v1.0.20 release line
 
 - build149: official release of v1.0.20 containing thread isolation for connection tester and ping monitor, 2KB socket buffer optimization with SO_REUSEADDR, channel-based result collection, and smoothed token scheduling.

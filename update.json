@@ -1,18 +1,17 @@
 {
-  "versionCode": 149,
-  "versionName": "v1.0.20",
-  "build": 149,
-  "status": "ready",
+  "versionCode": 150,
+  "versionName": "v1.0.21-beta1",
+  "build": 150,
+  "status": "testing",
   "minReadyFileSize": 3000000,
-  "title": "发现新版本 v1.0.20 build149",
+  "title": "发现测试版本 v1.0.21-beta1 build150",
   "content": [
-    "连接测试与Ping监控线程池物理隔离，消除高并发建连对Ping的调度抢占",
-    "TCP连接启用极简缓冲区与端口快速复用，万级会话内核内存占用降低95%",
-    "握手就绪回收升级为Channel无锁事件流，大幅提升调度吞吐与高CPS稳定性",
-    "优化高频发射微步平滑整形，显著缓解突发脉冲引发的排队缓冲膨胀",
-    "保持原有界面参数与交互布局完全不变，纯底层架构性能与可靠性飞跃"
+    "新增 Bufferbloat 缓冲膨胀评级：精确测定网络排队延迟增量与电竞综合评级（A+~F）",
+    "新增 5G/4G 蜂窝基站与射频看板：实时解析 NR 频段（n78/n41/n28）、PCI、RSRP、SINR 工参",
+    "设置页网络信息快捷矩阵升级为 3 行 2 列布局，保持全套 Material 3 毛玻璃风格一致性",
+    "智能分析拥塞根因并提供路由器 SQM 与移动网络针对性调优建议"
   ],
-  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.0.20-149/NetSessionTester-v1.0.20-build149-signed.apk",
-  "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/tag/v1.0.20-149",
+  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.0.21-beta1-150/NetSessionTester-v1.0.21-beta1-build150-signed.apk",
+  "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/tag/v1.0.21-beta1-150",
   "force": false
 }

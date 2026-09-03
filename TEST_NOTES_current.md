@@ -1,11 +1,27 @@
-# v1.0.20 build149 发版验证
+# v1.0.21-beta1 build150 自测重点
 
 ## 版本与发版文件
 
-1. APP 版本应显示 `versionName=v1.0.20`、`versionCode=149`。
+1. APP 版本应显示 `versionName=v1.0.21-beta1`、`versionCode=150`。
 2. 根目录只保留当前长期文档：`README.md`、`CHANGELOG.md`、`TEST_NOTES_current.md`。
 3. 历史 build 说明应在 `docs/BUILD_HISTORY.md` 中查看，后续发版模板应使用 `docs/RELEASE_TEMPLATE.md`。
-4. `update.json` 状态设置为 `ready`，指向正式 Release 与 APK 下载地址。
+4. `update.json` 状态设置为 `testing`（测试版不向正式用户推送）。
+
+## 阶段一新增功能自测重点
+
+### 1. Bufferbloat 缓冲膨胀评级
+- 从 设置 -> 网络信息 -> 点击“缓冲评级”。
+- 点击“开始测试”，观察是否依次经历：
+  - 阶段 1：空载基线测量（约 2~3 秒）；
+  - 阶段 2：施加并发负载并测量拥塞时延（约 4~5 秒）；
+  - 阶段 3：计算完成，展示综合评级徽章（A+、A、B、C、D、F）、指标对比及调优建议。
+- 检查停止测试与返回上级页面时，后台协程与网络任务是否立即安全终止。
+
+### 2. 5G/4G 蜂窝基站射频看板
+- 从 设置 -> 网络信息 -> 点击“基站看板”。
+- 首次进入若无精确定位权限，是否弹出友好的 Material 3 授权提示卡片。
+- 授权后，是否正常解析主服务小区的运营商、网络制式（5G SA/NSA 或 4G LTE）、NR 频段（如 n78/n41/n28）、PCI、RSRP、SINR 及周边邻区列表。
+- 检查手动刷新与定时刷新开关是否顺畅工作。
 
 ## 连接测试与 Ping 并发自测
 
