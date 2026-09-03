@@ -1,11 +1,25 @@
-# v1.0.21-beta1 build150 自测重点
+# v1.0.21-beta2 build151 自测重点
 
 ## 版本与发版文件
 
-1. APP 版本应显示 `versionName=v1.0.21-beta1`、`versionCode=150`。
+1. APP 版本应显示 `versionName=v1.0.21-beta2`、`versionCode=151`。
 2. 根目录只保留当前长期文档：`README.md`、`CHANGELOG.md`、`TEST_NOTES_current.md`。
 3. 历史 build 说明应在 `docs/BUILD_HISTORY.md` 中查看，后续发版模板应使用 `docs/RELEASE_TEMPLATE.md`。
 4. `update.json` 状态设置为 `testing`（测试版不向正式用户推送）。
+
+## 阶段二新增功能自测重点
+
+### 1. 双网并发（5G vs WiFi）同屏对测
+- 从 设置 -> 网络信息 -> 点击“双网对测”。
+- 验证双网识别：在开启 WiFi 和移动蜂窝时，是否分别识别出 WiFi 与 5G/4G 的网卡、IP 与运营商。
+- 点击“开始对测”，观察是否同屏实时绘制双曲线（WiFi 绿色，5G 蓝色）。
+- 测试完成后查看智能胜负裁决卡片（平均时延、抖动、丢包对比与评判）。
+
+### 2. 内置 iPerf3 客户端
+- 从 设置 -> 网络信息 -> 点击“iPerf3测速”。
+- 输入内网服务器（如软路由/NAS `192.168.1.x`）或公网 iPerf3 节点，端口默认 5201。
+- 分别切换测试“下行测速 (Download)”与“上行测速 (Upload)”。
+- 观察实时测速大表盘、吞吐动态折线图（Mbps）与秒级记录日志。
 
 ## 阶段一新增功能自测重点
 

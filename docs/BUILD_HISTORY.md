@@ -5,6 +5,7 @@ Formal user-facing release notes stay in `CHANGELOG.md`; current validation note
 
 ## v1.0.21 beta line
 
+- build151: added Dual Network (5G vs WiFi) concurrent real-time comparison test with Network.bindSocket and built-in iPerf3 bandwidth throughput testing client.
 - build150: introduced Bufferbloat rating diagnostic with unloaded/loaded queue delay evaluation and 5G/4G cellular RF diagnostics for base station frequency bands and signal parameters.
 
 ## v1.0.20 release line

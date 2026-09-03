@@ -1,3 +1,9 @@
+## v1.0.21-beta2 build151
+
+- 新增 双网并发（5G vs WiFi）同屏对测：利用 Android 多网卡绑定（Network.bindSocket）穿透默认系统路由，同屏绘制 WiFi 绿线与 5G 蓝线实时 RTT 走势，综合评判平均延迟、抖动与丢包并输出智能 PK 胜负裁决。
+- 新增 内置 iPerf3 客户端：轻量化实现标准 iPerf3 协议栈握手与数据交换，支持局域网自建及公网服务器的高速打流测速，提供下行 (Reverse Mode) 与上行 (Upload Mode) 实时吞吐折线图与带宽达标评定。
+- 设置页“网络信息”快捷矩阵扩充至 4 行 2 列（共 8 大网络诊断工具），新增专属 dual_net 与 iperf 矢量图标。
+
 ## v1.0.21-beta1 build150
 
 - 新增 Bufferbloat 缓冲膨胀专项测试与评级：精确测定空载基线延迟与满载排队延迟增量（Delta RTT），提供国际标准 A+~F 电竞级评级，并给出路由器 SQM（CAKE / FQ-CoDel）调优指导。

@@ -1,17 +1,17 @@
 {
-  "versionCode": 150,
-  "versionName": "v1.0.21-beta1",
-  "build": 150,
+  "versionCode": 151,
+  "versionName": "v1.0.21-beta2",
+  "build": 151,
   "status": "testing",
   "minReadyFileSize": 3000000,
-  "title": "发现测试版本 v1.0.21-beta1 build150",
+  "title": "发现测试版本 v1.0.21-beta2 build151",
   "content": [
-    "新增 Bufferbloat 缓冲膨胀评级：精确测定网络排队延迟增量与电竞综合评级（A+~F）",
-    "新增 5G/4G 蜂窝基站与射频看板：实时解析 NR 频段（n78/n41/n28）、PCI、RSRP、SINR 工参",
-    "设置页网络信息快捷矩阵升级为 3 行 2 列布局，保持全套 Material 3 毛玻璃风格一致性",
-    "智能分析拥塞根因并提供路由器 SQM 与移动网络针对性调优建议"
+    "新增 双网并发 (5G vs WiFi) 同屏对测：多网卡物理绑定与双链路实时时延/抖动/丢包同屏 PK",
+    "新增 内置 iPerf3 客户端：轻量级实现标准 iPerf3 协议栈，支持局域网与公网上下行高带宽吞吐测速",
+    "设置页网络信息快捷矩阵升级为 4 行 2 列布局，新增专用 dual_net 与 iperf 矢量图标",
+    "智能胜负裁决与链路瓶颈分析，全面遵循 Material 3 与毛玻璃设计标准"
   ],
-  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.0.21-beta1-150/NetSessionTester-v1.0.21-beta1-build150-signed.apk",
-  "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/tag/v1.0.21-beta1-150",
+  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.0.21-beta2-151/NetSessionTester-v1.0.21-beta2-build151-signed.apk",
+  "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/tag/v1.0.21-beta2-151",
   "force": false
 }

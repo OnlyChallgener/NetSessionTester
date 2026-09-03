@@ -206,6 +206,7 @@ import com.demonv.netsessiontester.util.CsvExporter
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
@@ -218,6 +219,7 @@ import org.json.JSONArray
 import java.io.BufferedInputStream
 import java.io.File
 import java.io.FileOutputStream
+import java.io.IOException
 import java.io.OutputStreamWriter
 import java.net.DatagramPacket
 import java.net.DatagramSocket
@@ -262,7 +264,9 @@ private enum class AppToolPage {
     IPV6_DIAGNOSTIC,
     PING_HISTORY,
     BUFFERBLOAT,
-    CELLULAR_INFO
+    CELLULAR_INFO,
+    DUAL_NETWORK,
+    IPERF
 }
 
 private enum class ChartMode(val label: String) {
@@ -667,8 +671,8 @@ private fun currentAppVersionCode(context: Context): Long = runCatching {
 private fun currentAppVersionName(context: Context): String {
     return runCatching {
         val pkg = context.packageManager.getPackageInfo(context.packageName, 0)
-        pkg.versionName?.takeIf { it.isNotBlank() } ?: "v1.0.21-beta1"
-    }.getOrDefault("v1.0.21-beta1")
+        pkg.versionName?.takeIf { it.isNotBlank() } ?: "v1.0.21-beta2"
+    }.getOrDefault("v1.0.21-beta2")
 }
 
 private fun displayVersionName(raw: String): String {
@@ -4383,6 +4387,8 @@ private fun NetSessionTesterApp() {
                 )
                 AppToolPage.BUFFERBLOAT -> BufferbloatToolPage(onBack = { appToolPage = AppToolPage.NONE })
                 AppToolPage.CELLULAR_INFO -> CellularInfoToolPage(onBack = { appToolPage = AppToolPage.NONE })
+                AppToolPage.DUAL_NETWORK -> DualNetworkToolPage(onBack = { appToolPage = AppToolPage.NONE })
+                AppToolPage.IPERF -> IperfToolPage(onBack = { appToolPage = AppToolPage.NONE })
                 AppToolPage.NONE -> when (selectedTab) {
                 MainTab.SETTINGS -> SettingsPage(
                     listState = settingsListState,
@@ -4415,6 +4421,8 @@ private fun NetSessionTesterApp() {
                     onOpenRoaming = { appToolPage = AppToolPage.ROAMING },
                     onOpenBufferbloat = { appToolPage = AppToolPage.BUFFERBLOAT },
                     onOpenCellularInfo = { appToolPage = AppToolPage.CELLULAR_INFO },
+                    onOpenDualNetwork = { appToolPage = AppToolPage.DUAL_NETWORK },
+                    onOpenIperf = { appToolPage = AppToolPage.IPERF },
                     onOpenIpv6Diagnostics = {
                         // 从网络信息进入时，不切到测试页；专项页退出后强制回到设置页网络信息卡片。
                         selectedTab = MainTab.SETTINGS
@@ -5435,6 +5443,8 @@ private fun SettingsPage(
     onOpenIpv6Diagnostics: () -> Unit,
     onOpenBufferbloat: () -> Unit,
     onOpenCellularInfo: () -> Unit,
+    onOpenDualNetwork: () -> Unit,
+    onOpenIperf: () -> Unit,
     onOpenPingSettings: () -> Unit,
     maskPrivacy: Boolean,
     onMaskPrivacyChange: (Boolean) -> Unit,
@@ -5539,6 +5549,8 @@ private fun SettingsPage(
                         onOpenIpv6Diagnostics = onOpenIpv6Diagnostics,
                         onOpenBufferbloat = onOpenBufferbloat,
                         onOpenCellularInfo = onOpenCellularInfo,
+                        onOpenDualNetwork = onOpenDualNetwork,
+                        onOpenIperf = onOpenIperf,
                         expanded = networkInfoExpanded,
                         onExpandedChange = onNetworkInfoExpandedChange
                     )
@@ -6210,7 +6222,8 @@ private fun VersionInfoDialog(
                     Text("当前版本", color = Muted, fontSize = 12.sp, modifier = Modifier.weight(1f))
                     StatusChip(displayVersionName(currentAppVersionName(LocalContext.current)), BlueSoft, Blue, compact = true)
                 }
-                VersionLine(displayVersionName(currentAppVersionName(LocalContext.current)), "新增Bufferbloat缓冲膨胀评级与5G/4G基站射频工参看板，快捷矩阵升级3行2列。")
+                VersionLine(displayVersionName(currentAppVersionName(LocalContext.current)), "新增双网并发(5G vs WiFi)同屏对测与内置iPerf3吞吐测速客户端，快捷矩阵升级4行2列。")
+                VersionLine("v1.0.21-beta1", "新增Bufferbloat缓冲膨胀评级与5G/4G基站射频工参看板，快捷矩阵升级3行2列。")
                 VersionLine("v1.0.20", "连接测试与Ping调度线程池物理隔离，启用极简Socket缓冲区与Channel异步回收。")
                 VersionLine("v1.0.18", "历史清空增加二次确认与10秒撤销，优化删除按钮，并修复NAT、漫游历史交互。")
                 VersionLine("v1.0.17", "统一各页面滑动删除交互，公网IP改为网络变化驱动刷新。")
@@ -6832,7 +6845,7 @@ private fun usesCustomNetGlyph(mark: String): Boolean = mark in setOf(
     "egress", "dns", "nslookup", "tracket", "mtu", "roaming", "ping", "∿",
     "target", "mode", "tune", "≡", "port", "host", "address", "□", "log",
     "latency", "time", "hourglass", "count", "privacy", "privacy_on", "carrier", "wifi", "confidence",
-    "note", "download", "chart", "bufferbloat", "cellular"
+    "note", "download", "chart", "bufferbloat", "cellular", "dual_net", "iperf"
 )
 
 @Composable
@@ -7087,6 +7100,19 @@ private fun NetGlyph(mark: String, color: Color, modifier: Modifier = Modifier) 
                 line(0.36f, 0.58f, 0.64f, 0.58f, 1f, stroke)
                 drawArc(color, 210f, 120f, false, topLeft = Offset(0.32f * w, 0.12f * h), size = androidx.compose.ui.geometry.Size(0.36f * w, 0.36f * h), style = thin)
                 dot(0.50f, 0.22f, 0.045f)
+            }
+            "dual_net" -> {
+                drawArc(color, 210f, 120f, false, topLeft = Offset(0.10f * w, 0.22f * h), size = androidx.compose.ui.geometry.Size(0.38f * w, 0.38f * h), style = thin)
+                dot(0.29f, 0.56f, 0.040f)
+                line(0.60f, 0.68f, 0.60f, 0.46f, 1f, stroke)
+                line(0.78f, 0.68f, 0.78f, 0.24f, 1f, stroke)
+                line(0.46f, 0.25f, 0.46f, 0.72f, 0.4f, thin)
+            }
+            "iperf" -> {
+                arrow(0.20f, 0.65f, 0.78f, 0.28f)
+                line(0.22f, 0.78f, 0.52f, 0.78f, 1f, stroke)
+                line(0.62f, 0.78f, 0.82f, 0.78f, 1f, stroke)
+                dot(0.28f, 0.36f, 0.045f)
             }
             else -> dot(0.50f,0.50f,0.18f)
         }
@@ -9446,7 +9472,9 @@ private fun NetworkToolShortcutRow(
     onOpenMtu: () -> Unit,
     onOpenRoaming: () -> Unit,
     onOpenBufferbloat: () -> Unit,
-    onOpenCellularInfo: () -> Unit
+    onOpenCellularInfo: () -> Unit,
+    onOpenDualNetwork: () -> Unit,
+    onOpenIperf: () -> Unit
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -9507,6 +9535,26 @@ private fun NetworkToolShortcutRow(
                 bg = BlueSoft,
                 modifier = Modifier.weight(1f),
                 onClick = onOpenCellularInfo
+            )
+        }
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            NetworkToolShortcutCard(
+                title = "双网对测",
+                subtitle = "5G vs WiFi",
+                mark = "dual_net",
+                color = Purple,
+                bg = Color(0xFFF3E8FF),
+                modifier = Modifier.weight(1f),
+                onClick = onOpenDualNetwork
+            )
+            NetworkToolShortcutCard(
+                title = "iPerf3测速",
+                subtitle = "吞吐压测",
+                mark = "iperf",
+                color = Green,
+                bg = GreenSoft,
+                modifier = Modifier.weight(1f),
+                onClick = onOpenIperf
             )
         }
     }
@@ -13496,6 +13544,835 @@ private fun CellularInfoToolPage(onBack: () -> Unit) {
     }
 }
 
+private data class DualNetSample(
+    val index: Int,
+    val wifiRtt: Int?,
+    val cellRtt: Int?
+)
+
+private data class DualNetSummary(
+    val wifiAvg: Int?,
+    val wifiMin: Int?,
+    val wifiMax: Int?,
+    val wifiJitter: Int,
+    val wifiLossPct: Int,
+    val cellAvg: Int?,
+    val cellMin: Int?,
+    val cellMax: Int?,
+    val cellJitter: Int,
+    val cellLossPct: Int,
+    val winner: String,
+    val winnerColor: Color,
+    val winnerBg: Color,
+    val reason: String
+)
+
+private data class WinnerVerdict(
+    val title: String,
+    val color: Color,
+    val bg: Color,
+    val reason: String
+)
+
+private fun probeNetworkRtt(network: Network, host: String, port: Int = 80, timeoutMs: Int = 1500): Int? {
+    val addresses = runCatching { network.getAllByName(host) }.getOrNull() ?: return null
+    val target = addresses.firstOrNull { it is Inet4Address } ?: addresses.firstOrNull() ?: return null
+    val start = SystemClock.elapsedRealtime()
+    return try {
+        Socket().use { socket ->
+            socket.tcpNoDelay = true
+            network.bindSocket(socket)
+            socket.connect(InetSocketAddress(target, port), timeoutMs)
+            (SystemClock.elapsedRealtime() - start).toInt()
+        }
+    } catch (e: java.net.ConnectException) {
+        (SystemClock.elapsedRealtime() - start).toInt()
+    } catch (e: Throwable) {
+        null
+    }
+}
+
+@Composable
+private fun DualNetworkChart(
+    samples: List<DualNetSample>,
+    modifier: Modifier = Modifier
+) {
+    if (samples.isEmpty()) return
+    Canvas(modifier = modifier) {
+        val w = size.width
+        val h = size.height
+        if (w <= 0 || h <= 0) return@Canvas
+
+        val allValues = samples.flatMap { listOfNotNull(it.wifiRtt, it.cellRtt) }
+        val minY = (allValues.minOrNull() ?: 0).coerceAtLeast(0)
+        val maxY = ((allValues.maxOrNull() ?: 100) * 1.15f).roundToInt().coerceAtLeast(minY + 20)
+
+        fun yFor(v: Int): Float = h - ((v - minY).toFloat() / (maxY - minY).toFloat()) * (h - 24f) - 12f
+        fun xFor(idx: Int): Float {
+            val total = (samples.size - 1).coerceAtLeast(1)
+            return (idx.toFloat() / total.toFloat()) * (w - 20f) + 10f
+        }
+
+        val gridColor = Border.copy(alpha = 0.5f)
+        drawLine(gridColor, Offset(0f, yFor(minY)), Offset(w, yFor(minY)), strokeWidth = 1f)
+        drawLine(gridColor, Offset(0f, yFor((minY + maxY) / 2)), Offset(w, yFor((minY + maxY) / 2)), strokeWidth = 1f)
+        drawLine(gridColor, Offset(0f, yFor(maxY)), Offset(w, yFor(maxY)), strokeWidth = 1f)
+
+        val wifiPoints = samples.mapIndexedNotNull { i, s -> s.wifiRtt?.let { i to it } }
+        if (wifiPoints.size >= 2) {
+            val path = Path()
+            wifiPoints.forEachIndexed { idx, (i, v) ->
+                val x = xFor(i)
+                val y = yFor(v)
+                if (idx == 0) path.moveTo(x, y) else path.lineTo(x, y)
+            }
+            drawPath(path, Green, style = Stroke(width = 2.5.dp.toPx(), cap = StrokeCap.Round))
+        }
+        wifiPoints.forEach { (i, v) ->
+            drawCircle(Green, radius = 3.dp.toPx(), center = Offset(xFor(i), yFor(v)))
+        }
+
+        val cellPoints = samples.mapIndexedNotNull { i, s -> s.cellRtt?.let { i to it } }
+        if (cellPoints.size >= 2) {
+            val path = Path()
+            cellPoints.forEachIndexed { idx, (i, v) ->
+                val x = xFor(i)
+                val y = yFor(v)
+                if (idx == 0) path.moveTo(x, y) else path.lineTo(x, y)
+            }
+            drawPath(path, Blue, style = Stroke(width = 2.5.dp.toPx(), cap = StrokeCap.Round))
+        }
+        cellPoints.forEach { (i, v) ->
+            drawCircle(Blue, radius = 3.dp.toPx(), center = Offset(xFor(i), yFor(v)))
+        }
+    }
+}
+
+@Composable
+private fun DualNetworkToolPage(onBack: () -> Unit) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val cm = remember { context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager }
+    val tm = remember { context.getSystemService(Context.TELEPHONY_SERVICE) as? TelephonyManager }
+
+    var wifiNetwork by remember { mutableStateOf<Network?>(null) }
+    var cellNetwork by remember { mutableStateOf<Network?>(null) }
+    var targetHost by remember { mutableStateOf("223.5.5.5") }
+    var running by remember { mutableStateOf(false) }
+    var progressFraction by remember { mutableStateOf(0f) }
+    var progressText by remember { mutableStateOf("") }
+    var testJob by remember { mutableStateOf<Job?>(null) }
+
+    var samples by remember { mutableStateOf<List<DualNetSample>>(emptyList()) }
+    var summary by remember { mutableStateOf<DualNetSummary?>(null) }
+
+    fun refreshNetworks() {
+        if (cm == null) return
+        var foundWifi: Network? = null
+        var foundCell: Network? = null
+        for (n in cm.allNetworks) {
+            val caps = cm.getNetworkCapabilities(n) ?: continue
+            if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+                foundWifi = n
+            }
+            if (caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) {
+                foundCell = n
+            }
+        }
+        wifiNetwork = foundWifi
+        cellNetwork = foundCell
+    }
+
+    DisposableEffect(Unit) {
+        val cellCallback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) { cellNetwork = network }
+            override fun onLost(network: Network) { if (cellNetwork == network) cellNetwork = null }
+        }
+        val wifiCallback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) { wifiNetwork = network }
+            override fun onLost(network: Network) { if (wifiNetwork == network) wifiNetwork = null }
+        }
+        runCatching {
+            val cellReq = NetworkRequest.Builder()
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .addTransportType(NetworkCapabilities.TRANSPORT_CELLULAR)
+                .build()
+            cm?.requestNetwork(cellReq, cellCallback)
+            val wifiReq = NetworkRequest.Builder()
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                .build()
+            cm?.registerNetworkCallback(wifiReq, wifiCallback)
+        }
+        refreshNetworks()
+
+        onDispose {
+            testJob?.cancel()
+            runCatching { cm?.unregisterNetworkCallback(cellCallback) }
+            runCatching { cm?.unregisterNetworkCallback(wifiCallback) }
+        }
+    }
+
+    fun stopTest() {
+        testJob?.cancel()
+        testJob = null
+        running = false
+        progressText = "测试已停止"
+    }
+
+    fun startTest() {
+        testJob?.cancel()
+        running = true
+        summary = null
+        samples = emptyList()
+        progressFraction = 0f
+        progressText = "正在并行发起 WiFi 与 5G 链路探针..."
+
+        testJob = scope.launch(AppTestRuntime.PingDispatcher) {
+            val totalRounds = 25
+            val currentSamples = mutableListOf<DualNetSample>()
+
+            for (i in 1..totalRounds) {
+                if (!isActive) break
+                progressFraction = i.toFloat() / totalRounds.toFloat()
+                progressText = "正在同屏对测第 $i/$totalRounds 轮..."
+
+                val wifiDeferred = async(Dispatchers.IO) {
+                    wifiNetwork?.let { probeNetworkRtt(it, targetHost) }
+                }
+                val cellDeferred = async(Dispatchers.IO) {
+                    cellNetwork?.let { probeNetworkRtt(it, targetHost) }
+                }
+
+                val wRtt = wifiDeferred.await()
+                val cRtt = cellDeferred.await()
+                val s = DualNetSample(i, wRtt, cRtt)
+                currentSamples.add(s)
+                samples = currentSamples.toList()
+
+                delay(150L)
+            }
+
+            if (!isActive) return@launch
+
+            val wifiValid = currentSamples.mapNotNull { it.wifiRtt }
+            val cellValid = currentSamples.mapNotNull { it.cellRtt }
+
+            val wAvg = wifiValid.takeIf { it.isNotEmpty() }?.average()?.roundToInt()
+            val wMin = wifiValid.minOrNull()
+            val wMax = wifiValid.maxOrNull()
+            val wJitter = if (wMax != null && wMin != null) wMax - wMin else 0
+            val wLoss = if (totalRounds > 0) ((totalRounds - wifiValid.size) * 100 / totalRounds) else 0
+
+            val cAvg = cellValid.takeIf { it.isNotEmpty() }?.average()?.roundToInt()
+            val cMin = cellValid.minOrNull()
+            val cMax = cellValid.maxOrNull()
+            val cJitter = if (cMax != null && cMin != null) cMax - cMin else 0
+            val cLoss = if (totalRounds > 0) ((totalRounds - cellValid.size) * 100 / totalRounds) else 0
+
+            val verdict = when {
+                wAvg == null && cAvg == null ->
+                    WinnerVerdict("双网探测未通", ErrorRed, RedSoft, "两张物理网卡均未能与目标主机建立连接，请检查目标输入或数据连接")
+                wAvg == null ->
+                    WinnerVerdict("5G 蜂窝单路胜出", Blue, BlueSoft, "WiFi 物理网卡未能连通目标主机，5G 蜂窝保持正常传输")
+                cAvg == null ->
+                    WinnerVerdict("WiFi 单路胜出", Green, GreenSoft, "5G 蜂窝网卡未能连通目标主机（可能未开移动数据），WiFi 保持正常传输")
+                wLoss >= 15 && cLoss < 10 ->
+                    WinnerVerdict("5G 蜂窝稳定性胜出", Blue, BlueSoft, "WiFi 出现高丢包（${wLoss}%），5G 蜂窝链路表现更为坚韧")
+                cLoss >= 15 && wLoss < 10 ->
+                    WinnerVerdict("WiFi 稳定性胜出", Green, GreenSoft, "5G 蜂窝出现偶发丢包（${cLoss}%），本地 WiFi 局域网更稳定")
+                (cAvg - wAvg) > 10 ->
+                    WinnerVerdict("WiFi 时延胜出", Green, GreenSoft, "WiFi 平均时延低 ${cAvg - wAvg}ms，局域网直连响应更迅速")
+                (wAvg - cAvg) > 10 ->
+                    WinnerVerdict("5G 蜂窝时延胜出", Blue, BlueSoft, "5G 平均时延比 WiFi 快 ${wAvg - cAvg}ms，空口排队拥塞更低")
+                wJitter < cJitter ->
+                    WinnerVerdict("WiFi 抖动胜出", Green, GreenSoft, "双网时延接近，但 WiFi 延迟抖动更低（仅 ${wJitter}ms）")
+                else ->
+                    WinnerVerdict("双网势均力敌", Purple, Color(0xFFF3E8FF), "WiFi 与 5G 蜂窝均表现出优异的时延与零丢包水准")
+            }
+
+            summary = DualNetSummary(
+                wifiAvg = wAvg,
+                wifiMin = wMin,
+                wifiMax = wMax,
+                wifiJitter = wJitter,
+                wifiLossPct = wLoss,
+                cellAvg = cAvg,
+                cellMin = cMin,
+                cellMax = cMax,
+                cellJitter = cJitter,
+                cellLossPct = cLoss,
+                winner = verdict.title,
+                winnerColor = verdict.color,
+                winnerBg = verdict.bg,
+                reason = verdict.reason
+            )
+
+            progressText = "对测完成！${verdict.title}"
+            running = false
+        }
+    }
+
+    val operatorName = remember(cellNetwork) {
+        tm?.networkOperatorName.orEmpty().ifBlank { "蜂窝网络" }
+    }
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize().padding(horizontal = 14.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        item {
+            ToolPageHeader("双网对测", "5G/蜂窝 vs WiFi 同屏多网卡物理链路 PK", onBack, actionLabel = "刷新网络", onAction = { refreshNetworks() })
+        }
+
+        item {
+            SoftCard {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Surface(
+                        shape = ShapeM,
+                        color = if (wifiNetwork != null) GreenSoft else Color(0xFFF8FAFC),
+                        border = BorderStroke(1.dp, if (wifiNetwork != null) Green.copy(alpha = 0.4f) else Border),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Column(Modifier.padding(10.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                MarkBox("wifi", GreenSoft, Green)
+                                Spacer(Modifier.width(6.dp))
+                                Text("WiFi 无线网", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = TextDark)
+                            }
+                            Spacer(Modifier.height(4.dp))
+                            Text(if (wifiNetwork != null) "已连接活跃网卡" else "未检测到WiFi连接", color = if (wifiNetwork != null) Green else Muted, fontSize = 11.sp)
+                        }
+                    }
+
+                    Surface(
+                        shape = ShapeM,
+                        color = if (cellNetwork != null) BlueSoft else Color(0xFFF8FAFC),
+                        border = BorderStroke(1.dp, if (cellNetwork != null) Blue.copy(alpha = 0.4f) else Border),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Column(Modifier.padding(10.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                MarkBox("cellular", BlueSoft, Blue)
+                                Spacer(Modifier.width(6.dp))
+                                Text("5G 移动蜂窝", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = TextDark)
+                            }
+                            Spacer(Modifier.height(4.dp))
+                            Text(if (cellNetwork != null) "$operatorName (在线)" else "蜂窝休眠/未启用", color = if (cellNetwork != null) Blue else Muted, fontSize = 11.sp)
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(6.dp))
+                ConfigLongRow("目标") {
+                    CleanField(targetHost, { if (!running) targetHost = it }, "223.5.5.5", leadingMark = "host")
+                }
+                Spacer(Modifier.height(6.dp))
+                Button(
+                    onClick = { if (running) stopTest() else startTest() },
+                    modifier = Modifier.fillMaxWidth().height(42.dp),
+                    shape = ShapeM,
+                    colors = ButtonDefaults.buttonColors(containerColor = if (running) ErrorRed else Purple)
+                ) {
+                    Text(if (running) "停止对测" else "开始双网同屏对测", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                }
+            }
+        }
+
+        if (running) {
+            item {
+                SoftCard {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        SectionTitle("dual_net", "同屏对测中", Purple)
+                        Spacer(Modifier.weight(1f))
+                        samples.lastOrNull()?.let { last ->
+                            last.wifiRtt?.let { StatusChip("WiFi ${it}ms", GreenSoft, Green, compact = true) }
+                            Spacer(Modifier.width(4.dp))
+                            last.cellRtt?.let { StatusChip("5G ${it}ms", BlueSoft, Blue, compact = true) }
+                        }
+                    }
+                    LinearProgressIndicator(
+                        progress = { progressFraction },
+                        modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)),
+                        color = Purple,
+                        trackColor = Color(0xFFF3E8FF)
+                    )
+                    Text(progressText, color = Muted, fontSize = 12.sp)
+                }
+            }
+        }
+
+        if (samples.isNotEmpty()) {
+            item {
+                SoftCard {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        SectionTitle("chart", "同屏实时 RTT 走势", Blue)
+                        Spacer(Modifier.weight(1f))
+                        StatusChip("WiFi 绿线", GreenSoft, Green, compact = true)
+                        Spacer(Modifier.width(4.dp))
+                        StatusChip("5G 蓝线", BlueSoft, Blue, compact = true)
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    DualNetworkChart(
+                        samples = samples,
+                        modifier = Modifier.fillMaxWidth().height(140.dp).background(Color(0xFFF8FAFC), ShapeM).padding(8.dp)
+                    )
+                }
+            }
+        }
+
+        summary?.let { res ->
+            item {
+                SoftCard {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Surface(
+                            shape = RoundedCornerShape(16.dp),
+                            color = res.winnerBg,
+                            border = BorderStroke(1.5.dp, res.winnerColor.copy(alpha = 0.5f)),
+                            modifier = Modifier.width(64.dp).height(64.dp)
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                MarkBox("dual_net", Color.Transparent, res.winnerColor)
+                            }
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(res.winner, color = TextDark, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                            Spacer(Modifier.height(2.dp))
+                            Text(res.reason, color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
+                        }
+                    }
+                }
+            }
+
+            item {
+                SoftCard {
+                    SectionTitle("latency", "链路指标对比", Orange)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        InfoMetricTile("wifi", "WiFi平均", "${res.wifiAvg ?: "—"}ms", GreenSoft, Green, Modifier.weight(1f))
+                        InfoMetricTile("cellular", "5G平均", "${res.cellAvg ?: "—"}ms", BlueSoft, Blue, Modifier.weight(1f))
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        InfoMetricTile("hourglass", "WiFi抖动", "${res.wifiJitter}ms (丢包${res.wifiLossPct}%)", GreenSoft, Green, Modifier.weight(1f))
+                        InfoMetricTile("hourglass", "5G抖动", "${res.cellJitter}ms (丢包${res.cellLossPct}%)", BlueSoft, Blue, Modifier.weight(1f))
+                    }
+                }
+            }
+        }
+    }
+}
+
+private data class IperfIntervalLog(
+    val sec: Int,
+    val mbps: Double,
+    val bytes: Long
+)
+
+private data class IperfSummary(
+    val avgMbps: Double,
+    val peakMbps: Double,
+    val totalBytes: Long,
+    val durationSec: Int,
+    val isReverse: Boolean,
+    val gradeTitle: String,
+    val gradeColor: Color,
+    val gradeBg: Color,
+    val advice: String
+)
+
+@Composable
+private fun IperfSpeedChart(
+    logs: List<IperfIntervalLog>,
+    modifier: Modifier = Modifier
+) {
+    if (logs.isEmpty()) return
+    Canvas(modifier = modifier) {
+        val w = size.width
+        val h = size.height
+        if (w <= 0 || h <= 0) return@Canvas
+
+        val maxMbps = (logs.maxOfOrNull { it.mbps }?.times(1.15) ?: 100.0).coerceAtLeast(10.0)
+
+        fun yFor(v: Double): Float = h - (v / maxMbps).toFloat() * (h - 20f) - 10f
+        fun xFor(idx: Int): Float {
+            val total = (logs.size - 1).coerceAtLeast(1)
+            return (idx.toFloat() / total.toFloat()) * (w - 20f) + 10f
+        }
+
+        val fillPath = Path()
+        logs.forEachIndexed { idx, l ->
+            val x = xFor(idx)
+            val y = yFor(l.mbps)
+            if (idx == 0) {
+                fillPath.moveTo(x, h)
+                fillPath.lineTo(x, y)
+            } else {
+                fillPath.lineTo(x, y)
+            }
+        }
+        fillPath.lineTo(xFor(logs.lastIndex), h)
+        fillPath.close()
+
+        drawPath(
+            path = fillPath,
+            brush = Brush.verticalGradient(
+                colors = listOf(Blue.copy(alpha = 0.28f), Blue.copy(alpha = 0.02f)),
+                startY = 0f,
+                endY = h
+            )
+        )
+
+        val strokePath = Path()
+        logs.forEachIndexed { idx, l ->
+            val x = xFor(idx)
+            val y = yFor(l.mbps)
+            if (idx == 0) strokePath.moveTo(x, y) else strokePath.lineTo(x, y)
+        }
+        drawPath(strokePath, Blue, style = Stroke(width = 3.dp.toPx(), cap = StrokeCap.Round))
+
+        logs.forEachIndexed { idx, l ->
+            drawCircle(Blue, radius = 3.5.dp.toPx(), center = Offset(xFor(idx), yFor(l.mbps)))
+            drawCircle(Color.White, radius = 1.5.dp.toPx(), center = Offset(xFor(idx), yFor(l.mbps)))
+        }
+    }
+}
+
+@Composable
+private fun IperfToolPage(onBack: () -> Unit) {
+    val scope = rememberCoroutineScope()
+    var serverHost by remember { mutableStateOf("192.168.1.100") }
+    var serverPort by remember { mutableStateOf("5201") }
+    var isReverse by remember { mutableStateOf(true) } // true: 下行 (Download), false: 上行 (Upload)
+    var durationSec by remember { mutableStateOf(10) }
+
+    var running by remember { mutableStateOf(false) }
+    var progressFraction by remember { mutableStateOf(0f) }
+    var progressText by remember { mutableStateOf("") }
+    var currentMbps by remember { mutableStateOf(0.0) }
+    var totalBytesTransferred by remember { mutableStateOf(0L) }
+    var logs by remember { mutableStateOf<List<IperfIntervalLog>>(emptyList()) }
+    var summary by remember { mutableStateOf<IperfSummary?>(null) }
+    var testJob by remember { mutableStateOf<Job?>(null) }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            testJob?.cancel()
+        }
+    }
+
+    fun stopTest() {
+        testJob?.cancel()
+        testJob = null
+        running = false
+        progressText = "测速已停止"
+    }
+
+    fun startTest() {
+        testJob?.cancel()
+        running = true
+        summary = null
+        logs = emptyList()
+        currentMbps = 0.0
+        totalBytesTransferred = 0L
+        progressFraction = 0f
+        progressText = "正在连接 iPerf3 服务器 $serverHost:$serverPort..."
+
+        testJob = scope.launch(Dispatchers.IO) {
+            val portNum = serverPort.toIntOrNull() ?: 5201
+            val intervalList = mutableListOf<IperfIntervalLog>()
+
+            try {
+                val socket = Socket()
+                socket.tcpNoDelay = true
+                socket.soTimeout = (durationSec + 5) * 1000
+                socket.connect(InetSocketAddress(serverHost, portNum), 3500)
+
+                val outStream = socket.getOutputStream()
+                val inStream = socket.getInputStream()
+
+                val cookie = (1..36).map { "abcdefghijklmnopqrstuvwxyz0123456789".random() }.joinToString("") + "\u0000"
+                outStream.write(cookie.toByteArray(Charsets.US_ASCII))
+                outStream.flush()
+
+                val s1 = inStream.read()
+                if (s1 == -1) throw IOException("iPerf3 服务器过早关闭了握手连接")
+
+                val json = """{"tcp":true,"omit":0,"time":$durationSec,"num":0,"blocksize":65536,"parallel":1,"reverse":${if (isReverse) 1 else 0}}"""
+                val jsonBytes = json.toByteArray(Charsets.UTF_8)
+                val len = jsonBytes.size
+                val lenBuf = byteArrayOf(
+                    ((len shr 24) and 0xFF).toByte(),
+                    ((len shr 16) and 0xFF).toByte(),
+                    ((len shr 8) and 0xFF).toByte(),
+                    (len and 0xFF).toByte()
+                )
+                outStream.write(lenBuf)
+                outStream.write(jsonBytes)
+                outStream.flush()
+
+                progressText = if (isReverse) "正在进行下行 (Download) 吞吐测速..." else "正在进行上行 (Upload) 吞吐压测..."
+
+                val buffer = ByteArray(65536)
+                if (!isReverse) {
+                    kotlin.random.Random.nextBytes(buffer)
+                }
+
+                val startMs = SystemClock.elapsedRealtime()
+                var lastSampleMs = startMs
+                var bytesThisSec = 0L
+                var totalBytes = 0L
+                var currentSec = 1
+
+                while (isActive && (SystemClock.elapsedRealtime() - startMs) < durationSec * 1000L) {
+                    if (isReverse) {
+                        val read = inStream.read(buffer)
+                        if (read <= 0) break
+                        bytesThisSec += read
+                        totalBytes += read
+                    } else {
+                        outStream.write(buffer)
+                        bytesThisSec += buffer.size
+                        totalBytes += buffer.size
+                    }
+
+                    val now = SystemClock.elapsedRealtime()
+                    if (now - lastSampleMs >= 1000L) {
+                        val duration = (now - lastSampleMs) / 1000.0
+                        val mbps = (bytesThisSec * 8.0) / (duration * 1_000_000.0)
+                        intervalList.add(IperfIntervalLog(currentSec, mbps, bytesThisSec))
+                        logs = intervalList.toList()
+                        currentMbps = mbps
+                        totalBytesTransferred = totalBytes
+                        progressFraction = (now - startMs).toFloat() / (durationSec * 1000f)
+
+                        bytesThisSec = 0L
+                        lastSampleMs = now
+                        currentSec++
+                    }
+                }
+
+                runCatching { outStream.flush() }
+                runCatching { socket.close() }
+
+                if (!isActive) return@launch
+
+                val avg = if (intervalList.isNotEmpty()) intervalList.map { it.mbps }.average() else 0.0
+                val peak = intervalList.maxOfOrNull { it.mbps } ?: avg
+
+                val verdict = when {
+                    avg >= 500.0 ->
+                        WinnerVerdict(
+                            "千兆级极速吞吐 (Gigabit+)",
+                            Green,
+                            GreenSoft,
+                            "链路吞吐极高，已达到千兆内网极速水准，足以胜任局域网超大文件迁移、NAS 多路并发备份与极客流媒体应用。"
+                        )
+                    avg >= 100.0 ->
+                        WinnerVerdict(
+                            "百兆~千兆高速体验",
+                            Blue,
+                            BlueSoft,
+                            "达到常规百兆宽带/千兆内网优秀水准，满足全家 4K 在线观影、大型游戏高速下载及局域网多设备无缝调度。"
+                        )
+                    avg >= 30.0 ->
+                        WinnerVerdict(
+                            "家用常规宽带",
+                            Orange,
+                            Color(0xFFFFF3E0),
+                            "达到常规家庭宽带速率。若您处于千兆局域网内，建议检查网线是否只协商到百兆、或排查 Wi-Fi 频段是否处于 2.4GHz 干扰环境。"
+                        )
+                    else ->
+                        WinnerVerdict(
+                            "吞吐受阻与受限",
+                            ErrorRed,
+                            RedSoft,
+                            "吞吐量较低或测试期间出现严重降速。请检查路由器 CPU 负载、防火墙限速策略或 Wi-Fi 信号遮挡衰减。"
+                        )
+                }
+
+                summary = IperfSummary(
+                    avgMbps = avg,
+                    peakMbps = peak,
+                    totalBytes = totalBytes,
+                    durationSec = durationSec,
+                    isReverse = isReverse,
+                    gradeTitle = verdict.title,
+                    gradeColor = verdict.color,
+                    gradeBg = verdict.bg,
+                    advice = verdict.reason
+                )
+                progressText = "测速完成！平均速率：${String.format(java.util.Locale.US, "%.1f", avg)} Mbps"
+                progressFraction = 1f
+                running = false
+            } catch (e: Throwable) {
+                if (isActive) {
+                    progressText = "测速异常：${e.message ?: "连接失败"}"
+                    running = false
+                }
+            }
+        }
+    }
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize().padding(horizontal = 14.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        item {
+            ToolPageHeader("iPerf3测速", "局域网与公网 TCP/UDP 高性能吞吐压测", onBack)
+        }
+
+        item {
+            SoftCard {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Box(Modifier.weight(2f)) {
+                        ConfigLongRow("服务器") {
+                            CleanField(serverHost, { if (!running) serverHost = it }, "192.168.1.100", leadingMark = "host")
+                        }
+                    }
+                    Box(Modifier.weight(1.2f)) {
+                        ConfigLongRow("端口") {
+                            CleanField(serverPort, { if (!running) serverPort = it }, "5201", leadingMark = "port")
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(6.dp))
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("测试方向", color = TextDark, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(60.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.weight(1f)) {
+                        SoftChoicePill(
+                            text = "下行测速 (Download)",
+                            selected = isReverse,
+                            onClick = { if (!running) isReverse = true },
+                            compact = true
+                        )
+                        SoftChoicePill(
+                            text = "上行压测 (Upload)",
+                            selected = !isReverse,
+                            onClick = { if (!running) isReverse = false },
+                            compact = true
+                        )
+                    }
+                }
+
+                Spacer(Modifier.height(6.dp))
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("持续时长", color = TextDark, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(60.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.weight(1f)) {
+                        listOf(5, 10, 20).forEach { sec ->
+                            SoftChoicePill(
+                                text = "${sec}秒",
+                                selected = (durationSec == sec),
+                                onClick = { if (!running) durationSec = sec },
+                                compact = true
+                            )
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(8.dp))
+
+                Button(
+                    onClick = { if (running) stopTest() else startTest() },
+                    modifier = Modifier.fillMaxWidth().height(42.dp),
+                    shape = ShapeM,
+                    colors = ButtonDefaults.buttonColors(containerColor = if (running) ErrorRed else Green)
+                ) {
+                    Text(if (running) "停止测速" else "开始 iPerf3 测速", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                }
+            }
+        }
+
+        if (running) {
+            item {
+                SoftCard {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        SectionTitle("iperf", "打流测速中", Green)
+                        Spacer(Modifier.weight(1f))
+                        Text(
+                            "${String.format(java.util.Locale.US, "%.1f", currentMbps)} Mbps",
+                            color = Green,
+                            fontWeight = FontWeight.Black,
+                            fontSize = 18.sp
+                        )
+                    }
+                    LinearProgressIndicator(
+                        progress = { progressFraction },
+                        modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)),
+                        color = Green,
+                        trackColor = GreenSoft
+                    )
+                    Text(progressText, color = Muted, fontSize = 12.sp)
+                }
+            }
+        }
+
+        if (logs.isNotEmpty()) {
+            item {
+                SoftCard {
+                    SectionTitle("chart", "吞吐速率走势 (Mbps)", Blue)
+                    Spacer(Modifier.height(4.dp))
+                    IperfSpeedChart(
+                        logs = logs,
+                        modifier = Modifier.fillMaxWidth().height(140.dp).background(Color(0xFFF8FAFC), ShapeM).padding(8.dp)
+                    )
+                }
+            }
+        }
+
+        summary?.let { res ->
+            item {
+                SoftCard {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Surface(
+                            shape = RoundedCornerShape(16.dp),
+                            color = res.gradeBg,
+                            border = BorderStroke(1.5.dp, res.gradeColor.copy(alpha = 0.5f)),
+                            modifier = Modifier.width(64.dp).height(64.dp)
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                MarkBox("iperf", Color.Transparent, res.gradeColor)
+                            }
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        Column(Modifier.weight(1f)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(res.gradeTitle, color = TextDark, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                                Spacer(Modifier.width(6.dp))
+                                StatusChip(
+                                    if (res.isReverse) "下行" else "上行",
+                                    if (res.isReverse) BlueSoft else Orange.copy(alpha = 0.15f),
+                                    if (res.isReverse) Blue else Orange,
+                                    compact = true
+                                )
+                            }
+                            Spacer(Modifier.height(2.dp))
+                            Text(res.advice, color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
+                        }
+                    }
+                }
+            }
+
+            item {
+                SoftCard {
+                    SectionTitle("latency", "测速统计结果", Blue)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        InfoMetricTile("hourglass", "平均速率", "${String.format(java.util.Locale.US, "%.1f", res.avgMbps)} Mbps", BlueSoft, Blue, Modifier.weight(1f))
+                        InfoMetricTile("tune", "峰值速率", "${String.format(java.util.Locale.US, "%.1f", res.peakMbps)} Mbps", GreenSoft, Green, Modifier.weight(1f))
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        val mb = (res.totalBytes / (1024.0 * 1024.0))
+                        InfoMetricTile("download", "传输总量", "${String.format(java.util.Locale.US, "%.1f", mb)} MB", Color(0xFFF3E8FF), Purple, Modifier.weight(1f))
+                        InfoMetricTile("time", "测试时长", "${res.durationSec} 秒", Color(0xFFF8FAFC), TextDark, Modifier.weight(1f))
+                    }
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun ConfigLongRow(label: String, content: @Composable () -> Unit) {
     Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -13851,6 +14728,8 @@ private fun NetworkEnvironmentSettingsCard(
     onOpenIpv6Diagnostics: () -> Unit,
     onOpenBufferbloat: () -> Unit,
     onOpenCellularInfo: () -> Unit,
+    onOpenDualNetwork: () -> Unit,
+    onOpenIperf: () -> Unit,
     expanded: Boolean,
     onExpandedChange: (Boolean) -> Unit
 ) {
@@ -13927,7 +14806,9 @@ private fun NetworkEnvironmentSettingsCard(
             onOpenMtu = onOpenMtu,
             onOpenRoaming = onOpenRoaming,
             onOpenBufferbloat = onOpenBufferbloat,
-            onOpenCellularInfo = onOpenCellularInfo
+            onOpenCellularInfo = onOpenCellularInfo,
+            onOpenDualNetwork = onOpenDualNetwork,
+            onOpenIperf = onOpenIperf
         )
         Text(
             probeInfo.diagnosis,
