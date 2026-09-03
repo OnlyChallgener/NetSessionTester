@@ -1,4 +1,4 @@
-## v1.0.19 build148
+## v1.0.20 build149
 
 - 连接数测试与 Ping 监控线程池物理隔离：压测任务分配专属高并发调度器（256 并行），Ping 任务分配专属隔离调度器，杜绝压测并发阻塞导致 Ping 饥饿超时（消除假丢包）。
 - TCP Socket 内存极简化：单 Socket 启用 2KB 极简接收/发送缓冲区与端口快速复用（SO_REUSEADDR），万级并发会话对 Linux 内核 Socket 内存占用降低 95%，彻底防止 ENOBUFS / tcp_mem 溢出。

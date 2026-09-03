@@ -3,9 +3,10 @@
 This file keeps short historical notes for local self-test and release-fix builds.
 Formal user-facing release notes stay in `CHANGELOG.md`; current validation notes stay in `TEST_NOTES_current.md`.
 
-## v1.0.19 self-test line
+## v1.0.20 release line
 
-- build148: isolated connection test and ping dispatchers to eliminate false packet loss from thread starvation, enabled minimal 2KB socket buffers and SO_REUSEADDR to reduce kernel socket RAM by 95%, switched pending collection to an unbounded channel event stream, and smoothed token emission.
+- build149: official release of v1.0.20 containing thread isolation for connection tester and ping monitor, 2KB socket buffer optimization with SO_REUSEADDR, channel-based result collection, and smoothed token scheduling.
+- build148: verified thread isolation, minimal socket buffers, and channel collection in self-test.
 
 ## v1.0.18 release line
 

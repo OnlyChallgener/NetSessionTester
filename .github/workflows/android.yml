@@ -41,5 +41,5 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: NetSessionTester-v1.0.19-build148-signed.apk
+          name: NetSessionTester-v1.0.20-build149-signed.apk
           path: app/build/outputs/apk/release/app-release.apk

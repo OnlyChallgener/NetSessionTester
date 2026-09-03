@@ -1,11 +1,11 @@
-# v1.0.19 build148 自测重点
+# v1.0.20 build149 发版验证
 
 ## 版本与发版文件
 
-1. APP 版本应显示 `versionName=v1.0.19`、`versionCode=148`。
+1. APP 版本应显示 `versionName=v1.0.20`、`versionCode=149`。
 2. 根目录只保留当前长期文档：`README.md`、`CHANGELOG.md`、`TEST_NOTES_current.md`。
 3. 历史 build 说明应在 `docs/BUILD_HISTORY.md` 中查看，后续发版模板应使用 `docs/RELEASE_TEMPLATE.md`。
-4. `update.json` 状态设置为 `testing`（先不自动推送到普通用户）。
+4. `update.json` 状态设置为 `ready`，指向正式 Release 与 APK 下载地址。
 
 ## 连接测试与 Ping 并发自测
 

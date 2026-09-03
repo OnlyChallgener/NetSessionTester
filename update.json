@@ -1,18 +1,18 @@
 {
-  "versionCode": 148,
-  "versionName": "v1.0.19",
-  "build": 148,
-  "status": "testing",
+  "versionCode": 149,
+  "versionName": "v1.0.20",
+  "build": 149,
+  "status": "ready",
   "minReadyFileSize": 3000000,
-  "title": "发现新版本 v1.0.19 build148",
+  "title": "发现新版本 v1.0.20 build149",
   "content": [
-    "连接测试与Ping监控线程池物理隔离，消除并发建连阻塞导致Ping饥饿假丢包",
+    "连接测试与Ping监控线程池物理隔离，消除高并发建连对Ping的调度抢占",
     "TCP连接启用极简缓冲区与端口快速复用，万级会话内核内存占用降低95%",
-    "异步发射结果回收升级为Channel无锁事件流，大幅降低高CPS下的CPU与GC开销",
-    "优化高频发射流量整形，抑制突发脉冲引起的无线基带与路由器Bufferbloat",
-    "保持界面参数与交互布局完全不变，纯底层稳定性与极限性能优化"
+    "握手就绪回收升级为Channel无锁事件流，大幅提升调度吞吐与高CPS稳定性",
+    "优化高频发射微步平滑整形，显著缓解突发脉冲引发的排队缓冲膨胀",
+    "保持原有界面参数与交互布局完全不变，纯底层架构性能与可靠性飞跃"
   ],
-  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.0.19-148/NetSessionTester-v1.0.19-build148-signed.apk",
-  "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/tag/v1.0.19-148",
+  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.0.20-149/NetSessionTester-v1.0.20-build149-signed.apk",
+  "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/tag/v1.0.20-149",
   "force": false
 }

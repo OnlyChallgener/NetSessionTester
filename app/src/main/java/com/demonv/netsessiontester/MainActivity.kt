@@ -661,8 +661,8 @@ private fun currentAppVersionCode(context: Context): Long = runCatching {
 private fun currentAppVersionName(context: Context): String {
     return runCatching {
         val pkg = context.packageManager.getPackageInfo(context.packageName, 0)
-        pkg.versionName?.takeIf { it.isNotBlank() } ?: "v1.0.19"
-    }.getOrDefault("v1.0.19")
+        pkg.versionName?.takeIf { it.isNotBlank() } ?: "v1.0.20"
+    }.getOrDefault("v1.0.20")
 }
 
 private fun displayVersionName(raw: String): String {
