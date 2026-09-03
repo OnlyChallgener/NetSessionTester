@@ -77,6 +77,7 @@ internal data class PingRuntimeState(
 object AppTestRuntime {
     private val runtimeJob = SupervisorJob()
     private val scope: CoroutineScope = CoroutineScope(runtimeJob + Dispatchers.IO)
+    internal val PingDispatcher = Dispatchers.IO.limitedParallelism(16)
 
     private val commandMutex = Mutex()
     private val connectionFinishing = AtomicBoolean(false)
@@ -548,7 +549,7 @@ object AppTestRuntime {
         schedulePingLogSave(_pingState.value.logs)
         startForeground(context, "Ping准备中：$target")
         acquireWakeLock(context, PING_WAKE_LOCK_TIMEOUT_MS)
-        val newJob = scope.launch(start = CoroutineStart.LAZY) {
+        val newJob = scope.launch(context = PingDispatcher, start = CoroutineStart.LAZY) {
             runPingSession(sessionId, target, intervalMs, timeoutMs, maxCount, protocol)
         }
         pingJob = newJob
@@ -736,7 +737,7 @@ object AppTestRuntime {
                             scheduled++
                             inFlight.incrementAndGet()
                             val signature = currentNetwork
-                            launch {
+                            launch(PingDispatcher) {
                                 try {
                                     val result = tcpSocketPingResolved(resolved.address, tcpProbe.port, timeoutMs.coerceIn(180, 5_000))
                                     resultMutex.withLock {
@@ -768,11 +769,18 @@ object AppTestRuntime {
             } else {
                 while (currentCoroutineContext().isActive && (maxCount == null || sent.get() < maxCount)) {
                     if (refreshAfterNetworkChange() || resolved.error != null) { delay(100L); continue }
-                    val loop = SystemClock.elapsedRealtime()
+                    val remaining = maxCount?.let { (it - sent.get()).coerceAtLeast(0) } ?: 50
+                    if (remaining <= 0) break
                     val signature = currentNetwork
-                    val result = icmpPingResolved(resolved.address, timeoutMs, resolved.protocol)
-                    if (networkSignature() == signature) handleResult(result.latencyMs, result.failure)
-                    delay((intervalMs - (SystemClock.elapsedRealtime() - loop)).coerceAtLeast(0L))
+                    val streamed = streamIcmpPingResolved(resolved.address, timeoutMs, resolved.protocol, intervalMs, remaining.coerceAtMost(50)) { event ->
+                        if (networkSignature() == signature) handleResult(event.latencyMs, event.failure)
+                    }
+                    if (streamed <= 0) {
+                        val loop = SystemClock.elapsedRealtime()
+                        val result = icmpPingResolved(resolved.address, timeoutMs, resolved.protocol)
+                        if (networkSignature() == signature) handleResult(result.latencyMs, result.failure)
+                        delay((intervalMs - (SystemClock.elapsedRealtime() - loop)).coerceAtLeast(0L))
+                    }
                 }
             }
         } finally {

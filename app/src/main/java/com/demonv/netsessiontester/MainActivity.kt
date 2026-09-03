@@ -661,8 +661,8 @@ private fun currentAppVersionCode(context: Context): Long = runCatching {
 private fun currentAppVersionName(context: Context): String {
     return runCatching {
         val pkg = context.packageManager.getPackageInfo(context.packageName, 0)
-        pkg.versionName?.takeIf { it.isNotBlank() } ?: "v1.0.18"
-    }.getOrDefault("v1.0.18")
+        pkg.versionName?.takeIf { it.isNotBlank() } ?: "v1.0.19"
+    }.getOrDefault("v1.0.19")
 }
 
 private fun displayVersionName(raw: String): String {
@@ -2791,16 +2791,18 @@ private suspend fun tcpSocketProbe(address: String, port: Int, timeoutMs: Int): 
     }.getOrNull()
 }
 
-internal suspend fun findTcpPingPort(address: String, timeoutMs: Int): TcpPingProbe? = withContext(Dispatchers.IO) {
-    val probeTimeout = timeoutMs.coerceIn(180, 650)
-    for (port in TCP_PING_PROBE_PORTS) {
-        val probe = tcpSocketProbe(address, port, probeTimeout)
-        if (probe != null) return@withContext probe
+internal suspend fun findTcpPingPort(address: String, timeoutMs: Int): TcpPingProbe? = withContext(AppTestRuntime.PingDispatcher) {
+    val probeTimeout = timeoutMs.coerceIn(180, 450)
+    coroutineScope {
+        val jobs = TCP_PING_PROBE_PORTS.take(4).map { port ->
+            async { tcpSocketProbe(address, port, probeTimeout) }
+        }
+        val results = jobs.awaitAll().filterNotNull()
+        results.minByOrNull { it.latencyMs }
     }
-    null
 }
 
-internal suspend fun tcpSocketPingResolved(address: String, port: Int, timeoutMs: Int): PingCommandResult = withContext(Dispatchers.IO) {
+internal suspend fun tcpSocketPingResolved(address: String, port: Int, timeoutMs: Int): PingCommandResult = withContext(AppTestRuntime.PingDispatcher) {
     runCatching {
         val startedAt = System.nanoTime()
         Socket().use { socket ->
@@ -2820,7 +2822,7 @@ internal suspend fun tcpSocketPingResolved(address: String, port: Int, timeoutMs
     }
 }
 
-internal suspend fun icmpPingResolved(address: String, timeoutMs: Int, protocol: PingProtocolMode): PingCommandResult = withContext(Dispatchers.IO) {
+internal suspend fun icmpPingResolved(address: String, timeoutMs: Int, protocol: PingProtocolMode): PingCommandResult = withContext(AppTestRuntime.PingDispatcher) {
     val timeoutSec = ((timeoutMs.coerceIn(300, 10_000) + 999) / 1000).coerceAtLeast(1)
     suspend fun runCommand(command: List<String>): PingCommandResult {
         var process: Process? = null
@@ -2884,7 +2886,7 @@ internal suspend fun streamIcmpPingResolved(
     intervalMs: Long,
     maxCount: Int,
     onEvent: suspend (PingStreamEvent) -> Unit
-): Int = withContext(Dispatchers.IO) {
+): Int = withContext(AppTestRuntime.PingDispatcher) {
     val timeoutSec = ((timeoutMs.coerceIn(300, 10_000) + 999) / 1000).coerceAtLeast(1)
     val intervalSec = String.format(java.util.Locale.US, "%.3f", intervalMs.coerceIn(25L, 60_000L) / 1000.0)
     val base = when (protocol) {
@@ -6196,7 +6198,8 @@ private fun VersionInfoDialog(
                     Text("当前版本", color = Muted, fontSize = 12.sp, modifier = Modifier.weight(1f))
                     StatusChip(displayVersionName(currentAppVersionName(LocalContext.current)), BlueSoft, Blue, compact = true)
                 }
-                VersionLine(displayVersionName(currentAppVersionName(LocalContext.current)), "历史清空增加二次确认与10秒撤销，优化删除按钮，并修复NAT、漫游历史交互。")
+                VersionLine(displayVersionName(currentAppVersionName(LocalContext.current)), "连接测试与Ping调度线程池物理隔离，启用极简Socket缓冲区与Channel异步回收。")
+                VersionLine("v1.0.18", "历史清空增加二次确认与10秒撤销，优化删除按钮，并修复NAT、漫游历史交互。")
                 VersionLine("v1.0.17", "统一各页面滑动删除交互，公网IP改为网络变化驱动刷新。")
                 VersionLine("v1.0.16", "修复弹窗、二级页面与底部栏叠图透图，MTU暂停改为停止。")
                 VersionLine("v1.0.15", "修复后台Ping终止、连接测试页面跳转与运行状态残留。")

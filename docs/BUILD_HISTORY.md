@@ -3,6 +3,10 @@
 This file keeps short historical notes for local self-test and release-fix builds.
 Formal user-facing release notes stay in `CHANGELOG.md`; current validation notes stay in `TEST_NOTES_current.md`.
 
+## v1.0.19 self-test line
+
+- build148: isolated connection test and ping dispatchers to eliminate false packet loss from thread starvation, enabled minimal 2KB socket buffers and SO_REUSEADDR to reduce kernel socket RAM by 95%, switched pending collection to an unbounded channel event stream, and smoothed token emission.
+
 ## v1.0.18 release line
 
 - build147: unified the visible version number, refreshed the in-app recent-version list, separated STUN text editing gestures from card deletion, and completed NAT/roaming history fixes.

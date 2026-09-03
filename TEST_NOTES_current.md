@@ -1,11 +1,19 @@
-# v1.0.18 build147 自测重点
+# v1.0.19 build148 自测重点
 
 ## 版本与发版文件
 
-1. APP 版本应显示 `versionName=v1.0.18`、`versionCode=147`。
+1. APP 版本应显示 `versionName=v1.0.19`、`versionCode=148`。
 2. 根目录只保留当前长期文档：`README.md`、`CHANGELOG.md`、`TEST_NOTES_current.md`。
 3. 历史 build 说明应在 `docs/BUILD_HISTORY.md` 中查看，后续发版模板应使用 `docs/RELEASE_TEMPLATE.md`。
-4. `update.json` 应指向 `v1.0.18-147` 与 build147 APK。
+4. `update.json` 状态设置为 `testing`（先不自动推送到普通用户）。
+
+## 连接测试与 Ping 并发自测
+
+1. 启动连接数测试（例如目标 CPS 200~500），同时开启 Ping 监控。
+2. 观察 Ping 调度是否流畅，检查调度线程隔离后是否消除由于压测并发导致的线程饥饿假丢包。
+3. 观察万级会话保持时内存占用（验证 2KB 极简 Socket 缓冲区与 SO_REUSEADDR 效果）。
+4. 验证 Channel 异步回收握手连接无丢单、无 CPU 假死、统计数值准确。
+5. 验证不改变任何现有界面参数布局与交互。
 
 ## NAT 与删除手势
 

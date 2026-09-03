@@ -38,6 +38,7 @@ import java.net.Socket
 import java.net.SocketException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
+import kotlinx.coroutines.channels.Channel
 import java.io.File
 import java.util.Collections
 import java.util.concurrent.atomic.AtomicInteger
@@ -60,6 +61,7 @@ class TcpTester(context: Context) {
     private val releaseEpoch = AtomicLong(0L)
     private val fdReserve = 128
     private val absoluteFdCeiling = 32_640
+    private val testerDispatcher = Dispatchers.IO.limitedParallelism(256)
 
     private fun readProcessFdSoftLimit(): Int {
         return runCatching {
@@ -158,8 +160,9 @@ class TcpTester(context: Context) {
         onLog(LogLine(level = LogLevel.SUCCESS, text = "${protocol.label} 解析成功：${addressText.joinToString(" / ")}"))
         onLog(LogLine(level = LogLevel.INFO, text = "${protocol.label} 安全FD策略：软上限 $fdSoftLimit，测试前占用 $baselineFd，预留 $fdReserve，目标活动上限 $fdSafeStop；活动达到 32000 后才分级降速试探FD上限。"))
 
-        val pendingScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-        val pending = ArrayDeque<Deferred<OpenResult>>()
+        val pendingScope = CoroutineScope(SupervisorJob() + testerDispatcher)
+        val resultChannel = Channel<OpenResult>(Channel.UNLIMITED)
+        val pendingCount = AtomicInteger(0)
         val errors = linkedMapOf<String, Int>()
 
         var totalSuccess = 0
@@ -193,24 +196,14 @@ class TcpTester(context: Context) {
         }
 
         suspend fun drainCompleted(): Int {
-            if (pending.isEmpty()) return 0
             var drained = 0
             val sockets = mutableListOf<Socket>()
-            val iterator = pending.iterator()
-            while (iterator.hasNext()) {
-                val job = iterator.next()
-                if (!job.isCompleted) continue
-                iterator.remove()
+            while (true) {
+                val pollResult = resultChannel.tryReceive()
+                if (!pollResult.isSuccess) break
+                val result = pollResult.getOrNull() ?: break
                 drained++
-                val result = try {
-                    job.await()
-                } catch (_: CancellationException) {
-                    OpenResult(discarded = true)
-                } catch (error: Error) {
-                    throw error
-                } catch (error: Throwable) {
-                    OpenResult(error = classifyError(error))
-                }
+                pendingCount.decrementAndGet()
                 if (result.discarded) continue
                 result.socket?.let { socket ->
                     sockets += socket
@@ -244,13 +237,23 @@ class TcpTester(context: Context) {
             val address = addresses[addressOffset % addresses.size]
             addressOffset++
             launchedAttempts++
-            pending.addLast(pendingScope.async {
-                openOne(address, config.port, timeoutMs, expectedEpoch)
-            })
+            pendingCount.incrementAndGet()
+            pendingScope.launch {
+                try {
+                    val res = openOne(address, config.port, timeoutMs, expectedEpoch)
+                    resultChannel.send(res)
+                } catch (_: CancellationException) {
+                    resultChannel.send(OpenResult(discarded = true))
+                } catch (error: Error) {
+                    throw error
+                } catch (error: Throwable) {
+                    resultChannel.send(OpenResult(error = classifyError(error)))
+                }
+            }
         }
 
         fun pendingFdBudget(): Int {
-            val occupied = totalSuccess + pending.size
+            val occupied = totalSuccess + pendingCount.get()
             return (fdSafeStop - occupied).coerceAtLeast(0)
         }
 
@@ -299,14 +302,15 @@ class TcpTester(context: Context) {
                 if (stopReason != null) {
                     stats = stats.copy(phase = stopReason, errorSummary = errors.toMap(), maxStableSessions = maxStable)
                     onStats(stats)
-                    onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} $stopReason：成功 $totalSuccess，失败 $totalFailure，已发起 $launchedAttempts，pending ${pending.size}，峰值 $maxStable"))
+                    onLog(LogLine(level = LogLevel.ERROR, text = "${protocol.label} $stopReason：成功 $totalSuccess，失败 $totalFailure，已发起 $launchedAttempts，pending ${pendingCount.get()}，峰值 $maxStable"))
                     break
                 }
 
                 val now = System.currentTimeMillis()
                 val elapsedTokenMs = (now - lastTokenAt).coerceAtLeast(0L)
                 lastTokenAt = now
-                val remainingFd = (fdSafeStop - totalSuccess - pending.size).coerceAtLeast(0)
+                val inFlight = pendingCount.get()
+                val remainingFd = (fdSafeStop - totalSuccess - inFlight).coerceAtLeast(0)
                 val effectiveTargetCps = adaptiveCpsForFdProbe(totalSuccess, remainingFd)
                 tokenCarry += effectiveTargetCps.toDouble() * elapsedTokenMs.toDouble() / 1000.0
                 var toLaunch = floor(tokenCarry).toInt()
@@ -316,10 +320,10 @@ class TcpTester(context: Context) {
                     // Treat every in-flight attempt as a possible success and a possible failure.
                     // This keeps a slow batch from overshooting a small success target or
                     // reporting hundreds of failures after the failure guard has been reached.
-                    val remainingSuccess = (config.successLimit - totalSuccess - pending.size).coerceAtLeast(0)
+                    val remainingSuccess = (config.successLimit - totalSuccess - inFlight).coerceAtLeast(0)
                     val failureLimit = effectiveFailureLimit(maxStable, config.failureLimit)
-                    val remainingFailure = (failureLimit - totalFailure - pending.size).coerceAtLeast(0)
-                    val pendingRoom = (maxPending - pending.size).coerceAtLeast(0)
+                    val remainingFailure = (failureLimit - totalFailure - inFlight).coerceAtLeast(0)
+                    val pendingRoom = (maxPending - inFlight).coerceAtLeast(0)
                     val fdRoom = if (maxStable >= fdClipStart || totalSuccess >= fdClipStart) pendingFdBudget() else pendingFdBudget().coerceAtMost(maxPending)
                     toLaunch = minOf(toLaunch, remainingSuccess, remainingFailure, pendingRoom, fdRoom)
                     val timeout = effectiveTimeoutMs(config.timeoutMs, maxStable)
@@ -346,13 +350,14 @@ class TcpTester(context: Context) {
                         errorSummary = errors.toMap()
                     )
                     onStats(stats)
-                    if (uiNow - startedAt >= 1_000L && uiNow % 5_000L < schedulerIntervalMs) {
-                        onLog(LogLine(level = LogLevel.STAT, text = "${protocol.label} 活动 $totalSuccess｜失败 $totalFailure｜pending ${pending.size}｜实际CPS $lastCps/s"))
+                    if (uiNow - startedAt >= 1_000L && uiNow % 5_000L < 1_000L) {
+                        onLog(LogLine(level = LogLevel.STAT, text = "${protocol.label} 活动 $totalSuccess｜失败 $totalFailure｜pending ${pendingCount.get()}｜实际CPS $lastCps/s"))
                     }
                 }
 
+                val targetStepMs = minOf(schedulerIntervalMs, 25L)
                 val cost = System.currentTimeMillis() - loopStart
-                val sleep = schedulerIntervalMs - cost
+                val sleep = targetStepMs - cost
                 if (sleep > 0) delay(sleep) else yield()
             }
 
@@ -362,6 +367,7 @@ class TcpTester(context: Context) {
             // 关键：停止新增后立即切 epoch。未完成的 connect 后续即使成功，也会自关闭，不会污染已结束统计。
             releaseEpoch.compareAndSet(expectedEpoch, expectedEpoch + 1)
             pendingScope.cancel()
+            resultChannel.close()
         }
 
         val growthEndedAt = System.currentTimeMillis()
@@ -497,6 +503,9 @@ class TcpTester(context: Context) {
             if (releaseEpoch.get() != expectedEpoch) return OpenResult(discarded = true)
             val candidate = Socket()
             socket = candidate
+            candidate.reuseAddress = true
+            runCatching { candidate.setReceiveBufferSize(2048) }
+            runCatching { candidate.setSendBufferSize(2048) }
             candidate.keepAlive = true
             candidate.tcpNoDelay = true
             val connectStartedAt = System.nanoTime()

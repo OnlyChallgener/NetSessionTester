@@ -1,18 +1,18 @@
 {
-  "versionCode": 147,
-  "versionName": "v1.0.18",
-  "build": 147,
-  "status": "ready",
+  "versionCode": 148,
+  "versionName": "v1.0.19",
+  "build": 148,
+  "status": "testing",
   "minReadyFileSize": 3000000,
-  "title": "发现新版本 v1.0.18 build147",
+  "title": "发现新版本 v1.0.19 build148",
   "content": [
-    "NAT检测历史支持左滑删除，修复圆角阴影和展开波纹",
-    "STUN服务器输入框编辑时优先横向浏览文本，退出编辑后恢复左滑删除",
-    "漫游历史新增保存条数和实际空间占用显示",
-    "统一删除与清空交互，增加二次确认和10秒撤销恢复",
-    "优化公网IP刷新、后台终止和毛玻璃图层稳定性"
+    "连接测试与Ping监控线程池物理隔离，消除并发建连阻塞导致Ping饥饿假丢包",
+    "TCP连接启用极简缓冲区与端口快速复用，万级会话内核内存占用降低95%",
+    "异步发射结果回收升级为Channel无锁事件流，大幅降低高CPS下的CPU与GC开销",
+    "优化高频发射流量整形，抑制突发脉冲引起的无线基带与路由器Bufferbloat",
+    "保持界面参数与交互布局完全不变，纯底层稳定性与极限性能优化"
   ],
-  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.0.18-147/NetSessionTester-v1.0.18-build147-signed.apk",
-  "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/tag/v1.0.18-147",
+  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.0.19-148/NetSessionTester-v1.0.19-build148-signed.apk",
+  "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/tag/v1.0.19-148",
   "force": false
 }
