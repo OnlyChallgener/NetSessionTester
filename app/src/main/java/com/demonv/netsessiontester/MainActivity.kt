@@ -12918,7 +12918,7 @@ private fun BufferbloatToolPage(onBack: () -> Unit) {
     var host by remember { mutableStateOf("223.5.5.5") }
     var phase by remember { mutableStateOf(BufferbloatPhase.IDLE) }
     var progressText by remember { mutableStateOf("") }
-    var progressFraction by remember { mutableFloatStateOf(0f) }
+    var progressFraction by remember { mutableStateOf(0f) }
     var currentPingMs by remember { mutableStateOf<Int?>(null) }
     var result by remember { mutableStateOf<BufferbloatResult?>(null) }
     var testJob by remember { mutableStateOf<Job?>(null) }
@@ -13060,7 +13060,7 @@ private fun BufferbloatToolPage(onBack: () -> Unit) {
         item {
             SoftCard {
                 ConfigLongRow("目标") {
-                    CleanField(host, { host = it }, "223.5.5.5", leadingMark = "host", enabled = (phase == BufferbloatPhase.IDLE || phase == BufferbloatPhase.DONE))
+                    CleanField(host, { if (phase == BufferbloatPhase.IDLE || phase == BufferbloatPhase.DONE) host = it }, "223.5.5.5", leadingMark = "host")
                 }
                 Spacer(Modifier.height(6.dp))
                 Button(
@@ -13293,9 +13293,8 @@ private fun parseAllCellInfo(context: Context): List<ParsedCellData> {
             val strength = info.cellSignalStrength
             val psc = identity.psc.takeIf { it in 0..511 }?.toString() ?: "—"
             val lac = identity.lac.takeIf { it in 0..65535 }?.toString() ?: "—"
-            val cid = identity.cid.takeIf { it in 0..268435455 }?.toString() ?: "—"
-            val rscp = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) strength.rscp.takeIf { it in -120..(-24) } else null
-            val rating = cellSignalRating(rscp)
+            val dbm = strength.dbm.takeIf { it in -120..(-24) }
+            val rating = cellSignalRating(dbm)
             parsed.add(
                 ParsedCellData(
                     isServing = info.isRegistered,
@@ -13304,7 +13303,7 @@ private fun parseAllCellInfo(context: Context): List<ParsedCellData> {
                     pci = psc,
                     tac = lac,
                     cellId = "CID: $cid",
-                    rsrp = rscp,
+                    rsrp = dbm,
                     rsrq = null,
                     sinr = null,
                     ratingText = rating.first,
