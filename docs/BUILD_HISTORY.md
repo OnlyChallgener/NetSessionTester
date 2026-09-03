@@ -5,6 +5,7 @@ Formal user-facing release notes stay in `CHANGELOG.md`; current validation note
 
 ## v1.0.21 beta line
 
+- build152: added 7-day history storage for Bufferbloat, Dual Network, and iPerf3 with daily folding and swipe-to-delete; fixed iPerf3 layout truncation; optimized NAT with domestic STUN pool and Double NAT/CGNAT/UPnP detection; optimized MTU with heuristic fast search, TCP MSS cross-validation, and gaming console advice.
 - build151: added Dual Network (5G vs WiFi) concurrent real-time comparison test with Network.bindSocket and built-in iPerf3 bandwidth throughput testing client.
 - build150: introduced Bufferbloat rating diagnostic with unloaded/loaded queue delay evaluation and 5G/4G cellular RF diagnostics for base station frequency bands and signal parameters.
 

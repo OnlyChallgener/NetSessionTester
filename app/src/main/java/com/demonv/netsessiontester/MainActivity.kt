@@ -672,8 +672,8 @@ private fun currentAppVersionCode(context: Context): Long = runCatching {
 private fun currentAppVersionName(context: Context): String {
     return runCatching {
         val pkg = context.packageManager.getPackageInfo(context.packageName, 0)
-        pkg.versionName?.takeIf { it.isNotBlank() } ?: "v1.0.21-beta2"
-    }.getOrDefault("v1.0.21-beta2")
+        pkg.versionName?.takeIf { it.isNotBlank() } ?: "v1.0.21-beta3"
+    }.getOrDefault("v1.0.21-beta3")
 }
 
 private fun displayVersionName(raw: String): String {
@@ -1699,6 +1699,18 @@ private fun buildNetworkProbeInfo(
     val stunBackupText = stun?.let { if (it.usedBackup) "已启用备用节点。" else "" } ?: ""
     val rfc5780Text = stun?.let { if (it.filteringVerified) "RFC5780节点 ${it.rfc5780Server} 已验证回包限制。" else "" } ?: ""
     val stunNodeText = if (full && stunTotal > 0) "STUN节点 ${multiStun}/${stunTotal} 成功。${stunRoundText}${stunBackupText}${rfc5780Text}" else ""
+    val isCgnat = (publicV4 != null && isCgnatIpv4(publicV4)) || (stun?.mappedIp != null && isCgnatIpv4(stun.mappedIp))
+    val isDoubleNat = isCgnat || (localIpv4 != null && isPrivateIpv4(localIpv4) && publicV4 != null && !isDirectPublicV4)
+    val upnpSupported = if (full && !env.hasVpn && localIpv4 != null && isPrivateIpv4(localIpv4)) probeUpnpAvailable() else false
+    val natDepthTag = when {
+        env.hasVpn -> ""
+        isDirectPublicV4 -> "【公网直连】"
+        isCgnat -> "【运营商CGNAT大内网】"
+        isDoubleNat -> "【双层NAT】"
+        else -> "【单层NAT】"
+    }
+    val upnpTag = if (upnpSupported) " · 局域网网关已开启UPnP自动端口映射" else ""
+
     val diagnosis = when {
         env.hasVpn -> "检测到VPN/代理，NAT、出口和IPv6结果仅供参考。"
         dns.fakeIpDetected -> "检测到Fake-IP，DNS可能被代理工具接管。"
@@ -1730,7 +1742,7 @@ private fun buildNetworkProbeInfo(
         ipv6Status = ipv6Status,
         dnsStatus = dnsStatus,
         confidence = confidence,
-        diagnosis = diagnosis,
+        diagnosis = if (natDepthTag.isNotBlank()) "$natDepthTag$diagnosis$upnpTag" else diagnosis,
         proxyNotice = if (env.hasVpn) "VPN/代理结果仅供参考" else "",
         refreshMode = if (full) "已检测" else "待检测"
     )
@@ -1818,6 +1830,29 @@ private fun isPrivateIpv4(ip: String): Boolean {
         (a == 100 && b in 64..127)
 }
 
+private fun isCgnatIpv4(ip: String): Boolean {
+    val parts = ip.split('.').mapNotNull { it.toIntOrNull() }
+    if (parts.size != 4) return false
+    return parts[0] == 100 && parts[1] in 64..127
+}
+
+private fun probeUpnpAvailable(timeoutMs: Int = 400): Boolean = runCatching {
+    DatagramSocket().use { socket ->
+        socket.soTimeout = timeoutMs
+        val search = "M-SEARCH * HTTP/1.1\r\n" +
+                "HOST: 239.255.255.250:1900\r\n" +
+                "MAN: \"ssdp:discover\"\r\n" +
+                "MX: 1\r\n" +
+                "ST: urn:schemas-upnp-org:device:InternetGatewayDevice:1\r\n\r\n"
+        val data = search.toByteArray(Charsets.US_ASCII)
+        socket.send(DatagramPacket(data, data.size, InetAddress.getByName("239.255.255.250"), 1900))
+        val buf = ByteArray(1024)
+        val resp = DatagramPacket(buf, buf.size)
+        socket.receive(resp)
+        String(resp.data, 0, resp.length, Charsets.US_ASCII).contains("HTTP/1.1 200 OK", ignoreCase = true)
+    }
+}.getOrDefault(false)
+
 private fun tcpConnectLatencyMs(host: String, port: Int, timeoutMs: Int): Int {
     val start = System.currentTimeMillis()
     Socket().use { socket ->
@@ -1871,16 +1906,16 @@ private fun stunBindingProbe(): StunProbeResult {
     // 方案A：公共 STUN 增强版。
     // 关键点：同一个 UDP socket 复用本地端口、主 6 备 2、标准 2 轮复测、够票提前出结果、备用只补票。
     val primary = listOf(
-        StunEndpoint("stun.cloudflare.com", 3478),
+        StunEndpoint("stun.chat.bilibili.com", 3478),
+        StunEndpoint("stun.hitv.com", 3478),
+        StunEndpoint("stun.douyucdn.cn", 3478),
         StunEndpoint("stun.miwifi.com", 3478),
-        StunEndpoint("stun.voipstunt.com", 3478),
-        StunEndpoint("stun.voipbuster.com", 3478),
-        StunEndpoint("stun.internetcalls.com", 3478),
-        StunEndpoint("stun.voip.aebc.com", 3478)
+        StunEndpoint("stun.cloudflare.com", 3478),
+        StunEndpoint("stun.syncthing.net", 3478)
     )
     val backup = listOf(
-        StunEndpoint("stun.fitauto.ru", 3478),
-        StunEndpoint("stun.qq.com", 3478)
+        StunEndpoint("stun.qq.com", 3478),
+        StunEndpoint("stun.voip.aebc.com", 3478)
     )
 
     DatagramSocket().use { socket ->
@@ -6223,7 +6258,8 @@ private fun VersionInfoDialog(
                     Text("当前版本", color = Muted, fontSize = 12.sp, modifier = Modifier.weight(1f))
                     StatusChip(displayVersionName(currentAppVersionName(LocalContext.current)), BlueSoft, Blue, compact = true)
                 }
-                VersionLine(displayVersionName(currentAppVersionName(LocalContext.current)), "新增双网并发(5G vs WiFi)同屏对测与内置iPerf3吞吐测速客户端，快捷矩阵升级4行2列。")
+                VersionLine(displayVersionName(currentAppVersionName(LocalContext.current)), "新增缓冲评级/双网/iPerf3三大模块7天历史与折叠删除，修复iPerf3排版，深度优化NAT与MTU。")
+                VersionLine("v1.0.21-beta2", "新增双网并发(5G vs WiFi)同屏对测与内置iPerf3吞吐测速客户端，快捷矩阵升级4行2列。")
                 VersionLine("v1.0.21-beta1", "新增Bufferbloat缓冲膨胀评级与5G/4G基站射频工参看板，快捷矩阵升级3行2列。")
                 VersionLine("v1.0.20", "连接测试与Ping调度线程池物理隔离，启用极简Socket缓冲区与Channel异步回收。")
                 VersionLine("v1.0.18", "历史清空增加二次确认与10秒撤销，优化删除按钮，并修复NAT、漫游历史交互。")
@@ -9077,6 +9113,354 @@ private class NetToolHistoryStore(context: Context) {
             }
         }.toString()).apply()
     }
+
+    fun loadBufferbloat(): List<BufferbloatHistoryRecord> {
+        val cutoff = System.currentTimeMillis() - 7L * 24 * 3600 * 1000L
+        val arr = JSONArray(prefs.getString("bufferbloat_history", "[]") ?: "[]")
+        val list = buildList {
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                val ts = o.optLong("timestamp", 0L)
+                if (ts >= cutoff) {
+                    add(
+                        BufferbloatHistoryRecord(
+                            id = o.optLong("id", ts),
+                            timestamp = ts,
+                            timeText = o.optString("timeText"),
+                            targetHost = o.optString("targetHost"),
+                            unloadedRtt = o.optInt("unloadedRtt"),
+                            loadedRtt = o.optInt("loadedRtt"),
+                            deltaRtt = o.optInt("deltaRtt"),
+                            grade = o.optString("grade"),
+                            advice = o.optString("advice")
+                        )
+                    )
+                }
+            }
+        }
+        return list
+    }
+
+    fun addBufferbloat(record: BufferbloatHistoryRecord) {
+        val cutoff = System.currentTimeMillis() - 7L * 24 * 3600 * 1000L
+        val next = (listOf(record) + loadBufferbloat().filterNot { it.id == record.id }).filter { it.timestamp >= cutoff }
+        prefs.edit().putString("bufferbloat_history", JSONArray().apply {
+            next.forEach { r ->
+                put(JSONObject()
+                    .put("id", r.id)
+                    .put("timestamp", r.timestamp)
+                    .put("timeText", r.timeText)
+                    .put("targetHost", r.targetHost)
+                    .put("unloadedRtt", r.unloadedRtt)
+                    .put("loadedRtt", r.loadedRtt)
+                    .put("deltaRtt", r.deltaRtt)
+                    .put("grade", r.grade)
+                    .put("advice", r.advice))
+            }
+        }.toString()).apply()
+    }
+
+    fun deleteBufferbloat(id: Long) {
+        val next = loadBufferbloat().filterNot { it.id == id }
+        prefs.edit().putString("bufferbloat_history", JSONArray().apply {
+            next.forEach { r ->
+                put(JSONObject()
+                    .put("id", r.id)
+                    .put("timestamp", r.timestamp)
+                    .put("timeText", r.timeText)
+                    .put("targetHost", r.targetHost)
+                    .put("unloadedRtt", r.unloadedRtt)
+                    .put("loadedRtt", r.loadedRtt)
+                    .put("deltaRtt", r.deltaRtt)
+                    .put("grade", r.grade)
+                    .put("advice", r.advice))
+            }
+        }.toString()).apply()
+    }
+
+    fun bufferbloatSizeKb(): Double {
+        val raw = prefs.getString("bufferbloat_history", "[]") ?: "[]"
+        return raw.toByteArray(Charsets.UTF_8).size / 1024.0
+    }
+
+    fun loadDualNet(): List<DualNetHistoryRecord> {
+        val cutoff = System.currentTimeMillis() - 7L * 24 * 3600 * 1000L
+        val arr = JSONArray(prefs.getString("dualnet_history", "[]") ?: "[]")
+        val list = buildList {
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                val ts = o.optLong("timestamp", 0L)
+                if (ts >= cutoff) {
+                    add(
+                        DualNetHistoryRecord(
+                            id = o.optLong("id", ts),
+                            timestamp = ts,
+                            timeText = o.optString("timeText"),
+                            targetHost = o.optString("targetHost"),
+                            wifiAvg = if (o.has("wifiAvg")) o.optInt("wifiAvg") else null,
+                            wifiJitter = o.optInt("wifiJitter"),
+                            wifiLossPct = o.optInt("wifiLossPct"),
+                            cellAvg = if (o.has("cellAvg")) o.optInt("cellAvg") else null,
+                            cellJitter = o.optInt("cellJitter"),
+                            cellLossPct = o.optInt("cellLossPct"),
+                            winner = o.optString("winner"),
+                            reason = o.optString("reason")
+                        )
+                    )
+                }
+            }
+        }
+        return list
+    }
+
+    fun addDualNet(record: DualNetHistoryRecord) {
+        val cutoff = System.currentTimeMillis() - 7L * 24 * 3600 * 1000L
+        val next = (listOf(record) + loadDualNet().filterNot { it.id == record.id }).filter { it.timestamp >= cutoff }
+        prefs.edit().putString("dualnet_history", JSONArray().apply {
+            next.forEach { r ->
+                val obj = JSONObject()
+                    .put("id", r.id)
+                    .put("timestamp", r.timestamp)
+                    .put("timeText", r.timeText)
+                    .put("targetHost", r.targetHost)
+                    .put("wifiJitter", r.wifiJitter)
+                    .put("wifiLossPct", r.wifiLossPct)
+                    .put("cellJitter", r.cellJitter)
+                    .put("cellLossPct", r.cellLossPct)
+                    .put("winner", r.winner)
+                    .put("reason", r.reason)
+                r.wifiAvg?.let { obj.put("wifiAvg", it) }
+                r.cellAvg?.let { obj.put("cellAvg", it) }
+                put(obj)
+            }
+        }.toString()).apply()
+    }
+
+    fun deleteDualNet(id: Long) {
+        val next = loadDualNet().filterNot { it.id == id }
+        prefs.edit().putString("dualnet_history", JSONArray().apply {
+            next.forEach { r ->
+                val obj = JSONObject()
+                    .put("id", r.id)
+                    .put("timestamp", r.timestamp)
+                    .put("timeText", r.timeText)
+                    .put("targetHost", r.targetHost)
+                    .put("wifiJitter", r.wifiJitter)
+                    .put("wifiLossPct", r.wifiLossPct)
+                    .put("cellJitter", r.cellJitter)
+                    .put("cellLossPct", r.cellLossPct)
+                    .put("winner", r.winner)
+                    .put("reason", r.reason)
+                r.wifiAvg?.let { obj.put("wifiAvg", it) }
+                r.cellAvg?.let { obj.put("cellAvg", it) }
+                put(obj)
+            }
+        }.toString()).apply()
+    }
+
+    fun dualNetSizeKb(): Double {
+        val raw = prefs.getString("dualnet_history", "[]") ?: "[]"
+        return raw.toByteArray(Charsets.UTF_8).size / 1024.0
+    }
+
+    fun loadIperf(): List<IperfHistoryRecord> {
+        val cutoff = System.currentTimeMillis() - 7L * 24 * 3600 * 1000L
+        val arr = JSONArray(prefs.getString("iperf_history", "[]") ?: "[]")
+        val list = buildList {
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                val ts = o.optLong("timestamp", 0L)
+                if (ts >= cutoff) {
+                    add(
+                        IperfHistoryRecord(
+                            id = o.optLong("id", ts),
+                            timestamp = ts,
+                            timeText = o.optString("timeText"),
+                            server = o.optString("server"),
+                            port = o.optInt("port", 5201),
+                            isReverse = o.optBoolean("isReverse", true),
+                            durationSec = o.optInt("durationSec", 10),
+                            avgMbps = o.optDouble("avgMbps", 0.0),
+                            peakMbps = o.optDouble("peakMbps", 0.0),
+                            totalBytes = o.optLong("totalBytes", 0L),
+                            gradeTitle = o.optString("gradeTitle")
+                        )
+                    )
+                }
+            }
+        }
+        return list
+    }
+
+    fun addIperf(record: IperfHistoryRecord) {
+        val cutoff = System.currentTimeMillis() - 7L * 24 * 3600 * 1000L
+        val next = (listOf(record) + loadIperf().filterNot { it.id == record.id }).filter { it.timestamp >= cutoff }
+        prefs.edit().putString("iperf_history", JSONArray().apply {
+            next.forEach { r ->
+                put(JSONObject()
+                    .put("id", r.id)
+                    .put("timestamp", r.timestamp)
+                    .put("timeText", r.timeText)
+                    .put("server", r.server)
+                    .put("port", r.port)
+                    .put("isReverse", r.isReverse)
+                    .put("durationSec", r.durationSec)
+                    .put("avgMbps", r.avgMbps)
+                    .put("peakMbps", r.peakMbps)
+                    .put("totalBytes", r.totalBytes)
+                    .put("gradeTitle", r.gradeTitle))
+            }
+        }.toString()).apply()
+    }
+
+    fun deleteIperf(id: Long) {
+        val next = loadIperf().filterNot { it.id == id }
+        prefs.edit().putString("iperf_history", JSONArray().apply {
+            next.forEach { r ->
+                put(JSONObject()
+                    .put("id", r.id)
+                    .put("timestamp", r.timestamp)
+                    .put("timeText", r.timeText)
+                    .put("server", r.server)
+                    .put("port", r.port)
+                    .put("isReverse", r.isReverse)
+                    .put("durationSec", r.durationSec)
+                    .put("avgMbps", r.avgMbps)
+                    .put("peakMbps", r.peakMbps)
+                    .put("totalBytes", r.totalBytes)
+                    .put("gradeTitle", r.gradeTitle))
+            }
+        }.toString()).apply()
+    }
+
+    fun iperfSizeKb(): Double {
+        val raw = prefs.getString("iperf_history", "[]") ?: "[]"
+        return raw.toByteArray(Charsets.UTF_8).size / 1024.0
+    }
+}
+
+private data class BufferbloatHistoryRecord(
+    val id: Long,
+    val timestamp: Long,
+    val timeText: String,
+    val targetHost: String,
+    val unloadedRtt: Int,
+    val loadedRtt: Int,
+    val deltaRtt: Int,
+    val grade: String,
+    val advice: String
+)
+
+private data class DualNetHistoryRecord(
+    val id: Long,
+    val timestamp: Long,
+    val timeText: String,
+    val targetHost: String,
+    val wifiAvg: Int?,
+    val wifiJitter: Int,
+    val wifiLossPct: Int,
+    val cellAvg: Int?,
+    val cellJitter: Int,
+    val cellLossPct: Int,
+    val winner: String,
+    val reason: String
+)
+
+private data class IperfHistoryRecord(
+    val id: Long,
+    val timestamp: Long,
+    val timeText: String,
+    val server: String,
+    val port: Int,
+    val isReverse: Boolean,
+    val durationSec: Int,
+    val avgMbps: Double,
+    val peakMbps: Double,
+    val totalBytes: Long,
+    val gradeTitle: String
+)
+
+private fun formatHistoryDayKey(timestamp: Long): String {
+    return SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date(timestamp))
+}
+
+private fun formatHistoryDayLabel(dayKey: String): String {
+    val today = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
+    val yesterday = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date(System.currentTimeMillis() - 86400000L))
+    return when (dayKey) {
+        today -> "今天 ($dayKey)"
+        yesterday -> "昨天 ($dayKey)"
+        else -> dayKey
+    }
+}
+
+@Composable
+private fun <T> ToolHistorySection(
+    title: String,
+    records: List<T>,
+    sizeKb: Double,
+    timestampOf: (T) -> Long,
+    idOf: (T) -> Long,
+    onDelete: (Long) -> Unit,
+    itemContent: @Composable (T) -> Unit
+) {
+    var expandedDays by remember { mutableStateOf(setOf<String>()) }
+    val grouped = remember(records) {
+        records.groupBy { formatHistoryDayKey(timestampOf(it)) }
+    }
+
+    SoftCard {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            SectionTitle("log", title, Purple)
+            Spacer(Modifier.weight(1f))
+            Text(
+                "已保存 ${records.size} 条 · 占用 ${String.format(Locale.US, "%.1f", sizeKb)} KB",
+                color = Muted,
+                fontSize = 11.sp
+            )
+        }
+        Text("最多保留近 7 天测试记录，每日自动折叠，单条左滑可删除。", color = Muted, fontSize = 11.sp)
+
+        if (records.isEmpty()) {
+            Text("暂无测试历史记录。", color = Muted, fontSize = 12.sp, modifier = Modifier.padding(vertical = 6.dp))
+        } else {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                grouped.forEach { (dayKey, dayRecords) ->
+                    val isExpanded = dayKey in expandedDays
+                    Surface(
+                        modifier = Modifier.fillMaxWidth().clickable {
+                            expandedDays = if (isExpanded) expandedDays - dayKey else expandedDays + dayKey
+                        },
+                        color = Color(0xFFF8FAFC),
+                        shape = ShapeM,
+                        border = BorderStroke(1.dp, Border.copy(alpha = 0.6f))
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(formatHistoryDayLabel(dayKey), fontSize = 12.sp, fontWeight = FontWeight.Bold, color = TextDark)
+                            Spacer(Modifier.width(6.dp))
+                            StatusChip("${dayRecords.size}条", Color(0xFFF1F5F9), Muted, compact = true)
+                            Spacer(Modifier.weight(1f))
+                            Text(if (isExpanded) "收起 ⌃" else "展开 ⌄", fontSize = 11.sp, color = Blue, fontWeight = FontWeight.Bold)
+                        }
+                    }
+
+                    if (isExpanded) {
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(start = 4.dp)) {
+                            dayRecords.forEach { record ->
+                                val recId = idOf(record)
+                                SwipeDeleteToolBox(onDelete = { onDelete(recId) }, stateKey = recId) {
+                                    itemContent(record)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 private fun JSONArray.toStringList(): List<String> = buildList {
@@ -10856,14 +11240,17 @@ private suspend fun probeMtuPath(
         }
     }
 
+    val isCappedMaxPass = best >= cappedMax || (best == 1500)
+    val confirmAttempts = if (isCappedMaxPass) 2 else 3
+    val confirmNeeded = if (isCappedMaxPass) 2 else 2
     val confirm = runMtuCandidate(
         address = address,
         ipv6 = ipv6,
         mtu = best,
         timeoutMs = timeoutMs,
         mode = effectiveMode,
-        attempts = 5,
-        requiredSuccess = 4,
+        attempts = confirmAttempts,
+        requiredSuccess = confirmNeeded,
         pauseRequested = pauseRequested
     )
     val confirmStep = MtuStep(best, confirm.first, "[$protocol 最终确认] ${confirm.second}")
@@ -10877,8 +11264,8 @@ private suspend fun probeMtuPath(
 
     val nextMtu = best + 1
     var nextFailed = true
-    if (nextMtu <= cappedMax) {
-        nextFailed = !testCandidate(nextMtu, "边界外", quick = false)
+    if (nextMtu <= cappedMax && !isCappedMaxPass) {
+        nextFailed = !testCandidate(nextMtu, "边界外", quick = true)
     }
 
     val sorted = observations.toSortedMap()
@@ -10909,11 +11296,11 @@ private suspend fun probeMtuPath(
 private fun analyzeMtu(mtu: Int?, ipv6: Boolean): String {
     if (mtu == null) return "没有测出有效路径 MTU，可能是目标不响应或网络限制了大包探测。"
     return when {
-        ipv6 && mtu < 1280 -> "结果低于 IPv6 的最低要求，建议更换目标后复测。"
-        mtu >= 1498 -> "接近常见的 1500 字节，当前路径表现正常。"
-        mtu in 1488..1497 -> "接近宽带拨号常见的 1492 字节。"
-        mtu in 1390..1487 -> "路径 MTU 低于常见值，可能经过 VPN、隧道或额外封装。"
-        else -> "路径 MTU 偏低，建议更换网络或目标复测。"
+        ipv6 && mtu < 1280 -> "结果低于 IPv6 最低规范(1280字节)，建议更换目标后复测。"
+        mtu >= 1498 -> "标准以太网满载(1500字节)。路径无封装切片瓶颈，适合高速下载与电竞联机。"
+        mtu in 1488..1497 -> "典型 PPPoE 宽带拨号($mtu 字节)。建议将路由器 WAN 口设为 1492，PS5 / Switch / PC 主机同步设为 1492，可消除二次分片造成的联机卡顿。"
+        mtu in 1410..1487 -> "路径 MTU 略受限($mtu 字节)。常见于 WireGuard/VPN 隧道、IPSec 或蜂窝移动核心网特定封装。"
+        else -> "路径 MTU 偏低($mtu 字节)。存在多层隧道封装或网络策略限包，长报文可能经历分片重组，建议排查路由器与虚拟网卡配置。"
     }
 }
 
@@ -12963,6 +13350,10 @@ private data class BufferbloatResult(
 
 @Composable
 private fun BufferbloatToolPage(onBack: () -> Unit) {
+    val context = LocalContext.current
+    val store = remember { NetToolHistoryStore(context.applicationContext) }
+    var records by remember { mutableStateOf(store.loadBufferbloat()) }
+    var sizeKb by remember { mutableStateOf(store.bufferbloatSizeKb()) }
     val scope = rememberCoroutineScope()
     var host by remember { mutableStateOf("223.5.5.5") }
     var phase by remember { mutableStateOf(BufferbloatPhase.IDLE) }
@@ -13092,6 +13483,22 @@ private fun BufferbloatToolPage(onBack: () -> Unit) {
                 lossPercent = lossPct,
                 grade = grade
             )
+            val now = System.currentTimeMillis()
+            val timeText = SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date(now))
+            val rec = BufferbloatHistoryRecord(
+                id = now,
+                timestamp = now,
+                timeText = timeText,
+                targetHost = host.ifBlank { "223.5.5.5" },
+                unloadedRtt = bAvg,
+                loadedRtt = lAvg,
+                deltaRtt = delta,
+                grade = "${grade.grade} (${grade.title})",
+                advice = grade.advice
+            )
+            store.addBufferbloat(rec)
+            records = store.loadBufferbloat()
+            sizeKb = store.bufferbloatSizeKb()
             progressText = "测试完成！综合评级：${grade.grade}（${grade.title}）"
             progressFraction = 1f
             phase = BufferbloatPhase.DONE
@@ -13216,6 +13623,45 @@ private fun BufferbloatToolPage(onBack: () -> Unit) {
                 }
             }
         }
+
+        item {
+            ToolHistorySection(
+                title = "缓冲评级历史",
+                records = records,
+                sizeKb = sizeKb,
+                timestampOf = { it.timestamp },
+                idOf = { it.id },
+                onDelete = { id ->
+                    store.deleteBufferbloat(id)
+                    records = store.loadBufferbloat()
+                    sizeKb = store.bufferbloatSizeKb()
+                }
+            ) { record ->
+                Surface(
+                    shape = ShapeM,
+                    color = Color.White,
+                    border = BorderStroke(1.dp, Border.copy(alpha = 0.6f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(Modifier.padding(10.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            StatusChip(record.grade, BlueSoft, Blue, compact = true)
+                            Spacer(Modifier.width(6.dp))
+                            Text(record.targetHost, fontSize = 13.sp, fontWeight = FontWeight.Bold, color = TextDark)
+                            Spacer(Modifier.weight(1f))
+                            Text(record.timeText, fontSize = 11.sp, color = Muted)
+                        }
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            "空载: ${record.unloadedRtt}ms · 满载: ${record.loadedRtt}ms · 排队膨胀: +${record.deltaRtt}ms",
+                            fontSize = 11.sp,
+                            color = Muted
+                        )
+                    }
+                }
+            }
+        }
+        item { Spacer(Modifier.height(18.dp)) }
     }
 }
 
@@ -13652,6 +14098,9 @@ private fun DualNetworkChart(
 @Composable
 private fun DualNetworkToolPage(onBack: () -> Unit) {
     val context = LocalContext.current
+    val store = remember { NetToolHistoryStore(context.applicationContext) }
+    var records by remember { mutableStateOf(store.loadDualNet()) }
+    var sizeKb by remember { mutableStateOf(store.dualNetSizeKb()) }
     val scope = rememberCoroutineScope()
     val cm = remember { context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager }
     val tm = remember { context.getSystemService(Context.TELEPHONY_SERVICE) as? TelephonyManager }
@@ -13809,6 +14258,26 @@ private fun DualNetworkToolPage(onBack: () -> Unit) {
                 reason = verdict.reason
             )
 
+            val now = System.currentTimeMillis()
+            val timeText = SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date(now))
+            val rec = DualNetHistoryRecord(
+                id = now,
+                timestamp = now,
+                timeText = timeText,
+                targetHost = targetHost.ifBlank { "223.5.5.5" },
+                wifiAvg = wAvg,
+                wifiJitter = wJitter,
+                wifiLossPct = wLoss,
+                cellAvg = cAvg,
+                cellJitter = cJitter,
+                cellLossPct = cLoss,
+                winner = verdict.title,
+                reason = verdict.reason
+            )
+            store.addDualNet(rec)
+            records = store.loadDualNet()
+            sizeKb = store.dualNetSizeKb()
+
             progressText = "对测完成！${verdict.title}"
             running = false
         }
@@ -13960,6 +14429,45 @@ private fun DualNetworkToolPage(onBack: () -> Unit) {
                 }
             }
         }
+
+        item {
+            ToolHistorySection(
+                title = "双网对测历史",
+                records = records,
+                sizeKb = sizeKb,
+                timestampOf = { it.timestamp },
+                idOf = { it.id },
+                onDelete = { id ->
+                    store.deleteDualNet(id)
+                    records = store.loadDualNet()
+                    sizeKb = store.dualNetSizeKb()
+                }
+            ) { record ->
+                Surface(
+                    shape = ShapeM,
+                    color = Color.White,
+                    border = BorderStroke(1.dp, Border.copy(alpha = 0.6f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(Modifier.padding(10.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            StatusChip(record.winner, Purple.copy(alpha = 0.12f), Purple, compact = true)
+                            Spacer(Modifier.width(6.dp))
+                            Text(record.targetHost, fontSize = 13.sp, fontWeight = FontWeight.Bold, color = TextDark)
+                            Spacer(Modifier.weight(1f))
+                            Text(record.timeText, fontSize = 11.sp, color = Muted)
+                        }
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            "WiFi: ${record.wifiAvg?.let { "${it}ms" } ?: "—"} (丢包${record.wifiLossPct}%) · 5G: ${record.cellAvg?.let { "${it}ms" } ?: "—"} (丢包${record.cellLossPct}%)",
+                            fontSize = 11.sp,
+                            color = Muted
+                        )
+                    }
+                }
+            }
+        }
+        item { Spacer(Modifier.height(18.dp)) }
     }
 }
 
@@ -14040,6 +14548,10 @@ private fun IperfSpeedChart(
 
 @Composable
 private fun IperfToolPage(onBack: () -> Unit) {
+    val context = LocalContext.current
+    val store = remember { NetToolHistoryStore(context.applicationContext) }
+    var records by remember { mutableStateOf(store.loadIperf()) }
+    var sizeKb by remember { mutableStateOf(store.iperfSizeKb()) }
     val scope = rememberCoroutineScope()
     var serverHost by remember { mutableStateOf("192.168.1.100") }
     var serverPort by remember { mutableStateOf("5201") }
@@ -14202,6 +14714,26 @@ private fun IperfToolPage(onBack: () -> Unit) {
                     gradeBg = verdict.bg,
                     advice = verdict.reason
                 )
+
+                val now = System.currentTimeMillis()
+                val timeText = SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date(now))
+                val rec = IperfHistoryRecord(
+                    id = now,
+                    timestamp = now,
+                    timeText = timeText,
+                    server = serverHost.ifBlank { "192.168.1.100" },
+                    port = serverPort.toIntOrNull() ?: 5201,
+                    isReverse = isReverse,
+                    durationSec = durationSec,
+                    avgMbps = avg,
+                    peakMbps = peak,
+                    totalBytes = totalBytes,
+                    gradeTitle = verdict.title
+                )
+                store.addIperf(rec)
+                records = store.loadIperf()
+                sizeKb = store.iperfSizeKb()
+
                 progressText = "测速完成！平均速率：${String.format(java.util.Locale.US, "%.1f", avg)} Mbps"
                 progressFraction = 1f
                 running = false
@@ -14224,15 +14756,27 @@ private fun IperfToolPage(onBack: () -> Unit) {
 
         item {
             SoftCard {
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Box(Modifier.weight(2f)) {
-                        ConfigLongRow("服务器") {
-                            CleanField(serverHost, { if (!running) serverHost = it }, "192.168.1.100", leadingMark = "host")
-                        }
-                    }
-                    Box(Modifier.weight(1.2f)) {
-                        ConfigLongRow("端口") {
-                            CleanField(serverPort, { if (!running) serverPort = it }, "5201", leadingMark = "port")
+                ConfigLongRow("服务器") {
+                    CleanField(serverHost, { if (!running) serverHost = it }, "192.168.1.100", leadingMark = "host")
+                }
+
+                Spacer(Modifier.height(6.dp))
+
+                ConfigLongRow("端口") {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        CleanField(serverPort, { if (!running) serverPort = it }, "5201", leadingMark = "port", modifier = Modifier.width(100.dp))
+                        Spacer(Modifier.weight(1f))
+                        listOf("5201", "5202", "5203").forEach { p ->
+                            SoftChoicePill(
+                                text = p,
+                                selected = (serverPort == p),
+                                onClick = { if (!running) serverPort = p },
+                                compact = true
+                            )
                         }
                     }
                 }
@@ -14371,6 +14915,56 @@ private fun IperfToolPage(onBack: () -> Unit) {
                 }
             }
         }
+
+        item {
+            ToolHistorySection(
+                title = "iPerf3 测速历史",
+                records = records,
+                sizeKb = sizeKb,
+                timestampOf = { it.timestamp },
+                idOf = { it.id },
+                onDelete = { id ->
+                    store.deleteIperf(id)
+                    records = store.loadIperf()
+                    sizeKb = store.iperfSizeKb()
+                }
+            ) { record ->
+                Surface(
+                    shape = ShapeM,
+                    color = Color.White,
+                    border = BorderStroke(1.dp, Border.copy(alpha = 0.6f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(Modifier.padding(10.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            StatusChip(
+                                if (record.isReverse) "下行" else "上行",
+                                if (record.isReverse) BlueSoft else Orange.copy(alpha = 0.15f),
+                                if (record.isReverse) Blue else Orange,
+                                compact = true
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                "${String.format(Locale.US, "%.1f", record.avgMbps)} Mbps",
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Black,
+                                color = Green
+                            )
+                            Spacer(Modifier.weight(1f))
+                            Text(record.timeText, fontSize = 11.sp, color = Muted)
+                        }
+                        Spacer(Modifier.height(4.dp))
+                        val mb = record.totalBytes / (1024.0 * 1024.0)
+                        Text(
+                            "${record.server}:${record.port} · ${record.durationSec}秒 · 总计 ${String.format(Locale.US, "%.1f", mb)} MB · ${record.gradeTitle}",
+                            fontSize = 11.sp,
+                            color = Muted
+                        )
+                    }
+                }
+            }
+        }
+        item { Spacer(Modifier.height(18.dp)) }
     }
 }
 
