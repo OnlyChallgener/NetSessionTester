@@ -108,7 +108,9 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Article
+import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Assessment
@@ -251,9 +253,10 @@ import kotlin.math.max
 import kotlin.math.min
 
 private enum class MainTab(val label: String, val mark: String) {
-    SETTINGS("设置", "settings"),
     TEST("测试", "play"),
-    LOGS("历史", "logs")
+    TOOLS("工具", "tools"),
+    LOGS("历史", "logs"),
+    SETTINGS("设置", "settings")
 }
 
 private enum class AppToolPage {
@@ -672,8 +675,8 @@ private fun currentAppVersionCode(context: Context): Long = runCatching {
 private fun currentAppVersionName(context: Context): String {
     return runCatching {
         val pkg = context.packageManager.getPackageInfo(context.packageName, 0)
-        pkg.versionName?.takeIf { it.isNotBlank() } ?: "v1.0.21-beta3"
-    }.getOrDefault("v1.0.21-beta3")
+        pkg.versionName?.takeIf { it.isNotBlank() } ?: "v1.0.21-beta4"
+    }.getOrDefault("v1.0.21-beta4")
 }
 
 private fun displayVersionName(raw: String): String {
@@ -1589,9 +1592,9 @@ private fun buildNetworkProbeInfo(
             error = it.message ?: it.javaClass.simpleName
         )
     }
-    val stun = if (full && !env.hasVpn) runCatching { stunBindingProbe() }.getOrNull() else null
-    val publicV4 = publicV4FromHttp ?: stun?.mappedIp?.takeIf { isUsableIpv4(it) }
-    // V1.1.15：延迟从完整 NAT/STUN 诊断中拆出。
+    val stun: StunProbeResult? = null
+    val publicV4 = publicV4FromHttp
+    // 延迟从完整 NAT/STUN 诊断中拆出。
     // 首页网络信息轻量刷新 full=false 时也会跑一次轻量延迟检测，避免长期显示“不可用”。
     val latencyMs = if (full) {
         runCatching { tcpConnectLatencyMs(targetHost, targetPort.coerceIn(1, 65535), 1500) }.getOrNull()
@@ -1617,56 +1620,22 @@ private fun buildNetworkProbeInfo(
     }
 
     val isDirectPublicV4 = publicV4 != null && localIpv4 != null && !isPrivateIpv4(localIpv4) && localIpv4 == publicV4
-    val stunSuccess = stun != null
-    val multiStun = stun?.successCount ?: 0
-    val stunTotal = stun?.totalCount ?: 0
-
-    val strongSymmetric = stunSuccess && !stun!!.portStable && multiStun >= 3
-    val weakPortChange = stunSuccess && !stun!!.portStable && multiStun < 3
-    val strictNat1 = stunSuccess && stun!!.portStable && stun.ipStable && stun.roundStable && stun.successCount == stun.totalCount && stun.totalCount >= 6 && stun.roundCount >= 2
-    val stableMapping = stunSuccess && stun!!.portStable && stun.ipStable && multiStun >= 3
-    val rfc5780Verified = stunSuccess && stun!!.filteringVerified
-    val rfc5780EndpointIndependentMapping = rfc5780Verified && stun.rfc5780MappingBehavior == "端口保持"
-    val rfc5780EndpointIndependentFiltering = rfc5780Verified && stun.rfc5780FilteringBehavior == "开放"
-    val rfc5780AddressFiltering = rfc5780Verified && stun.rfc5780FilteringBehavior == "地址受限"
-    val rfc5780PortFiltering = rfc5780Verified && stun.rfc5780FilteringBehavior == "端口受限"
 
     val natType = when {
         env.hasVpn -> "代理环境"
         isDirectPublicV4 -> "NAT1 / 开放"
-        rfc5780EndpointIndependentMapping && rfc5780EndpointIndependentFiltering -> "NAT1 / 全锥形"
-        rfc5780EndpointIndependentMapping && rfc5780AddressFiltering -> "NAT2 / 地址受限型"
-        rfc5780EndpointIndependentMapping && rfc5780PortFiltering -> "NAT3 / 端口受限型"
-        rfc5780Verified && !rfc5780EndpointIndependentMapping -> "NAT4 / 对称型"
-        strictNat1 -> "NAT1 / 全锥形"
-        strongSymmetric -> "NAT4 / 对称型"
-        stableMapping -> "NAT3 / 端口保持型"
-        stunSuccess -> "NAT3 / 受限型"
-        publicV4 != null && full -> "NAT类型待确认"
-        publicV4 == null && full -> "UDP受限 / 无法判断"
         else -> "待检测"
     }
 
     val mapping = when {
         env.hasVpn -> "可能来自代理出口"
         isDirectPublicV4 -> "公网直连"
-        stun == null && full -> "未知"
-        stun == null -> "待检测"
-        rfc5780Verified && stun.rfc5780MappingBehavior.isNotBlank() -> stun.rfc5780MappingBehavior
-        strongSymmetric -> "端口变化"
-        weakPortChange -> "端口变化待确认"
-        else -> "端口保持"
+        else -> "待检测"
     }
 
     val filtering = when {
         env.hasVpn -> "无法准确判断"
         isDirectPublicV4 -> "开放型"
-        rfc5780Verified && stun.rfc5780FilteringBehavior.isNotBlank() -> stun.rfc5780FilteringBehavior
-        strictNat1 || stableMapping -> "未验证"
-        strongSymmetric -> "未验证"
-        stun != null -> "未完成检测"
-        publicV4 != null && full -> "待确认"
-        stun == null && full -> "UDP回包失败"
         else -> "待检测"
     }
 
@@ -1725,6 +1694,7 @@ private fun buildNetworkProbeInfo(
         natType.startsWith("UDP") -> "多个STUN基础请求均失败，当前仅能判断为UDP受限/无法判断，可能是UDP被防火墙、代理或运营商限制。"
         natType.startsWith("NAT2") -> "UDP映射较稳定，普通联机能力中等。"
         natType.startsWith("NAT1") -> if (rfc5780Verified) "${stunNodeText}RFC5780已完成端口保持和回包验证，当前判定为 NAT1 / 全锥形。" else "${stunNodeText}6/6节点与2轮复测均保持同一公网端口，按兼容口径判定为 NAT1；完整回包限制需 RFC5780 / 自建节点验证。"
+        natType == "待检测" -> "网络就绪。NAT 采用手动深度测试，点击 NAT 指标可自选 STUN 节点进行专项诊断。"
         else -> "网络信息已更新。"
     }
 
@@ -2410,7 +2380,7 @@ private fun parseStunEndpoint(raw: String, defaultPort: Int = 3478): StunEndpoin
 
 private fun manualNatProbe(mode: ManualNatMode, servers: List<String>, progress: (String) -> Unit = {}): ManualNatResult {
     val cleanServers = servers.mapNotNull { parseStunEndpoint(it) }.ifEmpty {
-        listOf(if (mode == ManualNatMode.RFC5780) StunEndpoint("stunserver2025.stunprotocol.org", 3478) else StunEndpoint("stun.voip.aebc.com", 3478))
+        listOf(if (mode == ManualNatMode.RFC5780) StunEndpoint("stun.chat.bilibili.com", 3478) else StunEndpoint("stun.miwifi.com", 3478))
     }
     var lastError = "STUN服务器无响应"
     cleanServers.forEachIndexed { index, endpoint ->
@@ -3081,7 +3051,7 @@ private fun NetSessionTesterApp() {
     val logStore = remember { LogStore(context.applicationContext) }
     val settingsStore = remember { SettingsStore(context.applicationContext) }
 
-    var selectedTab by rememberSaveable { mutableStateOf(MainTab.SETTINGS) }
+    var selectedTab by rememberSaveable { mutableStateOf(MainTab.TEST) }
     var appToolPage by rememberSaveable { mutableStateOf(AppToolPage.NONE) }
     val settingsListState = rememberSaveable(saver = LazyListState.Saver) { LazyListState() }
     val testListState = rememberSaveable(saver = LazyListState.Saver) { LazyListState() }
@@ -3190,8 +3160,8 @@ private fun NetSessionTesterApp() {
     var natDiagnosticRunning by remember { mutableStateOf(false) }
     var natDiagnosticProgress by remember { mutableStateOf("") }
     var natManualMode by remember { mutableStateOf(ManualNatMode.RFC5780) }
-    var natRfc5780Servers by remember { mutableStateOf(listOf("stunserver2025.stunprotocol.org:3478")) }
-    var natRfc3489Servers by remember { mutableStateOf(listOf("stun.voip.aebc.com:3478")) }
+    var natRfc5780Servers by remember { mutableStateOf(listOf("stun.chat.bilibili.com:3478")) }
+    var natRfc3489Servers by remember { mutableStateOf(listOf("stun.miwifi.com:3478")) }
 
     val updatePrefs = remember { context.getSharedPreferences("app_update", Context.MODE_PRIVATE) }
     var latestUpdate by remember { mutableStateOf<UpdateInfo?>(null) }
@@ -3369,7 +3339,7 @@ private fun NetSessionTesterApp() {
         }
     }
 
-    fun refreshPublicIp() {
+    fun refreshPublicIp(forced: Boolean = false) {
         networkRefreshGeneration += 1L
         val generation = networkRefreshGeneration
         networkRefreshJob?.cancel()
@@ -3391,7 +3361,7 @@ private fun NetSessionTesterApp() {
             try {
                 val result = withContext(Dispatchers.IO) {
                     try {
-                        PublicIpDetector.detect(network)
+                        PublicIpDetector.detect(network, forceRefresh = forced)
                     } catch (cancelled: CancellationException) {
                         throw cancelled
                     } catch (error: Error) {
@@ -4447,7 +4417,7 @@ private fun NetSessionTesterApp() {
                     networkEnvironment = detectNetworkEnvironment(context),
                     networkProbeInfo = networkProbeInfo,
                     publicIpLoading = publicIpLoading,
-                    onRefreshPublicIp = { refreshPublicIp() },
+                    onRefreshPublicIp = { refreshPublicIp(true) },
                     onCopyPublicIpv4 = { copyText(publicIpResult.ipv4, "IPv4出口地址") },
                     onCopyPublicIpv6 = { copyText(publicIpResult.ipv6, "IPv6出口地址") },
                     onOpenNatDiagnostics = { showNatDiagnosticDialog = true },
@@ -4615,6 +4585,13 @@ private fun NetSessionTesterApp() {
                     onHistoryDetail = { summary ->
                         detailSummary = summary
                     }
+                )
+
+                MainTab.TOOLS -> ToolsPage(
+                    onOpenTool = { tool ->
+                        appToolPage = tool
+                    },
+                    onOpenNatDiagnostics = { showNatDiagnosticDialog = true }
                 )
                 }
             }
@@ -6079,6 +6056,147 @@ private fun FullRunLogPage(
     }
 }
 
+@Composable
+private fun ToolsPage(
+    onOpenTool: (AppToolPage) -> Unit,
+    onOpenNatDiagnostics: () -> Unit = {}
+) {
+    data class ToolEntry(
+        val title: String,
+        val subtitle: String,
+        val mark: String,
+        val markBg: Color,
+        val markFg: Color,
+        val page: AppToolPage
+    )
+
+    val networkDiagTools = remember {
+        listOf(
+            ToolEntry("NAT 类型检测", "STUN手动检测 · IPv4 · UDP", "nat", BlueSoft, Blue, AppToolPage.NONE),
+            ToolEntry("NSLookup", "DNS域名解析 · 系统/自定义DNS", "dns", Color(0xFFF3E8FF), Purple, AppToolPage.NSLOOKUP),
+            ToolEntry("Traceroute", "路由追踪 · 逐跳分析", "route", Color(0xFFFFF7ED), Color(0xFFF97316), AppToolPage.TRACKET),
+            ToolEntry("MTU 探测", "最大传输单元路径发现", "mtu", Color(0xFFF0FDF4), Green, AppToolPage.MTU),
+            ToolEntry("IPv6 诊断", "IPv6通达验证 · 双栈检测", "ipv6", Color(0xFFFDF2F8), Color(0xFFEC4899), AppToolPage.IPV6_DIAGNOSTIC)
+        )
+    }
+    val performanceTools = remember {
+        listOf(
+            ToolEntry("缓冲评级", "Bufferbloat膨胀 · 电竞评级", "bufferbloat", BlueSoft, Blue, AppToolPage.BUFFERBLOAT),
+            ToolEntry("双网对测", "WiFi vs 5G 同屏实时对比", "dual", Color(0xFFF3E8FF), Purple, AppToolPage.DUAL_NETWORK),
+            ToolEntry("iPerf3 测速", "TCP/UDP吞吐量压测", "iperf", Color(0xFFF0FDF4), Green, AppToolPage.IPERF)
+        )
+    }
+    val telecomTools = remember {
+        listOf(
+            ToolEntry("基站工参", "5G/4G射频信号 · 小区参数", "cell", Color(0xFFFFF7ED), Color(0xFFF97316), AppToolPage.CELLULAR_INFO),
+            ToolEntry("出口漫游检测", "Anycast/跨运营商路由分析", "roaming", Color(0xFFFDF2F8), Color(0xFFEC4899), AppToolPage.ROAMING)
+        )
+    }
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize().padding(horizontal = 14.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        item { Spacer(Modifier.height(4.dp)) }
+        item {
+            Text(
+                "工具中心",
+                fontSize = 22.sp,
+                fontWeight = FontWeight.ExtraBold,
+                color = TextDark,
+                modifier = Modifier.padding(start = 2.dp)
+            )
+        }
+        item {
+            Text(
+                "网络诊断、性能测试、运营商工参",
+                fontSize = 13.sp,
+                color = Muted,
+                modifier = Modifier.padding(start = 2.dp, bottom = 4.dp)
+            )
+        }
+
+        item {
+            SoftCard {
+                SectionTitle("network", "网络诊断", Blue)
+                Spacer(Modifier.height(8.dp))
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    networkDiagTools.forEach { tool ->
+                        ToolEntryRow(tool.title, tool.subtitle, tool.mark, tool.markBg, tool.markFg) {
+                            if (tool.page == AppToolPage.NONE) onOpenNatDiagnostics() else onOpenTool(tool.page)
+                        }
+                    }
+                }
+            }
+        }
+
+        item {
+            SoftCard {
+                SectionTitle("performance", "性能测试", Purple)
+                Spacer(Modifier.height(8.dp))
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    performanceTools.forEach { tool ->
+                        ToolEntryRow(tool.title, tool.subtitle, tool.mark, tool.markBg, tool.markFg) {
+                            onOpenTool(tool.page)
+                        }
+                    }
+                }
+            }
+        }
+
+        item {
+            SoftCard {
+                SectionTitle("telecom", "运营商工参", Color(0xFFF97316))
+                Spacer(Modifier.height(8.dp))
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    telecomTools.forEach { tool ->
+                        ToolEntryRow(tool.title, tool.subtitle, tool.mark, tool.markBg, tool.markFg) {
+                            onOpenTool(tool.page)
+                        }
+                    }
+                }
+            }
+        }
+
+        item { Spacer(Modifier.height(18.dp)) }
+    }
+}
+
+@Composable
+private fun ToolEntryRow(
+    title: String,
+    subtitle: String,
+    mark: String,
+    markBg: Color,
+    markFg: Color,
+    onClick: () -> Unit
+) {
+    Surface(
+        shape = ShapeM,
+        color = Color(0xFFF8FAFC),
+        border = BorderStroke(1.dp, Border.copy(alpha = 0.6f)),
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            MarkBox(mark, markBg, markFg)
+            Spacer(Modifier.width(10.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(title, fontSize = 14.sp, fontWeight = FontWeight.Bold, color = TextDark)
+                Text(subtitle, fontSize = 11.sp, color = Muted, lineHeight = 14.sp)
+            }
+            Icon(
+                Icons.Filled.ChevronRight,
+                contentDescription = null,
+                tint = Muted,
+                modifier = Modifier.width(18.dp).height(18.dp)
+            )
+        }
+    }
+}
+
 
 @Composable
 private fun LogsPage(
@@ -6258,7 +6376,8 @@ private fun VersionInfoDialog(
                     Text("当前版本", color = Muted, fontSize = 12.sp, modifier = Modifier.weight(1f))
                     StatusChip(displayVersionName(currentAppVersionName(LocalContext.current)), BlueSoft, Blue, compact = true)
                 }
-                VersionLine(displayVersionName(currentAppVersionName(LocalContext.current)), "新增缓冲评级/双网/iPerf3三大模块7天历史与折叠删除，修复iPerf3排版，深度优化NAT与MTU。")
+                VersionLine(displayVersionName(currentAppVersionName(LocalContext.current)), "重构4-Tab底栏与独立「工具」中心，大幅精简设置页，极速公网IPv4抢占，强化手动NAT，新增目标选择器。")
+                VersionLine("v1.0.21-beta3", "新增缓冲评级/双网/iPerf3三大模块7天历史与折叠删除，修复iPerf3排版，深度优化NAT与MTU。")
                 VersionLine("v1.0.21-beta2", "新增双网并发(5G vs WiFi)同屏对测与内置iPerf3吞吐测速客户端，快捷矩阵升级4行2列。")
                 VersionLine("v1.0.21-beta1", "新增Bufferbloat缓冲膨胀评级与5G/4G基站射频工参看板，快捷矩阵升级3行2列。")
                 VersionLine("v1.0.20", "连接测试与Ping调度线程池物理隔离，启用极简Socket缓冲区与Channel异步回收。")
@@ -6712,7 +6831,8 @@ private fun AlertDialog(
     dismissButton: @Composable (() -> Unit)? = null,
     title: @Composable (() -> Unit)? = null,
     text: @Composable (() -> Unit)? = null,
-    shape: androidx.compose.ui.graphics.Shape = GlassPopupShape
+    shape: androidx.compose.ui.graphics.Shape = GlassPopupShape,
+    modifier: Modifier = Modifier
 ) {
     MaterialAlertDialog(
         onDismissRequest = onDismissRequest,
@@ -6725,7 +6845,8 @@ private fun AlertDialog(
         iconContentColor = Blue,
         titleContentColor = TextDark,
         textContentColor = TextDark,
-        tonalElevation = 0.dp
+        tonalElevation = 0.dp,
+        modifier = modifier.border(1.dp, GlassPopupBorder, shape)
     )
 }
 
@@ -8627,6 +8748,43 @@ private fun NatDiagnosticDialog(
                     lineHeight = 16.sp,
                     modifier = Modifier.background(Color(0xFFF8FAFC), ShapeM).padding(10.dp)
                 )
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("推荐优质公共 STUN 节点 (点击一键填入)", color = TextDark, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    val presetStuns = listOf(
+                        "B站" to "stun.chat.bilibili.com:3478",
+                        "小米云" to "stun.miwifi.com:3478",
+                        "芒果TV" to "stun.hitv.com:3478",
+                        "斗鱼" to "stun.douyucdn.cn:3478",
+                        "Cloudflare" to "stun.cloudflare.com:3478",
+                        "Syncthing" to "stun.syncthing.net:3478",
+                        "腾讯云" to "stun.qq.com:3478",
+                        "Google" to "stun.l.google.com:19302"
+                    )
+                    LazyRow(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        items(presetStuns) { (label, endpoint) ->
+                            SoftChoicePill(
+                                text = label,
+                                selected = servers.contains(endpoint),
+                                onClick = {
+                                    if (!running) {
+                                        val currentList = servers.toMutableList()
+                                        if (currentList.size == 1 && currentList[0].isBlank()) {
+                                            currentList[0] = endpoint
+                                        } else if (!currentList.contains(endpoint)) {
+                                            if (currentList.size < 6) currentList.add(endpoint) else currentList[currentList.size - 1] = endpoint
+                                        }
+                                        onServersChange(currentList)
+                                    }
+                                },
+                                compact = true
+                            )
+                        }
+                    }
+                }
+
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("STUN服务器", color = TextDark, fontSize = 13.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
                     Text("未填写端口时默认 3478", color = Muted, fontSize = 10.sp)
@@ -8717,7 +8875,8 @@ private fun NatDiagnosticDialog(
                     }
                 }
             }
-        }
+        },
+        shape = GlassPopupShape
     )
 }
 
@@ -8867,8 +9026,8 @@ private fun standardFilteringText(value: String): String = when (value) {
 }
 
 private fun defaultNatServer(mode: ManualNatMode): String = when (mode) {
-    ManualNatMode.RFC5780 -> "stunserver2025.stunprotocol.org:3478"
-    ManualNatMode.RFC3489 -> "stun.voip.aebc.com:3478"
+    ManualNatMode.RFC5780 -> "stun.chat.bilibili.com:3478"
+    ManualNatMode.RFC3489 -> "stun.miwifi.com:3478"
 }
 
 
@@ -9337,6 +9496,35 @@ private class NetToolHistoryStore(context: Context) {
         val raw = prefs.getString("iperf_history", "[]") ?: "[]"
         return raw.toByteArray(Charsets.UTF_8).size / 1024.0
     }
+
+    fun loadCustomTargets(moduleKey: String): List<String> {
+        val arr = runCatching { JSONArray(prefs.getString("custom_targets_$moduleKey", "[]") ?: "[]") }.getOrDefault(JSONArray())
+        return buildList {
+            for (i in 0 until arr.length()) {
+                val s = arr.optString(i)
+                if (s.isNotBlank()) add(s)
+            }
+        }.take(5)
+    }
+
+    fun addCustomTarget(moduleKey: String, target: String): Boolean {
+        val trimmed = target.trim()
+        if (trimmed.isBlank()) return false
+        val current = loadCustomTargets(moduleKey).filterNot { it.equals(trimmed, ignoreCase = true) }
+        if (current.size >= 5) return false
+        val next = (listOf(trimmed) + current).take(5)
+        prefs.edit().putString("custom_targets_$moduleKey", JSONArray().apply {
+            next.forEach { put(it) }
+        }.toString()).apply()
+        return true
+    }
+
+    fun deleteCustomTarget(moduleKey: String, target: String) {
+        val next = loadCustomTargets(moduleKey).filterNot { it.equals(target.trim(), ignoreCase = true) }
+        prefs.edit().putString("custom_targets_$moduleKey", JSONArray().apply {
+            next.forEach { put(it) }
+        }.toString()).apply()
+    }
 }
 
 private data class BufferbloatHistoryRecord(
@@ -9461,6 +9649,178 @@ private fun <T> ToolHistorySection(
             }
         }
     }
+}
+
+private data class ToolTargetPreset(val value: String, val note: String)
+
+@Composable
+private fun ToolTargetSelectorModal(
+    title: String = "选择目标",
+    presets: List<ToolTargetPreset>,
+    customTargets: List<String>,
+    onPick: (String) -> Unit,
+    onAddCustom: (String) -> Boolean,
+    onDeleteCustom: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var isAdding by remember { mutableStateOf(false) }
+    var newTargetInput by remember { mutableStateOf("") }
+    var addError by remember { mutableStateOf<String?>(null) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("关闭", fontSize = 13.sp)
+            }
+        },
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(title, fontWeight = FontWeight.Bold, color = TextDark, modifier = Modifier.weight(1f))
+                IconButton(onClick = onDismiss, modifier = Modifier.width(32.dp).height(32.dp)) {
+                    Icon(Icons.Filled.Close, contentDescription = "关闭", tint = Muted, modifier = Modifier.width(18.dp).height(18.dp))
+                }
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 500.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text("推荐目标 (点击快速使用)", color = Muted, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                presets.forEach { preset ->
+                    Surface(
+                        shape = ShapeM,
+                        color = Color(0xFFF8FAFC),
+                        border = BorderStroke(1.dp, Blue.copy(alpha = 0.18f)),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                onPick(preset.value)
+                                onDismiss()
+                            }
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(preset.value, color = TextDark, fontSize = 13.sp, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
+                            if (preset.note.isNotBlank()) {
+                                Text(preset.note, color = Blue, fontSize = 11.sp)
+                            }
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(4.dp))
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("自定义目标 (${customTargets.size}/5)", color = Muted, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                    if (!isAdding && customTargets.size < 5) {
+                        TextButton(
+                            onClick = {
+                                isAdding = true
+                                newTargetInput = ""
+                                addError = null
+                            },
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                        ) {
+                            Text("+ 添加", color = Blue, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+
+                if (isAdding) {
+                    Surface(
+                        shape = ShapeM,
+                        color = BlueSoft.copy(alpha = 0.5f),
+                        border = BorderStroke(1.dp, Blue.copy(alpha = 0.35f)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            OutlinedTextField(
+                                value = newTargetInput,
+                                onValueChange = {
+                                    newTargetInput = it
+                                    addError = null
+                                },
+                                placeholder = { Text("输入域名或IP地址", fontSize = 12.sp) },
+                                singleLine = true,
+                                shape = ShapeM,
+                                modifier = Modifier.fillMaxWidth().height(48.dp)
+                            )
+                            addError?.let { Text(it, color = ErrorRed, fontSize = 11.sp) }
+                            Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
+                                TextButton(onClick = { isAdding = false }) { Text("取消", fontSize = 12.sp) }
+                                Spacer(Modifier.width(4.dp))
+                                Button(
+                                    onClick = {
+                                        val clean = newTargetInput.trim()
+                                        if (clean.isBlank()) {
+                                            addError = "请输入有效的域名或IP"
+                                        } else {
+                                            val ok = onAddCustom(clean)
+                                            if (ok) {
+                                                isAdding = false
+                                            } else {
+                                                addError = "已达5个上限或目标已存在"
+                                            }
+                                        }
+                                    },
+                                    shape = ShapeM,
+                                    modifier = Modifier.height(34.dp),
+                                    contentPadding = PaddingValues(horizontal = 12.dp)
+                                ) {
+                                    Text("保存", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (customTargets.isEmpty()) {
+                    Text("暂无自定义目标，可点击上方「+ 添加」保存常用地址", color = Muted, fontSize = 11.sp, modifier = Modifier.padding(vertical = 4.dp))
+                } else {
+                    customTargets.forEach { item ->
+                        SwipeDeleteToolBox(
+                            onDelete = { onDeleteCustom(item) },
+                            stateKey = item,
+                            shape = ShapeM
+                        ) {
+                            Surface(
+                                shape = ShapeM,
+                                color = Color(0xFFF8FAFC),
+                                border = BorderStroke(1.dp, Blue.copy(alpha = 0.15f)),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        onPick(item)
+                                        onDismiss()
+                                    }
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(item, color = TextDark, fontSize = 13.sp, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
+                                    IconButton(
+                                        onClick = { onDeleteCustom(item) },
+                                        modifier = Modifier.width(28.dp).height(28.dp)
+                                    ) {
+                                        Icon(Icons.Filled.DeleteOutline, contentDescription = "删除", tint = Muted, modifier = Modifier.width(16.dp).height(16.dp))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        shape = GlassPopupShape
+    )
 }
 
 private fun JSONArray.toStringList(): List<String> = buildList {
@@ -13356,6 +13716,17 @@ private fun BufferbloatToolPage(onBack: () -> Unit) {
     var sizeKb by remember { mutableStateOf(store.bufferbloatSizeKb()) }
     val scope = rememberCoroutineScope()
     var host by remember { mutableStateOf("223.5.5.5") }
+    var showTargetModal by remember { mutableStateOf(false) }
+    var customTargets by remember { mutableStateOf(store.loadCustomTargets("bufferbloat")) }
+    val bufferbloatPresets = remember {
+        listOf(
+            ToolTargetPreset("223.5.5.5", "阿里DNS · 极速低延时"),
+            ToolTargetPreset("119.29.29.29", "腾讯DNS · 全国BGP基准"),
+            ToolTargetPreset("114.114.114.114", "经典公网DNS · 骨干直连"),
+            ToolTargetPreset("www.baidu.com", "百度搜索 · 极速并发"),
+            ToolTargetPreset("www.bilibili.com", "B站CDN · 富媒体视频节点")
+        )
+    }
     var phase by remember { mutableStateOf(BufferbloatPhase.IDLE) }
     var progressText by remember { mutableStateOf("") }
     var progressFraction by remember { mutableStateOf(0f) }
@@ -13516,7 +13887,18 @@ private fun BufferbloatToolPage(onBack: () -> Unit) {
         item {
             SoftCard {
                 ConfigLongRow("目标") {
-                    CleanField(host, { if (phase == BufferbloatPhase.IDLE || phase == BufferbloatPhase.DONE) host = it }, "223.5.5.5", leadingMark = "host")
+                    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Box(Modifier.weight(1f)) {
+                            CleanField(host, { if (phase == BufferbloatPhase.IDLE || phase == BufferbloatPhase.DONE) host = it }, "223.5.5.5", leadingMark = "host")
+                        }
+                        Spacer(Modifier.width(6.dp))
+                        SoftChoicePill(
+                            text = "选择 ⌄",
+                            selected = false,
+                            onClick = { if (phase == BufferbloatPhase.IDLE || phase == BufferbloatPhase.DONE) showTargetModal = true },
+                            compact = true
+                        )
+                    }
                 }
                 Spacer(Modifier.height(6.dp))
                 Button(
@@ -13662,6 +14044,25 @@ private fun BufferbloatToolPage(onBack: () -> Unit) {
             }
         }
         item { Spacer(Modifier.height(18.dp)) }
+    }
+
+    if (showTargetModal) {
+        ToolTargetSelectorModal(
+            title = "选择缓冲评级目标",
+            presets = bufferbloatPresets,
+            customTargets = customTargets,
+            onPick = { host = it },
+            onAddCustom = {
+                val ok = store.addCustomTarget("bufferbloat", it)
+                if (ok) customTargets = store.loadCustomTargets("bufferbloat")
+                ok
+            },
+            onDeleteCustom = {
+                store.deleteCustomTarget("bufferbloat", it)
+                customTargets = store.loadCustomTargets("bufferbloat")
+            },
+            onDismiss = { showTargetModal = false }
+        )
     }
 }
 
@@ -14108,6 +14509,17 @@ private fun DualNetworkToolPage(onBack: () -> Unit) {
     var wifiNetwork by remember { mutableStateOf<Network?>(null) }
     var cellNetwork by remember { mutableStateOf<Network?>(null) }
     var targetHost by remember { mutableStateOf("223.5.5.5") }
+    var showTargetModal by remember { mutableStateOf(false) }
+    var customTargets by remember { mutableStateOf(store.loadCustomTargets("dualnet")) }
+    val dualnetPresets = remember {
+        listOf(
+            ToolTargetPreset("223.5.5.5", "阿里DNS · 双栈基准"),
+            ToolTargetPreset("119.29.29.29", "腾讯DNS · 骨干互联"),
+            ToolTargetPreset("www.qq.com", "腾讯网 · 移动互联网"),
+            ToolTargetPreset("www.baidu.com", "百度 · 骨干直连"),
+            ToolTargetPreset("1.1.1.1", "Cloudflare · 全球Anycast")
+        )
+    }
     var running by remember { mutableStateOf(false) }
     var progressFraction by remember { mutableStateOf(0f) }
     var progressText by remember { mutableStateOf("") }
@@ -14335,7 +14747,18 @@ private fun DualNetworkToolPage(onBack: () -> Unit) {
 
                 Spacer(Modifier.height(6.dp))
                 ConfigLongRow("目标") {
-                    CleanField(targetHost, { if (!running) targetHost = it }, "223.5.5.5", leadingMark = "host")
+                    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Box(Modifier.weight(1f)) {
+                            CleanField(targetHost, { if (!running) targetHost = it }, "223.5.5.5", leadingMark = "host")
+                        }
+                        Spacer(Modifier.width(6.dp))
+                        SoftChoicePill(
+                            text = "选择 ⌄",
+                            selected = false,
+                            onClick = { if (!running) showTargetModal = true },
+                            compact = true
+                        )
+                    }
                 }
                 Spacer(Modifier.height(6.dp))
                 Button(
@@ -14469,6 +14892,25 @@ private fun DualNetworkToolPage(onBack: () -> Unit) {
         }
         item { Spacer(Modifier.height(18.dp)) }
     }
+
+    if (showTargetModal) {
+        ToolTargetSelectorModal(
+            title = "选择双网对测目标",
+            presets = dualnetPresets,
+            customTargets = customTargets,
+            onPick = { targetHost = it },
+            onAddCustom = {
+                val ok = store.addCustomTarget("dualnet", it)
+                if (ok) customTargets = store.loadCustomTargets("dualnet")
+                ok
+            },
+            onDeleteCustom = {
+                store.deleteCustomTarget("dualnet", it)
+                customTargets = store.loadCustomTargets("dualnet")
+            },
+            onDismiss = { showTargetModal = false }
+        )
+    }
 }
 
 private data class IperfIntervalLog(
@@ -14554,6 +14996,17 @@ private fun IperfToolPage(onBack: () -> Unit) {
     var sizeKb by remember { mutableStateOf(store.iperfSizeKb()) }
     val scope = rememberCoroutineScope()
     var serverHost by remember { mutableStateOf("192.168.1.100") }
+    var showTargetModal by remember { mutableStateOf(false) }
+    var customTargets by remember { mutableStateOf(store.loadCustomTargets("iperf")) }
+    val iperfPresets = remember {
+        listOf(
+            ToolTargetPreset("192.168.1.100", "常用PC/NAS打流主机"),
+            ToolTargetPreset("192.168.31.1", "常见家庭主路由器/小米网关"),
+            ToolTargetPreset("192.168.0.100", "二级路由/局域网测速机"),
+            ToolTargetPreset("10.0.0.1", "企业/软路由常见网关"),
+            ToolTargetPreset("iperf.he.net", "HE经典公网测速节点")
+        )
+    }
     var serverPort by remember { mutableStateOf("5201") }
     var isReverse by remember { mutableStateOf(true) } // true: 下行 (Download), false: 上行 (Upload)
     var durationSec by remember { mutableStateOf(10) }
@@ -14757,7 +15210,18 @@ private fun IperfToolPage(onBack: () -> Unit) {
         item {
             SoftCard {
                 ConfigLongRow("服务器") {
-                    CleanField(serverHost, { if (!running) serverHost = it }, "192.168.1.100", leadingMark = "host")
+                    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Box(Modifier.weight(1f)) {
+                            CleanField(serverHost, { if (!running) serverHost = it }, "192.168.1.100", leadingMark = "host")
+                        }
+                        Spacer(Modifier.width(6.dp))
+                        SoftChoicePill(
+                            text = "选择 ⌄",
+                            selected = false,
+                            onClick = { if (!running) showTargetModal = true },
+                            compact = true
+                        )
+                    }
                 }
 
                 Spacer(Modifier.height(6.dp))
@@ -14965,6 +15429,25 @@ private fun IperfToolPage(onBack: () -> Unit) {
             }
         }
         item { Spacer(Modifier.height(18.dp)) }
+    }
+
+    if (showTargetModal) {
+        ToolTargetSelectorModal(
+            title = "选择 iPerf3 服务器",
+            presets = iperfPresets,
+            customTargets = customTargets,
+            onPick = { serverHost = it },
+            onAddCustom = {
+                val ok = store.addCustomTarget("iperf", it)
+                if (ok) customTargets = store.loadCustomTargets("iperf")
+                ok
+            },
+            onDeleteCustom = {
+                store.deleteCustomTarget("iperf", it)
+                customTargets = store.loadCustomTargets("iperf")
+            },
+            onDismiss = { showTargetModal = false }
+        )
     }
 }
 
@@ -15355,7 +15838,8 @@ private fun NetworkEnvironmentSettingsCard(
                 )
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                InfoMetricTile("nat", "NAT", probeInfo.natType, Color(0xFFFFE4E6), ErrorRed, Modifier.weight(1f), onClick = onOpenNatDiagnostics)
+                val (natBg, natFg) = natColorTheme(probeInfo.natType)
+                InfoMetricTile("nat", "NAT", probeInfo.natType, natBg, natFg, Modifier.weight(1f), onClick = onOpenNatDiagnostics)
                 InfoMetricTile("carrier", "运营商", probeInfo.carrier, Color(0xFFF3E8FF), Purple, Modifier.weight(1f))
             }
             return@SoftCard
@@ -15380,8 +15864,9 @@ private fun NetworkEnvironmentSettingsCard(
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
             val mapped = if (publicIpResult.ipv4.isUsableIpText() && probeInfo.portText != "不可用" && probeInfo.portText != "待检测") "${publicIpResult.ipv4}:${probeInfo.portText}" else probeInfo.portText
+            val (natBg, natFg) = natColorTheme(probeInfo.natType)
             InfoMetricTile("mapping", "公网映射", if (maskPrivacy) maskIpText(mapped) else mapped, Color(0xFFE0F2FE), Blue, Modifier.weight(1f))
-            InfoMetricTile("nat", "NAT类型", probeInfo.natType, Color(0xFFFFE4E6), ErrorRed, Modifier.weight(1f), onClick = onOpenNatDiagnostics)
+            InfoMetricTile("nat", "NAT类型", probeInfo.natType, natBg, natFg, Modifier.weight(1f), onClick = onOpenNatDiagnostics)
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
             InfoMetricTile("priority", "优先级", probeInfo.priority, Color(0xFFFFF3E0), Orange, Modifier.weight(1f))
@@ -15421,6 +15906,16 @@ private fun NetworkEnvironmentSettingsCard(
     }
 }
 
+
+private fun natColorTheme(value: String): Pair<Color, Color> = when {
+    value.startsWith("NAT1") -> GreenSoft to Green
+    value.startsWith("NAT2") -> Color(0xFFE0F2FE) to Blue
+    value.startsWith("NAT3") -> Color(0xFFFFF3E0) to Orange
+    value.startsWith("NAT4") || value.contains("受限") -> Color(0xFFFFE4E6) to ErrorRed
+    value.contains("代理") -> Color(0xFFF3E8FF) to Purple
+    value == "待检测" -> BlueSoft to Blue
+    else -> Color(0xFFF1F5F9) to Muted
+}
 
 private fun natIconMark(value: String): String {
     val match = Regex("NAT\\s*([1-4])|NAT([1-4])", RegexOption.IGNORE_CASE).find(value)
@@ -16500,9 +16995,10 @@ private fun BottomNav(selectedTab: MainTab, onSelect: (MainTab) -> Unit) {
         MainTab.entries.forEach { tab ->
             val selected = selectedTab == tab
             val image = when (tab) {
-                MainTab.SETTINGS -> Icons.Filled.Settings
                 MainTab.TEST -> Icons.Filled.PlayArrow
+                MainTab.TOOLS -> Icons.Filled.Build
                 MainTab.LOGS -> Icons.Filled.Article
+                MainTab.SETTINGS -> Icons.Filled.Settings
             }
             val shape = RoundedCornerShape(24.dp)
             val interactionSource = remember(tab) { MutableInteractionSource() }

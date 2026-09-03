@@ -1,17 +1,18 @@
 {
-  "versionCode": 152,
-  "versionName": "v1.0.21-beta3",
-  "build": 152,
+  "versionCode": 153,
+  "versionName": "v1.0.21-beta4",
+  "build": 153,
   "status": "testing",
   "minReadyFileSize": 3000000,
-  "title": "发现测试版本 v1.0.21-beta3 build152",
+  "title": "发现测试版本 v1.0.21-beta4 build153",
   "content": [
-    "新增 缓冲评级、双网对测、iPerf3三大模块7天历史记录，支持统计条数与占用KB、按天自动折叠与左滑垃圾桶删除",
-    "修复 iPerf3测速页面端口输入框在部分屏幕比例下被右侧遮挡截断的问题，优化排版并增设常用端口胶囊",
-    "深度优化 NAT 诊断：接入国内高可用多线STUN池，新增Double NAT/CGNAT大内网识别与UPnP打洞探针",
-    "深度优化 MTU 检测：启发式极速收敛（1~2秒完成）、TCP MSS双轨交叉校验与游戏主机针对性调优建议"
+    "重构底栏为 4-Tab 架构，全新推出独立「工具」中心，按网络诊断/性能测试/运营商工参分类呈现",
+    "设置页完整保留原有网络信息与工具入口，无需改变操作习惯",
+    "极速公网 IPv4 检测：接入国内 Anycast BGP 极速源，毫秒级抢占竞速，刷新即时穿透缓存",
+    "停用静默后台 NAT 探测，主页秒级加载；强化手动 NAT 诊断，新增国内多线高可用 STUN 快捷胶囊",
+    "缓冲评级、双网对测、iPerf3 增设目标/服务器弹出选择器，支持 5 个推荐目标与最多 5 个自定义目标保存/删除"
   ],
-  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.0.21-beta3-152/NetSessionTester-v1.0.21-beta3-build152-signed.apk",
-  "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/tag/v1.0.21-beta3-152",
+  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.0.21-beta4-153/NetSessionTester-v1.0.21-beta4-build153-signed.apk",
+  "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/tag/v1.0.21-beta4-153",
   "force": false
 }

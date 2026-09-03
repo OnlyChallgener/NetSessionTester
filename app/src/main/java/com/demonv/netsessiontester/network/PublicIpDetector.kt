@@ -30,19 +30,22 @@ data class PublicIpResult(
 )
 
 object PublicIpDetector {
-    private const val SUCCESS_CACHE_TTL_MS = 10_000L
-    private const val FAILURE_CACHE_TTL_MS = 1_500L
-    private const val FAMILY_TIMEOUT_MS = 3_500L
-    private const val CONNECT_TIMEOUT_MS = 1_200
-    private const val READ_TIMEOUT_MS = 1_800
+    private const val SUCCESS_CACHE_TTL_MS = 8_000L
+    private const val FAILURE_CACHE_TTL_MS = 1_000L
+    private const val FAMILY_TIMEOUT_MS = 2_500L
+    private const val CONNECT_TIMEOUT_MS = 800
+    private const val READ_TIMEOUT_MS = 1_200
     private const val MAX_BODY_LENGTH = 4_096
 
     /*
      * 国内/国内访问相对友好的检测源放在前面；同地址族仍并发竞争，
-     * 因此单个接口异常不会拖住整轮检测。
+     * 首个有效返回立刻胜出，毫秒级响应。
      */
     private val ipv4Sources = listOf(
         "https://4.ipw.cn/",
+        "https://myip.ipip.net/s",
+        "https://ddns.oray.com/checkip",
+        "https://ip.3322.net",
         "https://api-ipv4.ip.sb/ip",
         "https://api.ipify.org?format=json",
         "https://ipv4.icanhazip.com",
@@ -75,12 +78,15 @@ object PublicIpDetector {
      * IPv4 与 IPv6 并发检测；同一地址族的多个源也并发竞争，
      * 第一个返回有效地址的源获胜。
      */
-    suspend fun detect(network: Network? = null): PublicIpResult = withContext(Dispatchers.IO) {
+    suspend fun detect(network: Network? = null, forceRefresh: Boolean = false): PublicIpResult = withContext(Dispatchers.IO) {
+        if (forceRefresh) {
+            invalidate()
+        }
         val networkKey = network?.toString() ?: "default"
         val now = System.currentTimeMillis()
 
         cacheEntry?.takeIf {
-            it.networkKey == networkKey && now - it.checkedAtMs < it.ttlMs
+            !forceRefresh && it.networkKey == networkKey && now - it.checkedAtMs < it.ttlMs
         }?.let { return@withContext it.result }
 
         val result = coroutineScope {
@@ -272,8 +278,8 @@ object PublicIpDetector {
             .filter(String::isNotBlank)
             .take(8)
             .forEach { line ->
-                candidates += line
-                line.split(' ', '\t', ',', ';', '"', '\'', '<', '>', '(', ')')
+                val delimiters = if (expectIpv6) charArrayOf(' ', '\t', ',', ';', '"', '\'', '<', '>', '(', ')') else charArrayOf(' ', '\t', ',', ';', '"', '\'', '<', '>', '(', ')', ':')
+                line.split(*delimiters)
                     .map(String::trim)
                     .filter(String::isNotBlank)
                     .forEach(candidates::add)
