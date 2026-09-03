@@ -13494,7 +13494,7 @@ private fun BufferbloatToolPage(onBack: () -> Unit) {
                 loadedRtt = lAvg,
                 deltaRtt = delta,
                 grade = "${grade.grade} (${grade.title})",
-                advice = grade.advice
+                advice = grade.desc
             )
             store.addBufferbloat(rec)
             records = store.loadBufferbloat()
