@@ -1641,18 +1641,8 @@ private fun buildNetworkProbeInfo(
 
     val confidence = when {
         env.hasVpn -> "低"
-        !full -> "低"
-        rfc5780EndpointIndependentMapping && rfc5780EndpointIndependentFiltering -> "高"
-        rfc5780Verified -> "中高"
-        strictNat1 -> "高"
-        strongSymmetric && stun!!.ipStable && stun.roundStable && multiStun >= 5 -> "高"
-        strongSymmetric && stun!!.ipStable && multiStun >= 4 -> "中高"
-        stun != null && stableMapping && multiStun >= 5 && stun.roundStable -> "中高"
-        stun != null && multiStun >= 4 && stun.roundStable -> "中"
-        stun != null && multiStun >= 3 -> "中"
-        stun != null -> "低"
-        publicV4 != null -> "低"
-        else -> "低"
+        isDirectPublicV4 -> "高"
+        else -> "待检测"
     }
 
     val dnsStatus = when {
@@ -1664,11 +1654,7 @@ private fun buildNetworkProbeInfo(
         else -> "无AAAA"
     }
 
-    val stunRoundText = stun?.let { if (it.roundCount >= 2) "复测${it.roundCount}轮${if (it.roundStable) "稳定" else "有波动"}。" else "" } ?: ""
-    val stunBackupText = stun?.let { if (it.usedBackup) "已启用备用节点。" else "" } ?: ""
-    val rfc5780Text = stun?.let { if (it.filteringVerified) "RFC5780节点 ${it.rfc5780Server} 已验证回包限制。" else "" } ?: ""
-    val stunNodeText = if (full && stunTotal > 0) "STUN节点 ${multiStun}/${stunTotal} 成功。${stunRoundText}${stunBackupText}${rfc5780Text}" else ""
-    val isCgnat = (publicV4 != null && isCgnatIpv4(publicV4)) || (stun?.mappedIp != null && isCgnatIpv4(stun.mappedIp))
+    val isCgnat = (publicV4 != null && isCgnatIpv4(publicV4))
     val isDoubleNat = isCgnat || (localIpv4 != null && isPrivateIpv4(localIpv4) && publicV4 != null && !isDirectPublicV4)
     val upnpSupported = if (full && !env.hasVpn && localIpv4 != null && isPrivateIpv4(localIpv4)) probeUpnpAvailable() else false
     val natDepthTag = when {
@@ -1685,15 +1671,7 @@ private fun buildNetworkProbeInfo(
         dns.fakeIpDetected -> "检测到Fake-IP，DNS可能被代理工具接管。"
         !dns.systemHasAaaa && dns.domesticHasAaaa -> "系统DNS未返回IPv6，国内备用DNS可解析，可能被AdGuard/代理/路由器策略过滤。"
         !dns.systemHasAaaa && dns.globalHasAaaa -> "系统和国内备用DNS未返回IPv6，国外备用DNS可解析，可能存在地区DNS差异或本地DNS策略影响。"
-        rfc5780Verified -> "${stunNodeText}检测方式：${stun!!.detectionMethod}，出网端口：${stun.rfc5780MappingBehavior}，回包限制：${stun.rfc5780FilteringBehavior}。"
-        natType.startsWith("NAT4 / 对称") -> "${stunNodeText}多个可用STUN目标返回的外部端口不一致，当前按对称型/NAT4理解，P2P/游戏联机可能受影响。"
-        natType.startsWith("NAT3 / 端口保持") -> "${stunNodeText}多节点端口保持，但未满足6/6节点与2轮稳定条件，当前按端口保持型受限网络显示；完整回包限制需RFC5780/自建节点验证。"
-        natType.startsWith("NAT3 / 受限") && weakPortChange -> "${stunNodeText}UDP基础探测可用，但可用节点不足以确认对称型，当前按受限型理解，建议换网络或再次刷新复测。"
-        natType.startsWith("NAT3 / 受限") -> "${stunNodeText}UDP基础探测可用，回包限制未完成RFC5780验证；完整回包限制需RFC5780/自建节点验证。"
-        natType.startsWith("NAT类型待确认") -> "公网IPv4可用，但STUN基础探测未成功，NAT类型暂按待确认处理。"
-        natType.startsWith("UDP") -> "多个STUN基础请求均失败，当前仅能判断为UDP受限/无法判断，可能是UDP被防火墙、代理或运营商限制。"
-        natType.startsWith("NAT2") -> "UDP映射较稳定，普通联机能力中等。"
-        natType.startsWith("NAT1") -> if (rfc5780Verified) "${stunNodeText}RFC5780已完成端口保持和回包验证，当前判定为 NAT1 / 全锥形。" else "${stunNodeText}6/6节点与2轮复测均保持同一公网端口，按兼容口径判定为 NAT1；完整回包限制需 RFC5780 / 自建节点验证。"
+        isDirectPublicV4 -> "公网IPv4直连，无NAT转换。"
         natType == "待检测" -> "网络就绪。NAT 采用手动深度测试，点击 NAT 指标可自选 STUN 节点进行专项诊断。"
         else -> "网络信息已更新。"
     }
@@ -1705,7 +1683,7 @@ private fun buildNetworkProbeInfo(
         carrier = carrierText,
         natType = natType,
         latencyText = latencyMs?.let { "${it}ms" } ?: "不可用",
-        portText = stun?.mappedPort?.toString() ?: tcpPort?.toString() ?: "不可用",
+        portText = tcpPort?.toString() ?: "待检测",
         priority = priority,
         mappingBehavior = mapping,
         filterBehavior = filtering,
