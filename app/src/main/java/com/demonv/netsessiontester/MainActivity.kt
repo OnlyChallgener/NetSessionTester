@@ -8760,11 +8760,11 @@ private fun NatDiagnosticDialog(
                         "腾讯云" to "stun.qq.com:3478",
                         "Google" to "stun.l.google.com:19302"
                     )
-                    LazyRow(
+                    Row(
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        modifier = Modifier.fillMaxWidth()
+                        modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
                     ) {
-                        items(presetStuns) { (label, endpoint) ->
+                        presetStuns.forEach { (label, endpoint) ->
                             SoftChoicePill(
                                 text = label,
                                 selected = servers.contains(endpoint),
