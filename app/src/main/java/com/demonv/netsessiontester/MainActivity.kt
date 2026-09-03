@@ -2793,13 +2793,11 @@ private suspend fun tcpSocketProbe(address: String, port: Int, timeoutMs: Int): 
 
 internal suspend fun findTcpPingPort(address: String, timeoutMs: Int): TcpPingProbe? = withContext(AppTestRuntime.PingDispatcher) {
     val probeTimeout = timeoutMs.coerceIn(180, 450)
-    coroutineScope {
-        val jobs = TCP_PING_PROBE_PORTS.take(4).map { port ->
-            async { tcpSocketProbe(address, port, probeTimeout) }
-        }
-        val results = jobs.awaitAll().filterNotNull()
-        results.minByOrNull { it.latencyMs }
+    for (port in TCP_PING_PROBE_PORTS) {
+        val probe = tcpSocketProbe(address, port, probeTimeout)
+        if (probe != null) return@withContext probe
     }
+    null
 }
 
 internal suspend fun tcpSocketPingResolved(address: String, port: Int, timeoutMs: Int): PingCommandResult = withContext(AppTestRuntime.PingDispatcher) {
