@@ -13293,6 +13293,7 @@ private fun parseAllCellInfo(context: Context): List<ParsedCellData> {
             val strength = info.cellSignalStrength
             val psc = identity.psc.takeIf { it in 0..511 }?.toString() ?: "—"
             val lac = identity.lac.takeIf { it in 0..65535 }?.toString() ?: "—"
+            val cid = identity.cid.takeIf { it in 0..268435455 }?.toString() ?: "—"
             val dbm = strength.dbm.takeIf { it in -120..(-24) }
             val rating = cellSignalRating(dbm)
             parsed.add(
