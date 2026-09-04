@@ -54,6 +54,17 @@ class SettingsStore(context: Context) {
                 .putString(KEY_FAILURE_LIMIT, performanceFailureLimit)
                 .apply()
         }
+        val rawRfc5780 = prefs.getString(KEY_NAT_RFC5780_SERVERS, "stunserver2025.stunprotocol.org:3478") ?: "stunserver2025.stunprotocol.org:3478"
+        val migratedRfc5780 = if (rawRfc5780.trim() == "stun.chat.bilibili.com:3478") "stunserver2025.stunprotocol.org:3478" else rawRfc5780
+        val rawRfc3489 = prefs.getString(KEY_NAT_RFC3489_SERVERS, "stun.voip.aebc.com:3478") ?: "stun.voip.aebc.com:3478"
+        val migratedRfc3489 = if (rawRfc3489.trim() == "stun.miwifi.com:3478") "stun.voip.aebc.com:3478" else rawRfc3489
+        if (rawRfc5780 != migratedRfc5780 || rawRfc3489 != migratedRfc3489) {
+            prefs.edit()
+                .putString(KEY_NAT_RFC5780_SERVERS, migratedRfc5780)
+                .putString(KEY_NAT_RFC3489_SERVERS, migratedRfc3489)
+                .apply()
+        }
+
         SavedSettings(
             host = prefs.getString(KEY_HOST, "www.baidu.com") ?: "www.baidu.com",
             port = prefs.getString(KEY_PORT, "80") ?: "80",
@@ -73,8 +84,8 @@ class SettingsStore(context: Context) {
             pingCount = prefs.getString(KEY_PING_COUNT, "无限") ?: "无限",
             pingTimeoutMs = prefs.getString(KEY_PING_TIMEOUT_MS, "1000") ?: "1000",
             pingProtocol = prefs.getString(KEY_PING_PROTOCOL, "AUTO") ?: "AUTO",
-            natRfc5780Servers = prefs.getString(KEY_NAT_RFC5780_SERVERS, "stunserver2025.stunprotocol.org:3478") ?: "stunserver2025.stunprotocol.org:3478",
-            natRfc3489Servers = prefs.getString(KEY_NAT_RFC3489_SERVERS, "stun.voip.aebc.com:3478") ?: "stun.voip.aebc.com:3478"
+            natRfc5780Servers = migratedRfc5780,
+            natRfc3489Servers = migratedRfc3489
         )
     }
 

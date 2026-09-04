@@ -2358,7 +2358,7 @@ private fun parseStunEndpoint(raw: String, defaultPort: Int = 3478): StunEndpoin
 
 private fun manualNatProbe(mode: ManualNatMode, servers: List<String>, progress: (String) -> Unit = {}): ManualNatResult {
     val cleanServers = servers.mapNotNull { parseStunEndpoint(it) }.ifEmpty {
-        listOf(if (mode == ManualNatMode.RFC5780) StunEndpoint("stun.chat.bilibili.com", 3478) else StunEndpoint("stun.miwifi.com", 3478))
+        listOf(if (mode == ManualNatMode.RFC5780) StunEndpoint("stunserver2025.stunprotocol.org", 3478) else StunEndpoint("stun.voip.aebc.com", 3478))
     }
     var lastError = "STUN服务器无响应"
     cleanServers.forEachIndexed { index, endpoint ->
@@ -3036,7 +3036,6 @@ private fun NetSessionTesterApp() {
     var testPingFocusRequest by remember { mutableStateOf(0) }
     var settingsNetworkFocusRequest by remember { mutableStateOf(0) }
     var sessionCardExpanded by remember { mutableStateOf(false) }
-    var networkInfoExpanded by rememberSaveable { mutableStateOf(false) }
     val restoredReleaseUi = remember {
         val snapshot = AppTestRuntime.releaseUiSnapshot
         val completionStillVisible = !snapshot.finished ||
@@ -3138,8 +3137,8 @@ private fun NetSessionTesterApp() {
     var natDiagnosticRunning by remember { mutableStateOf(false) }
     var natDiagnosticProgress by remember { mutableStateOf("") }
     var natManualMode by remember { mutableStateOf(ManualNatMode.RFC5780) }
-    var natRfc5780Servers by remember { mutableStateOf(listOf("stun.chat.bilibili.com:3478")) }
-    var natRfc3489Servers by remember { mutableStateOf(listOf("stun.miwifi.com:3478")) }
+    var natRfc5780Servers by remember { mutableStateOf(listOf("stunserver2025.stunprotocol.org:3478")) }
+    var natRfc3489Servers by remember { mutableStateOf(listOf("stun.voip.aebc.com:3478")) }
 
     val updatePrefs = remember { context.getSharedPreferences("app_update", Context.MODE_PRIVATE) }
     var latestUpdate by remember { mutableStateOf<UpdateInfo?>(null) }
@@ -3159,7 +3158,6 @@ private fun NetSessionTesterApp() {
     fun closeIpv6DiagnosticsToNetworkInfo() {
         appToolPage = AppToolPage.NONE
         selectedTab = MainTab.SETTINGS
-        networkInfoExpanded = true
         settingsNetworkFocusRequest += 1
     }
 
@@ -3554,8 +3552,14 @@ private fun NetSessionTesterApp() {
         pingCountSetting = saved.pingCount.ifBlank { "无限" }
         pingTimeoutSetting = saved.pingTimeoutMs
         pingProtocolSetting = runCatching { PingProtocolMode.valueOf(saved.pingProtocol) }.getOrDefault(PingProtocolMode.AUTO)
-        natRfc5780Servers = normalizeNatServerList(saved.natRfc5780Servers, "stunserver2025.stunprotocol.org:3478")
-        natRfc3489Servers = normalizeNatServerList(saved.natRfc3489Servers, "stun.voip.aebc.com:3478")
+        natRfc5780Servers = normalizeNatServerList(
+            if (saved.natRfc5780Servers.trim() == "stun.chat.bilibili.com:3478") "stunserver2025.stunprotocol.org:3478" else saved.natRfc5780Servers,
+            "stunserver2025.stunprotocol.org:3478"
+        )
+        natRfc3489Servers = normalizeNatServerList(
+            if (saved.natRfc3489Servers.trim() == "stun.miwifi.com:3478") "stun.voip.aebc.com:3478" else saved.natRfc3489Servers,
+            "stun.voip.aebc.com:3478"
+        )
         applyHistoryUiSnapshot(loadHistoryUiSnapshot(historyPeriod, historyLimit.toIntOrNull()?.coerceIn(10, 100) ?: 30))
         settingsLoaded = true
         lastNetworkInfoSignature = currentNetworkSignature(context)
@@ -4377,8 +4381,6 @@ private fun NetSessionTesterApp() {
                 MainTab.SETTINGS -> SettingsPage(
                     listState = settingsListState,
                     networkInfoFocusRequest = settingsNetworkFocusRequest,
-                    networkInfoExpanded = networkInfoExpanded,
-                    onNetworkInfoExpandedChange = { networkInfoExpanded = it },
                     host = host,
                     onHostChange = { host = it },
                     hostHistory = hostHistory,
@@ -4399,18 +4401,9 @@ private fun NetSessionTesterApp() {
                     onCopyPublicIpv4 = { copyText(publicIpResult.ipv4, "IPv4出口地址") },
                     onCopyPublicIpv6 = { copyText(publicIpResult.ipv6, "IPv6出口地址") },
                     onOpenNatDiagnostics = { showNatDiagnosticDialog = true },
-                    onOpenNsLookup = { appToolPage = AppToolPage.NSLOOKUP },
-                    onOpenTracket = { appToolPage = AppToolPage.TRACKET },
-                    onOpenMtu = { appToolPage = AppToolPage.MTU },
-                    onOpenRoaming = { appToolPage = AppToolPage.ROAMING },
-                    onOpenBufferbloat = { appToolPage = AppToolPage.BUFFERBLOAT },
-                    onOpenCellularInfo = { appToolPage = AppToolPage.CELLULAR_INFO },
-                    onOpenDualNetwork = { appToolPage = AppToolPage.DUAL_NETWORK },
-                    onOpenIperf = { appToolPage = AppToolPage.IPERF },
                     onOpenIpv6Diagnostics = {
                         // 从网络信息进入时，不切到测试页；专项页退出后强制回到设置页网络信息卡片。
                         selectedTab = MainTab.SETTINGS
-                        networkInfoExpanded = true
                         appToolPage = AppToolPage.IPV6_DIAGNOSTIC
                     },
                     onOpenPingSettings = {
@@ -5409,8 +5402,6 @@ private fun ReorderableCardItem(
 private fun SettingsPage(
     listState: LazyListState,
     networkInfoFocusRequest: Int,
-    networkInfoExpanded: Boolean,
-    onNetworkInfoExpandedChange: (Boolean) -> Unit,
     host: String,
     onHostChange: (String) -> Unit,
     hostHistory: List<String>,
@@ -5427,15 +5418,7 @@ private fun SettingsPage(
     onCopyPublicIpv4: () -> Unit,
     onCopyPublicIpv6: () -> Unit,
     onOpenNatDiagnostics: () -> Unit,
-    onOpenNsLookup: () -> Unit,
-    onOpenTracket: () -> Unit,
-    onOpenMtu: () -> Unit,
-    onOpenRoaming: () -> Unit,
     onOpenIpv6Diagnostics: () -> Unit,
-    onOpenBufferbloat: () -> Unit,
-    onOpenCellularInfo: () -> Unit,
-    onOpenDualNetwork: () -> Unit,
-    onOpenIperf: () -> Unit,
     onOpenPingSettings: () -> Unit,
     maskPrivacy: Boolean,
     onMaskPrivacyChange: (Boolean) -> Unit,
@@ -5533,17 +5516,7 @@ private fun SettingsPage(
                         onCopyPublicIpv4 = onCopyPublicIpv4,
                         onCopyPublicIpv6 = onCopyPublicIpv6,
                         onOpenNatDiagnostics = onOpenNatDiagnostics,
-                        onOpenNsLookup = onOpenNsLookup,
-                        onOpenTracket = onOpenTracket,
-                        onOpenMtu = onOpenMtu,
-                        onOpenRoaming = onOpenRoaming,
-                        onOpenIpv6Diagnostics = onOpenIpv6Diagnostics,
-                        onOpenBufferbloat = onOpenBufferbloat,
-                        onOpenCellularInfo = onOpenCellularInfo,
-                        onOpenDualNetwork = onOpenDualNetwork,
-                        onOpenIperf = onOpenIperf,
-                        expanded = networkInfoExpanded,
-                        onExpandedChange = onNetworkInfoExpandedChange
+                        onOpenIpv6Diagnostics = onOpenIpv6Diagnostics
                     )
                     "session" -> SoftCard {
                         SectionTitle("≡", "会话参数", Green)
@@ -6810,7 +6783,8 @@ private fun AlertDialog(
     title: @Composable (() -> Unit)? = null,
     text: @Composable (() -> Unit)? = null,
     shape: androidx.compose.ui.graphics.Shape = GlassPopupShape,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    properties: androidx.compose.ui.window.DialogProperties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)
 ) {
     MaterialAlertDialog(
         onDismissRequest = onDismissRequest,
@@ -6824,7 +6798,10 @@ private fun AlertDialog(
         titleContentColor = TextDark,
         textContentColor = TextDark,
         tonalElevation = 0.dp,
-        modifier = modifier.border(1.dp, GlassPopupBorder, shape)
+        modifier = modifier
+            .fillMaxWidth(0.92f)
+            .border(1.dp, GlassPopupBorder, shape),
+        properties = properties
     )
 }
 
@@ -8705,68 +8682,102 @@ private fun NatDiagnosticDialog(
                 }
             }
         },
-        title = { Text("NAT 类型检测", fontWeight = FontWeight.ExtraBold, color = TextDark) },
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("NAT 类型检测", fontWeight = FontWeight.ExtraBold, color = TextDark, modifier = Modifier.weight(1f))
+                Text("IPv4 · UDP", color = Muted, fontSize = 12.sp)
+            }
+        },
         text = {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(max = 560.dp)
+                    .heightIn(max = 580.dp)
                     .verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Text("手动检测 · IPv4 · UDP", color = Muted, fontSize = 12.sp)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                     NatModeChip("RFC5780", mode == ManualNatMode.RFC5780, Modifier.weight(1f)) { onModeChange(ManualNatMode.RFC5780) }
                     NatModeChip("RFC3489", mode == ManualNatMode.RFC3489, Modifier.weight(1f)) { onModeChange(ManualNatMode.RFC3489) }
                 }
-                Text(
-                    if (mode == ManualNatMode.RFC5780) "RFC5780 会检测映射行为和过滤行为；若服务器不支持严格流程，会自动降级为 RFC8489 基础结果。" else "RFC3489 是经典兼容检测，结果可与老工具对比。",
-                    color = Muted,
-                    fontSize = 12.sp,
-                    lineHeight = 16.sp,
-                    modifier = Modifier.background(Color(0xFFF8FAFC), ShapeM).padding(10.dp)
-                )
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text("推荐优质公共 STUN 节点 (点击一键填入)", color = TextDark, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                    val presetStuns = listOf(
-                        "B站" to "stun.chat.bilibili.com:3478",
-                        "小米云" to "stun.miwifi.com:3478",
-                        "芒果TV" to "stun.hitv.com:3478",
-                        "斗鱼" to "stun.douyucdn.cn:3478",
-                        "Cloudflare" to "stun.cloudflare.com:3478",
-                        "Syncthing" to "stun.syncthing.net:3478",
-                        "腾讯云" to "stun.qq.com:3478",
-                        "Google" to "stun.l.google.com:19302"
-                    )
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
+
+                if (result != null) {
+                    val r = result
+                    Column(
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(if (r.success) BlueSoft else RedSoft, ShapeM)
+                            .border(1.dp, (if (r.success) Blue else ErrorRed).copy(alpha = 0.25f), ShapeM)
+                            .padding(10.dp)
                     ) {
-                        presetStuns.forEach { (label, endpoint) ->
-                            SoftChoicePill(
-                                text = label,
-                                selected = servers.contains(endpoint),
-                                onClick = {
-                                    if (!running) {
-                                        val currentList = servers.toMutableList()
-                                        if (currentList.size == 1 && currentList[0].isBlank()) {
-                                            currentList[0] = endpoint
-                                        } else if (!currentList.contains(endpoint)) {
-                                            if (currentList.size < 6) currentList.add(endpoint) else currentList[currentList.size - 1] = endpoint
-                                        }
-                                        onServersChange(currentList)
-                                    }
-                                },
-                                compact = true
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("测试结果", color = Muted, fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                            if (r.costMs > 0) Text("${r.costMs}ms", color = Muted, fontSize = 10.sp)
+                        }
+                        Text(
+                            r.natType,
+                            color = if (r.success) Blue else ErrorRed,
+                            fontSize = 17.sp,
+                            fontWeight = FontWeight.ExtraBold
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                            MiniResultTile("映射行为", standardMappingText(r.mappingBehavior), Modifier.weight(1f))
+                            MiniResultTile("过滤行为", standardFilteringText(r.filteringBehavior), Modifier.weight(1f))
+                        }
+                        if (mode == ManualNatMode.RFC5780 && r.success) {
+                            Text(
+                                "传统 NAT 类型为兼容换算；准确判断请以映射行为和过滤行为为准。",
+                                color = Muted,
+                                fontSize = 10.sp,
+                                lineHeight = 13.sp
                             )
                         }
+                        MiniResultLine("本地地址", r.localAddress)
+                        MiniResultLine("公网地址", r.publicAddress)
+                        MiniResultLine("测试方法", r.method)
+                        MiniResultLine("服务器", r.server)
+                        if (r.message.isNotBlank()) Text(r.message, color = Muted, fontSize = 10.sp, lineHeight = 14.sp)
+                    }
+                } else if (running || progressText.isNotBlank()) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(Color(0xFFF8FAFC), ShapeM)
+                            .border(1.dp, Blue.copy(alpha = 0.2f), ShapeM)
+                            .padding(10.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text("检测进度", color = Blue, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        Text(progressText.ifBlank { "正在发起探测..." }, color = TextDark, fontSize = 12.sp, lineHeight = 16.sp)
                     }
                 }
 
+                Text(
+                    if (mode == ManualNatMode.RFC5780) "RFC5780 会检测映射行为和过滤行为；若服务器不支持严格流程，会自动降级为 RFC8489 基础结果。" else "RFC3489 是经典兼容检测，结果可与老工具对比。",
+                    color = Muted,
+                    fontSize = 11.sp,
+                    lineHeight = 15.sp,
+                    modifier = Modifier.background(Color(0xFFF8FAFC), ShapeM).padding(horizontal = 8.dp, vertical = 6.dp)
+                )
+
+                Spacer(Modifier.height(2.dp))
+
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("STUN服务器", color = TextDark, fontSize = 13.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-                    Text("未填写端口时默认 3478", color = Muted, fontSize = 10.sp)
+                    Text("STUN服务器", color = TextDark, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                    Text("未填端口默认 3478", color = Muted, fontSize = 10.sp)
+                    if (servers != listOf(defaultNatServer(mode))) {
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            "恢复默认",
+                            color = Blue,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.clickable { onServersChange(listOf(defaultNatServer(mode))) }
+                        )
+                    }
                 }
+
                 servers.forEachIndexed { index, item ->
                     SwipeDeleteToolBox(
                         onDelete = {
@@ -8789,6 +8800,26 @@ private fun NatDiagnosticDialog(
                             },
                             label = { Text("服务器 ${index + 1}/${servers.size}", fontSize = 11.sp) },
                             placeholder = { Text(defaultNatServer(mode), fontSize = 12.sp) },
+                            trailingIcon = {
+                                IconButton(
+                                    onClick = {
+                                        val next = if (servers.size > 1) {
+                                            servers.filterIndexed { i, _ -> i != index }
+                                        } else {
+                                            listOf("")
+                                        }
+                                        onServersChange(next)
+                                    },
+                                    modifier = Modifier.size(32.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Filled.DeleteOutline,
+                                        contentDescription = "删除服务器",
+                                        tint = if (item.isNotBlank() || servers.size > 1) TextDark.copy(alpha = 0.65f) else Color.Transparent,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                            },
                             singleLine = true,
                             shape = ShapeM,
                             modifier = Modifier
@@ -8803,54 +8834,18 @@ private fun NatDiagnosticDialog(
                         )
                     }
                 }
-                OutlinedButton(
-                    onClick = {
-                        val clean = servers.map { it.trim() }
-                        val next = if (clean.size >= 6) clean else clean + ""
-                        onServersChange(next)
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = ShapeM
-                ) { Text("+ 添加服务器", fontSize = 13.sp) }
-                if (running || progressText.isNotBlank()) {
-                    Column(
-                        modifier = Modifier.fillMaxWidth().background(Color(0xFFF8FAFC), ShapeM).padding(10.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        Text("检测进度", color = Muted, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                        Text(progressText.ifBlank { "等待开始" }, color = TextDark, fontSize = 12.sp, lineHeight = 16.sp)
-                    }
-                }
-                result?.let { r ->
-                    Column(
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                        modifier = Modifier.fillMaxWidth().background(if (r.success) BlueSoft else RedSoft, ShapeM).padding(12.dp)
-                    ) {
-                        Text("测试结果", color = Muted, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                        Text(
-                            r.natType,
-                            color = if (r.success) Blue else ErrorRed,
-                            fontSize = 18.sp,
-                            fontWeight = FontWeight.ExtraBold
-                        )
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                            MiniResultTile("映射行为", standardMappingText(r.mappingBehavior), Modifier.weight(1f))
-                            MiniResultTile("过滤行为", standardFilteringText(r.filteringBehavior), Modifier.weight(1f))
-                        }
-                        if (mode == ManualNatMode.RFC5780 && r.success) {
-                            Text(
-                                "传统 NAT 类型为兼容换算；准确判断请同时参考上方 RFC5780 映射行为和过滤行为。",
-                                color = Muted,
-                                fontSize = 10.sp,
-                                lineHeight = 14.sp
-                            )
-                        }
-                        MiniResultLine("本地地址", r.localAddress)
-                        MiniResultLine("公网地址", r.publicAddress)
-                        MiniResultLine("测试方法", r.method)
-                        MiniResultLine("服务器", r.server)
-                        if (r.message.isNotBlank()) Text(r.message, color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
-                    }
+
+                if (servers.size < 6) {
+                    OutlinedButton(
+                        onClick = {
+                            val clean = servers.map { it.trim() }
+                            val next = clean + ""
+                            onServersChange(next)
+                        },
+                        modifier = Modifier.fillMaxWidth().height(36.dp),
+                        shape = ShapeM,
+                        contentPadding = PaddingValues(0.dp)
+                    ) { Text("+ 添加服务器", fontSize = 12.sp) }
                 }
             }
         },
@@ -9004,8 +8999,8 @@ private fun standardFilteringText(value: String): String = when (value) {
 }
 
 private fun defaultNatServer(mode: ManualNatMode): String = when (mode) {
-    ManualNatMode.RFC5780 -> "stun.chat.bilibili.com:3478"
-    ManualNatMode.RFC3489 -> "stun.miwifi.com:3478"
+    ManualNatMode.RFC5780 -> "stunserver2025.stunprotocol.org:3478"
+    ManualNatMode.RFC3489 -> "stun.voip.aebc.com:3478"
 }
 
 
@@ -10186,140 +10181,6 @@ private fun TracketToolRecord.copyText(): String {
             appendLine(hops.joinToString("\n").ifBlank { "无跳点结果" })
         }
     }.trim()
-}
-
-@Composable
-private fun NetworkToolShortcutRow(
-    onOpenNsLookup: () -> Unit,
-    onOpenTracket: () -> Unit,
-    onOpenMtu: () -> Unit,
-    onOpenRoaming: () -> Unit,
-    onOpenBufferbloat: () -> Unit,
-    onOpenCellularInfo: () -> Unit,
-    onOpenDualNetwork: () -> Unit,
-    onOpenIperf: () -> Unit
-) {
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            NetworkToolShortcutCard(
-                title = "NSLookup",
-                subtitle = "DNS解析",
-                mark = "nslookup",
-                color = Blue,
-                bg = BlueSoft,
-                modifier = Modifier.weight(1f),
-                onClick = onOpenNsLookup
-            )
-            NetworkToolShortcutCard(
-                title = "Tracket",
-                subtitle = "路由追踪",
-                mark = "tracket",
-                color = Purple,
-                bg = Color(0xFFF3E8FF),
-                modifier = Modifier.weight(1f),
-                onClick = onOpenTracket
-            )
-        }
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            NetworkToolShortcutCard(
-                title = "MTU检测",
-                subtitle = "路径MTU",
-                mark = "mtu",
-                color = Orange,
-                bg = Color(0xFFFFF3E0),
-                modifier = Modifier.weight(1f),
-                onClick = onOpenMtu
-            )
-            NetworkToolShortcutCard(
-                title = "漫游测试",
-                subtitle = "WiFi漫游",
-                mark = "roaming",
-                color = Green,
-                bg = GreenSoft,
-                modifier = Modifier.weight(1f),
-                onClick = onOpenRoaming
-            )
-        }
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            NetworkToolShortcutCard(
-                title = "缓冲评级",
-                subtitle = "Bufferbloat",
-                mark = "bufferbloat",
-                color = Orange,
-                bg = Color(0xFFFFF3E0),
-                modifier = Modifier.weight(1f),
-                onClick = onOpenBufferbloat
-            )
-            NetworkToolShortcutCard(
-                title = "基站看板",
-                subtitle = "5G/4G射频",
-                mark = "cellular",
-                color = Blue,
-                bg = BlueSoft,
-                modifier = Modifier.weight(1f),
-                onClick = onOpenCellularInfo
-            )
-        }
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            NetworkToolShortcutCard(
-                title = "双网对测",
-                subtitle = "5G vs WiFi",
-                mark = "dual_net",
-                color = Purple,
-                bg = Color(0xFFF3E8FF),
-                modifier = Modifier.weight(1f),
-                onClick = onOpenDualNetwork
-            )
-            NetworkToolShortcutCard(
-                title = "iPerf3测速",
-                subtitle = "吞吐压测",
-                mark = "iperf",
-                color = Green,
-                bg = GreenSoft,
-                modifier = Modifier.weight(1f),
-                onClick = onOpenIperf
-            )
-        }
-    }
-}
-
-@Composable
-private fun NetworkToolShortcutCard(
-    title: String,
-    subtitle: String,
-    mark: String,
-    color: Color,
-    bg: Color,
-    modifier: Modifier = Modifier,
-    onClick: () -> Unit
-) {
-    Surface(
-        modifier = modifier
-            .heightIn(min = 58.dp)
-            .clip(ShapeM)
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-                onClick = onClick
-            ),
-        shape = ShapeM,
-        color = Color(0xFFF8FAFC),
-        border = BorderStroke(1.dp, Border.copy(alpha = 0.46f)),
-        tonalElevation = 0.dp,
-        shadowElevation = 0.dp
-    ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.padding(9.dp)
-        ) {
-            MarkBox(mark, bg, color)
-            Spacer(Modifier.width(8.dp))
-            Column(Modifier.weight(1f)) {
-                Text(title, color = Muted, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(subtitle, color = TextDark, fontWeight = FontWeight.Bold, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            }
-        }
-    }
 }
 
 @Composable
@@ -15777,17 +15638,7 @@ private fun NetworkEnvironmentSettingsCard(
     onCopyPublicIpv4: () -> Unit,
     onCopyPublicIpv6: () -> Unit,
     onOpenNatDiagnostics: () -> Unit,
-    onOpenNsLookup: () -> Unit,
-    onOpenTracket: () -> Unit,
-    onOpenMtu: () -> Unit,
-    onOpenRoaming: () -> Unit,
-    onOpenIpv6Diagnostics: () -> Unit,
-    onOpenBufferbloat: () -> Unit,
-    onOpenCellularInfo: () -> Unit,
-    onOpenDualNetwork: () -> Unit,
-    onOpenIperf: () -> Unit,
-    expanded: Boolean,
-    onExpandedChange: (Boolean) -> Unit
+    onOpenIpv6Diagnostics: () -> Unit
 ) {
     SoftCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -15795,32 +15646,6 @@ private fun NetworkEnvironmentSettingsCard(
             Spacer(Modifier.weight(1f))
             TextButton(onClick = onOpenNatDiagnostics) { Text("NAT诊断", fontSize = 12.sp) }
             TextButton(onClick = onRefresh) { Text("刷新", fontSize = 12.sp) }
-            IconButton(onClick = { onExpandedChange(!expanded) }, modifier = Modifier.width(32.dp).height(32.dp)) {
-                Text(if (expanded) "⌃" else "⌄", color = TextDark, fontSize = 19.sp, fontWeight = FontWeight.Bold)
-            }
-        }
-        if (!expanded) {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                val ipv4Text = if (maskPrivacy) maskIpText(publicIpResult.ipv4) else publicIpResult.ipv4
-                val ipv6Text = if (maskPrivacy) maskIpText(publicIpResult.ipv6) else publicIpResult.ipv6
-                InfoMetricTile("ipv4", "IPv4", ipv4Text, BlueSoft, Blue, Modifier.weight(1f), onClick = onCopyPublicIpv4)
-                InfoMetricTile(
-                    icon = "ipv6",
-                    label = "IPv6",
-                    value = ipv6Text,
-                    iconBg = GreenSoft,
-                    iconColor = Green,
-                    modifier = Modifier.weight(1f),
-                    onIconClick = onOpenIpv6Diagnostics,
-                    onValueClick = if (isUsableIpv6(publicIpResult.ipv6)) onCopyPublicIpv6 else onOpenIpv6Diagnostics
-                )
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                val (natBg, natFg) = natColorTheme(probeInfo.natType)
-                InfoMetricTile("nat", "NAT", probeInfo.natType, natBg, natFg, Modifier.weight(1f), onClick = onOpenNatDiagnostics)
-                InfoMetricTile("carrier", "运营商", probeInfo.carrier, Color(0xFFF3E8FF), Purple, Modifier.weight(1f))
-            }
-            return@SoftCard
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
             InfoMetricTile("local_ip", "本地IP", if (maskPrivacy) maskIpText(probeInfo.localIp) else probeInfo.localIp, Color(0xFFE0F7FA), Color(0xFF00A7C6), Modifier.weight(1f))
@@ -15858,16 +15683,6 @@ private fun NetworkEnvironmentSettingsCard(
             InfoMetricTile("confidence", "NAT置信度", probeInfo.confidence, Color(0xFFF8FAFC), Muted, Modifier.weight(1f))
             InfoMetricTile("carrier", "运营商", probeInfo.carrier, Color(0xFFF3E8FF), Purple, Modifier.weight(1f))
         }
-        NetworkToolShortcutRow(
-            onOpenNsLookup = onOpenNsLookup,
-            onOpenTracket = onOpenTracket,
-            onOpenMtu = onOpenMtu,
-            onOpenRoaming = onOpenRoaming,
-            onOpenBufferbloat = onOpenBufferbloat,
-            onOpenCellularInfo = onOpenCellularInfo,
-            onOpenDualNetwork = onOpenDualNetwork,
-            onOpenIperf = onOpenIperf
-        )
         Text(
             probeInfo.diagnosis,
             color = if (probeInfo.proxyNotice.isNotBlank()) Purple else Muted,

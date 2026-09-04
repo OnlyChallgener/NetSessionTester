@@ -1,18 +1,18 @@
 {
-  "versionCode": 153,
+  "versionCode": 154,
   "versionName": "v1.0.21-beta4",
-  "build": 153,
+  "build": 154,
   "status": "testing",
   "minReadyFileSize": 3000000,
-  "title": "发现测试版本 v1.0.21-beta4 build153",
+  "title": "发现测试版本 v1.0.21-beta4 build154",
   "content": [
     "重构底栏为 4-Tab 架构，全新推出独立「工具」中心，按网络诊断/性能测试/运营商工参分类呈现",
-    "设置页完整保留原有网络信息与工具入口，无需改变操作习惯",
-    "极速公网 IPv4 检测：接入国内 Anycast BGP 极速源，毫秒级抢占竞速，刷新即时穿透缓存",
-    "停用静默后台 NAT 探测，主页秒级加载；强化手动 NAT 诊断，新增国内多线高可用 STUN 快捷胶囊",
+    "网络信息栏精简去冗：移除已迁移到工具页的快捷卡片，信息全量平铺直展不再折叠",
+    "高可靠公网 IPv4 检测：接入真实网络验证源，优化握手超时，秒级快速识别公网 IPv4",
+    "优化 NAT 诊断弹窗：卡片适度加宽，测试结果与进度置顶呈现免向下滚动，恢复单一默认 RFC5780 权威服务器",
     "缓冲评级、双网对测、iPerf3 增设目标/服务器弹出选择器，支持 5 个推荐目标与最多 5 个自定义目标保存/删除"
   ],
-  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.0.21-beta4-153/NetSessionTester-v1.0.21-beta4-build153-signed.apk",
-  "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/tag/v1.0.21-beta4-153",
+  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.0.21-beta4-154/NetSessionTester-v1.0.21-beta4-build154-signed.apk",
+  "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/tag/v1.0.21-beta4-154",
   "force": false
 }
