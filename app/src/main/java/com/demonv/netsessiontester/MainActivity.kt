@@ -6034,14 +6034,13 @@ private fun ToolsPage(
     val performanceTools = remember {
         listOf(
             ToolEntry("缓冲评级", "Bufferbloat膨胀 · 电竞评级", "bufferbloat", BlueSoft, Blue, AppToolPage.BUFFERBLOAT),
-            ToolEntry("双网对测", "WiFi vs 5G 同屏实时对比", "dual", Color(0xFFF3E8FF), Purple, AppToolPage.DUAL_NETWORK),
+            ToolEntry("WiFi 漫游", "AP无缝漫游 · 切换丢包与时延", "roaming", Color(0xFFFDF2F8), Color(0xFFEC4899), AppToolPage.ROAMING),
             ToolEntry("iPerf3 测速", "TCP/UDP吞吐量压测", "iperf", Color(0xFFF0FDF4), Green, AppToolPage.IPERF)
         )
     }
     val telecomTools = remember {
         listOf(
-            ToolEntry("基站工参", "5G/4G射频信号 · 小区参数", "cell", Color(0xFFFFF7ED), Color(0xFFF97316), AppToolPage.CELLULAR_INFO),
-            ToolEntry("出口漫游检测", "Anycast/跨运营商路由分析", "roaming", Color(0xFFFDF2F8), Color(0xFFEC4899), AppToolPage.ROAMING)
+            ToolEntry("基站工参", "5G/4G射频信号 · 小区参数", "cell", Color(0xFFFFF7ED), Color(0xFFF97316), AppToolPage.CELLULAR_INFO)
         )
     }
 
@@ -12673,7 +12672,7 @@ private fun RoamingToolPage(onBack: () -> Unit) {
     }
 
     LazyColumn(modifier = Modifier.fillMaxSize().padding(horizontal = 14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        item { ToolPageHeader("漫游测试", "记录 RSSI、延迟、丢包、协商速率和 BSSID切换观测时间", onBack) }
+        item { ToolPageHeader("WiFi 漫游", "记录 RSSI、延迟、丢包、协商速率和 BSSID切换观测时间", onBack) }
         item {
             SoftCard {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
@@ -14841,7 +14840,7 @@ private fun IperfToolPage(onBack: () -> Unit) {
             ToolTargetPreset("192.168.31.1", "常见家庭主路由器/小米网关"),
             ToolTargetPreset("192.168.0.100", "二级路由/局域网测速机"),
             ToolTargetPreset("10.0.0.1", "企业/软路由常见网关"),
-            ToolTargetPreset("iperf.he.net", "HE经典公网测速节点")
+            ToolTargetPreset("192.168.5.1", "常见局域网/软路由网关")
         )
     }
     var serverPort by remember { mutableStateOf("5201") }

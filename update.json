@@ -6,11 +6,11 @@
   "minReadyFileSize": 3000000,
   "title": "发现测试版本 v1.0.21-beta4 build154",
   "content": [
-    "重构底栏为 4-Tab 架构，全新推出独立「工具」中心，按网络诊断/性能测试/运营商工参分类呈现",
+    "重构底栏为 4-Tab 架构，推出「工具」中心（按网络诊断/性能测试/运营商工参分类），校准 WiFi 漫游归类",
     "网络信息栏精简去冗：移除已迁移到工具页的快捷卡片，信息全量平铺直展不再折叠",
     "高可靠公网 IPv4 检测：接入真实网络验证源，优化握手超时，秒级快速识别公网 IPv4",
     "优化 NAT 诊断弹窗：卡片适度加宽，测试结果与进度置顶呈现免向下滚动，恢复单一默认 RFC5780 权威服务器",
-    "缓冲评级、双网对测、iPerf3 增设目标/服务器弹出选择器，支持 5 个推荐目标与最多 5 个自定义目标保存/删除"
+    "缓冲评级、iPerf3 增设目标/服务器弹出选择器，支持 5 个推荐目标与自定义目标，iPerf3 推荐节点更新为 192.168.5.1"
   ],
   "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.0.21-beta4-154/NetSessionTester-v1.0.21-beta4-build154-signed.apk",
   "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/tag/v1.0.21-beta4-154",
