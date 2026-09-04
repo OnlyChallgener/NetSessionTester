@@ -77,6 +77,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
@@ -8711,10 +8712,7 @@ private fun NatDiagnosticDialog(
                             .border(1.dp, (if (r.success) Blue else ErrorRed).copy(alpha = 0.25f), ShapeM)
                             .padding(10.dp)
                     ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text("测试结果", color = Muted, fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-                            if (r.costMs > 0) Text("${r.costMs}ms", color = Muted, fontSize = 10.sp)
-                        }
+                        Text("测试结果", color = Muted, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                         Text(
                             r.natType,
                             color = if (r.success) Blue else ErrorRed,
