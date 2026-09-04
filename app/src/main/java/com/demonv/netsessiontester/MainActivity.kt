@@ -676,8 +676,8 @@ private fun currentAppVersionCode(context: Context): Long = runCatching {
 private fun currentAppVersionName(context: Context): String {
     return runCatching {
         val pkg = context.packageManager.getPackageInfo(context.packageName, 0)
-        pkg.versionName?.takeIf { it.isNotBlank() } ?: "v1.0.21-beta4"
-    }.getOrDefault("v1.0.21-beta4")
+        pkg.versionName?.takeIf { it.isNotBlank() } ?: "v1.0.21"
+    }.getOrDefault("v1.0.21")
 }
 
 private fun displayVersionName(raw: String): String {
@@ -3803,14 +3803,14 @@ private fun NetSessionTesterApp() {
         chartPoints = emptyList()
         displayChartPoints = emptyList()
         lastChartSampleAt = emptyMap()
-        // Ping 独立运行，不随会话曲线清空。
+        // Ping 独立运行，不随会话折线清空。
     }
 
     fun recordChartPoint(stats: ProtocolStats) {
         if (currentStartedAt <= 0L) return
         val now = System.currentTimeMillis()
         val last = lastChartSampleAt[stats.protocol] ?: 0L
-        val terminal = stats.phase.contains("完成") || stats.phase.contains("释放") || stats.phase.contains("中断") || stats.phase.contains("上限")
+        val terminal = stats.phase.contains("完成") || stats.phase.contains("释放") || stats.phase.contains("中断") || stats.phase.contains("上限") || stats.phase.contains("失败")
         if (!terminal && now - last < 1_000L) return
         val elapsed = ((now - currentStartedAt) / 1_000L).toInt().coerceAtLeast(0)
         val previousPeak = chartPoints.filter { it.protocol == stats.protocol }.maxOfOrNull { it.active } ?: 0
@@ -3828,9 +3828,11 @@ private fun NetSessionTesterApp() {
             cps = stats.cps,
             phase = stats.phase
         )
-        chartPoints = (chartPoints.filterNot { it.protocol == point.protocol && it.elapsedSec == point.elapsedSec } + point)
+        val updated = (chartPoints.filterNot { it.protocol == point.protocol && it.elapsedSec == point.elapsedSec } + point)
             .sortedWith(compareBy<ChartPoint> { it.protocol.ordinal }.thenBy { it.elapsedSec })
             .takeLast(180)
+        chartPoints = updated
+        displayChartPoints = compactSessionPointsForRender(updated)
         lastChartSampleAt = lastChartSampleAt + (stats.protocol to now)
     }
 
@@ -3845,11 +3847,19 @@ private fun NetSessionTesterApp() {
             resolveResult = state.resolveResult,
             history = state.history
         )
-        val freezeSessionUi = state.runPhase == RunPhase.Stopping || state.runPhase == RunPhase.Releasing ||
-            state.runPhase == RunPhase.Finished || state.runPhase == RunPhase.Failed
-        if (!freezeSessionUi && previousV4 != state.ipv4Stats) recordChartPoint(state.ipv4Stats)
-        if (!freezeSessionUi && previousV6 != state.ipv6Stats) recordChartPoint(state.ipv6Stats)
-        if (previousPhase != state.runPhase && state.runPhase in listOf(RunPhase.Finished, RunPhase.Failed)) {
+        val isReleasing = state.runPhase == RunPhase.Releasing
+        if (!isReleasing && (previousV4 != state.ipv4Stats || state.runPhase in listOf(RunPhase.Finished, RunPhase.Failed))) {
+            if (state.ipv4Stats.totalAttempts > 0 || state.ipv4Stats.phase.isNotBlank()) {
+                recordChartPoint(state.ipv4Stats)
+            }
+        }
+        if (!isReleasing && (previousV6 != state.ipv6Stats || state.runPhase in listOf(RunPhase.Finished, RunPhase.Failed))) {
+            if (state.ipv6Stats.totalAttempts > 0 || state.ipv6Stats.phase.isNotBlank()) {
+                recordChartPoint(state.ipv6Stats)
+            }
+        }
+        if (previousPhase != state.runPhase && state.runPhase in listOf(RunPhase.Finished, RunPhase.Failed, RunPhase.Idle)) {
+            displayChartPoints = compactSessionPointsForRender(chartPoints)
             refreshHistory()
         }
     }
@@ -4044,10 +4054,18 @@ private fun NetSessionTesterApp() {
 
     fun stopAdding() {
         AppTestRuntime.stopConnection("手动停止")
+        if (!AppTestRuntime.isConnectionActive && state.isAdding) {
+            state = state.copy(isAdding = false, runPhase = RunPhase.Finished, status = "手动停止 · 已结束")
+            displayChartPoints = compactSessionPointsForRender(chartPoints)
+        }
     }
 
     fun releaseAll() {
         AppTestRuntime.stopConnection("强制释放", force = true)
+        if (!AppTestRuntime.isConnectionActive && (state.isAdding || state.releaseUi.visible)) {
+            state = state.copy(isAdding = false, runPhase = RunPhase.Finished, status = "已释放")
+            displayChartPoints = compactSessionPointsForRender(chartPoints)
+        }
     }
 
     fun exportLogs() {
@@ -5932,7 +5950,7 @@ private fun ReleaseProgressCard(releaseUi: ReleaseUiState) {
             ReleaseStep("清理连接资源", releaseUi.finished)
             ReleaseStep("更新界面状态", releaseUi.finished)
         }
-        Text("释放期间会冻结曲线渲染，只保留进度刷新，避免 UI 卡顿和按钮状态不同步。", color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
+        Text("释放期间会冻结折线渲染，只保留进度刷新，避免 UI 卡顿和按钮状态不同步。", color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
     }
 }
 
@@ -6327,7 +6345,8 @@ private fun VersionInfoDialog(
                     Text("当前版本", color = Muted, fontSize = 12.sp, modifier = Modifier.weight(1f))
                     StatusChip(displayVersionName(currentAppVersionName(LocalContext.current)), BlueSoft, Blue, compact = true)
                 }
-                VersionLine(displayVersionName(currentAppVersionName(LocalContext.current)), "重构4-Tab底栏与独立「工具」中心，大幅精简设置页，极速公网IPv4抢占，强化手动NAT，新增目标选择器。")
+                VersionLine(displayVersionName(currentAppVersionName(LocalContext.current)), "正式版发布：全新独立「工具」中心、校准WiFi漫游、修复测试卡死与折线同步、精简网络看板。")
+                VersionLine("v1.0.21-beta4", "重构4-Tab底栏与独立「工具」中心，大幅精简设置页，极速公网IPv4抢占，强化手动NAT，新增目标选择器。")
                 VersionLine("v1.0.21-beta3", "新增缓冲评级/双网/iPerf3三大模块7天历史与折叠删除，修复iPerf3排版，深度优化NAT与MTU。")
                 VersionLine("v1.0.21-beta2", "新增双网并发(5G vs WiFi)同屏对测与内置iPerf3吞吐测速客户端，快捷矩阵升级4行2列。")
                 VersionLine("v1.0.21-beta1", "新增Bufferbloat缓冲膨胀评级与5G/4G基站射频工参看板，快捷矩阵升级3行2列。")
@@ -7121,7 +7140,7 @@ private fun NetGlyph(mark: String, color: Color, modifier: Modifier = Modifier) 
             }
             "tracket" -> { line(0.18f,0.68f,0.38f,0.35f); line(0.38f,0.35f,0.62f,0.56f); line(0.62f,0.56f,0.83f,0.28f); dot(0.18f,0.68f); dot(0.38f,0.35f); dot(0.62f,0.56f); drawCircle(color.copy(alpha=0.55f), radius=0.12f*size.minDimension, center=Offset(0.83f*w,0.28f*h), style=thin) }
             "mtu" -> {
-                // MTU检测：三条曲线组成弯曲小路。
+                // MTU检测：三条折线组成弯曲小路。
                 listOf(0.22f, 0.42f, 0.62f).forEachIndexed { idx, sx ->
                     val p = Path().apply {
                         moveTo(sx*w, 0.78f*h)
@@ -7850,7 +7869,7 @@ private fun CombinedSessionStatsCard(
                     .background(Color(0xFFF8FAFC), ShapeM),
                 contentAlignment = Alignment.Center
             ) {
-                Text("开始测试后显示本次曲线", color = Muted, fontSize = 12.sp)
+                Text("开始测试后显示本次折线", color = Muted, fontSize = 12.sp)
             }
         } else if (chartMode == ChartMode.GROWTH) {
             val series = when (selectedView) {
@@ -8402,7 +8421,7 @@ private fun SessionStatsCard(
                     .height(72.dp)
                     .background(Color(0xFFF8FAFC), ShapeM),
                 contentAlignment = Alignment.Center
-            ) { Text("开始测试后显示本次曲线", color = Muted, fontSize = 12.sp) }
+            ) { Text("开始测试后显示本次折线", color = Muted, fontSize = 12.sp) }
         } else {
             if (chartMode == ChartMode.GROWTH) SessionGrowthChart(points) else SessionPeakChart(stats, points)
         }
@@ -8632,7 +8651,7 @@ private fun SessionPeakChart(stats: ProtocolStats, points: List<ChartPoint>) {
         HistoryBarRow("活动峰值", peak, maxValue, Blue)
         HistoryBarRow("失败累计", stats.totalFailure, maxValue, ErrorRed)
         HistoryBarRow("总计尝试", stats.totalAttempts, maxValue, Navy)
-        Text("用于截图分享最高值；增长过程请切换到增长曲线。", color = Muted, fontSize = 10.sp)
+        Text("用于截图分享最高值；增长过程请切换到折线趋势。", color = Muted, fontSize = 10.sp)
     }
 }
 

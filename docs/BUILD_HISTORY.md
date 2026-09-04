@@ -3,6 +3,11 @@
 This file keeps short historical notes for local self-test and release-fix builds.
 Formal user-facing release notes stay in `CHANGELOG.md`; current validation notes stay in `TEST_NOTES_current.md`.
 
+## v1.0.21 release line
+
+- build155: official release of v1.0.21. Stabilized 4-Tab architecture with dedicated Tools center, recalibrated WiFi roaming under Performance, removed redundant Dual-Net, updated iPerf3 default targets to 192.168.5.1, fixed connection test crash/stall and missing chart line when failing/finishing, fortified stop button lifecycle, and unified line chart terminology.
+- build154: beta4 testing build with 4-Tab bottom navigation, Tools center layout, public IPv4 detection overhaul, and modal target selectors.
+
 ## v1.0.21 beta line
 
 - build153: 4-Tab bottom navigation with dedicated Tools center, slimmed-down Settings, accelerated domestic public IPv4 detection, manual NAT STUN presets, and target selection modals for Bufferbloat, DualNet, and iPerf3.

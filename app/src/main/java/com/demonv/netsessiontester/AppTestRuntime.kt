@@ -105,7 +105,7 @@ object AppTestRuntime {
     @Volatile var releaseUiSnapshot: ReleaseUiState = ReleaseUiState()
     val activeTask: RuntimeTask
         get() = when {
-            connectionJob?.isActive == true || connectionFinishing.get() -> RuntimeTask.CONNECTION
+            connectionJob?.isActive == true || connectionFinishing.get() || _connectionState.value.ui.isAdding -> RuntimeTask.CONNECTION
             pingJob?.isActive == true -> RuntimeTask.PING
             else -> RuntimeTask.NONE
         }
@@ -142,32 +142,46 @@ object AppTestRuntime {
         return tester?.resolveHost(host) ?: ResolveResult(host = host, error = "运行控制器尚未初始化")
     }
 
+    val isConnectionActive: Boolean
+        get() = connectionJob?.isActive == true || connectionFinishing.get() || _connectionState.value.ui.isAdding
+
     @Synchronized
     fun startConnection(config: SessionConfig, existingLogs: List<LogLine> = emptyList()): Boolean {
         val context = appContext ?: return false
-        if (connectionJob?.isActive == true || connectionFinishing.get()) return false
+        if (connectionJob?.isActive == true || connectionFinishing.get() || _connectionState.value.ui.isAdding) return false
+        lastConnectionUiAtElapsedMs = 0L
         val runId = System.currentTimeMillis()
         val newJob = scope.launch(start = CoroutineStart.LAZY) {
             commandMutex.withLock {
-                acquireWakeLock(context, CONNECTION_WAKE_LOCK_TIMEOUT_MS)
-                context.getSharedPreferences(RUNTIME_CHECKPOINT_PREFS, Context.MODE_PRIVATE).edit()
-                    .putBoolean("active", true)
-                    .putLong("run_id", runId)
-                    .putString("task", RuntimeTask.CONNECTION.name)
-                    .apply()
-                startForeground(context, "建连中：${config.mode.label}，目标 ${config.successLimit}")
-                val initialUi = AppUiState(
-                    isAdding = true,
-                    runPhase = RunPhase.Running,
-                    status = "建连中",
-                    ipv4Stats = ProtocolStats(IpProtocol.IPV4),
-                    ipv6Stats = ProtocolStats(IpProtocol.IPV6),
-                    logs = existingLogs.takeLast(MAX_RUNTIME_LOGS)
-                )
-                releaseUiSnapshot = ReleaseUiState()
-                publish(runId, runId, config, initialUi)
-                appendLog(LogLine(text = "目标：${config.host}:${config.port} | 模式：${config.mode.label} | 目标CPS：${config.batchSize}/s | 调度间隔：${config.intervalMs}ms | 固定CPS核心"))
-                runConnection(runId, config)
+                try {
+                    runCatching { acquireWakeLock(context, CONNECTION_WAKE_LOCK_TIMEOUT_MS) }
+                    runCatching {
+                        context.getSharedPreferences(RUNTIME_CHECKPOINT_PREFS, Context.MODE_PRIVATE).edit()
+                            .putBoolean("active", true)
+                            .putLong("run_id", runId)
+                            .putString("task", RuntimeTask.CONNECTION.name)
+                            .apply()
+                    }
+                    runCatching { startForeground(context, "建连中：${config.mode.label}，目标 ${config.successLimit}") }
+                    val initialUi = AppUiState(
+                        isAdding = true,
+                        runPhase = RunPhase.Running,
+                        status = "建连中",
+                        ipv4Stats = ProtocolStats(IpProtocol.IPV4),
+                        ipv6Stats = ProtocolStats(IpProtocol.IPV6),
+                        logs = existingLogs.takeLast(MAX_RUNTIME_LOGS)
+                    )
+                    releaseUiSnapshot = ReleaseUiState()
+                    publish(runId, runId, config, initialUi)
+                    appendLog(LogLine(text = "目标：${config.host}:${config.port} | 模式：${config.mode.label} | 目标CPS：${config.batchSize}/s | 调度间隔：${config.intervalMs}ms | 固定CPS核心"))
+                    runConnection(runId, config)
+                } catch (t: Throwable) {
+                    if (t !is CancellationException) {
+                        appendLog(LogLine(level = LogLevel.ERROR, text = "测试启动异常：${t.message ?: t.javaClass.simpleName}"))
+                    }
+                    finishConnection(runId, ConnectionFinishReason.INTERRUPTED, null, saveHistory = false, cancelRunner = false)
+                    if (t is CancellationException) throw t
+                }
             }
         }
         connectionJob = newJob
@@ -178,7 +192,20 @@ object AppTestRuntime {
     fun stopConnection(reason: String = "手动停止", force: Boolean = false) {
         scope.launch {
             val snapshot = _connectionState.value
-            if (activeTask != RuntimeTask.CONNECTION && !snapshot.ui.releaseUi.visible && !force) return@launch
+            val isRunning = activeTask == RuntimeTask.CONNECTION ||
+                connectionJob?.isActive == true ||
+                connectionFinishing.get() ||
+                snapshot.ui.isAdding ||
+                snapshot.ui.runPhase == RunPhase.Running ||
+                snapshot.ui.runPhase == RunPhase.TopConfirm ||
+                snapshot.ui.releaseUi.visible ||
+                force
+            if (!isRunning) {
+                if (snapshot.ui.isAdding) {
+                    publishUi(snapshot.ui.copy(isAdding = false, runPhase = RunPhase.Finished, status = "$reason · 已结束"))
+                }
+                return@launch
+            }
             val summary = stoppedSummary(snapshot, reason)
             finishConnection(
                 runId = snapshot.runId.takeIf { it != 0L } ?: System.nanoTime(),
@@ -231,7 +258,7 @@ object AppTestRuntime {
                         IpProtocol.IPV6 -> current.ui.copy(ipv6Stats = stats, status = "IPv6 ${stats.phase}", runPhase = nextPhase)
                     }
                     val now = SystemClock.elapsedRealtime()
-                    val terminal = stats.phase.contains("完成") || stats.phase.contains("释放") || stats.phase.contains("中断") || stats.phase.contains("上限")
+                    val terminal = stats.phase.contains("完成") || stats.phase.contains("释放") || stats.phase.contains("中断") || stats.phase.contains("上限") || stats.phase.contains("失败")
                     if (terminal || now - lastConnectionUiAtElapsedMs >= CONNECTION_UI_THROTTLE_MS) {
                         lastConnectionUiAtElapsedMs = now
                         publishUi(nextUi)
@@ -303,7 +330,13 @@ object AppTestRuntime {
         saveHistory: Boolean,
         cancelRunner: Boolean
     ) {
-        if (!connectionFinishing.compareAndSet(false, true)) return
+        if (!connectionFinishing.compareAndSet(false, true)) {
+            val current = _connectionState.value
+            if (current.ui.isAdding) {
+                publishUi(current.ui.copy(isAdding = false, runPhase = RunPhase.Finished, status = "${reason.label} · 已结束"))
+            }
+            return
+        }
         try {
             pingRestartForConnectionJob?.cancel()
             pingRestartForConnectionJob = null
@@ -312,11 +345,16 @@ object AppTestRuntime {
             if (cancelRunner && connectionJob != currentJob) connectionJob?.cancel()
             networkWatchJob?.cancel()
             networkWatchJob = null
-            val tcp = tester ?: return
+
+            val baseUi = _connectionState.value.ui
+            val releaseRunId = baseUi.releaseUi.runId.takeIf { it != 0L } ?: runId
+            val tcp = tester
+            if (tcp == null) {
+                publishUi(baseUi.copy(isAdding = false, runPhase = RunPhase.Failed, status = "控制器未初始化"))
+                return
+            }
             val sockets = tcp.detachForRelease()
             val started = SystemClock.elapsedRealtime()
-            val releaseRunId = _connectionState.value.ui.releaseUi.runId.takeIf { it != 0L } ?: runId
-            val baseUi = _connectionState.value.ui
             val releasing = ReleaseUiState(
                 runId = releaseRunId,
                 visible = true,
@@ -371,10 +409,14 @@ object AppTestRuntime {
                 message = "释放完成"
             )
             releaseUiSnapshot = finished
+            val finalV4 = summary?.ipv4Stats ?: old.ipv4Stats
+            val finalV6 = summary?.ipv6Stats ?: old.ipv6Stats
             publishUi(old.copy(
                 isAdding = false,
                 runPhase = if (failed) RunPhase.Failed else RunPhase.Finished,
                 status = if (reason == ConnectionFinishReason.FORCE_RELEASE) "已释放" else "${reason.label} · 已释放",
+                ipv4Stats = finalV4,
+                ipv6Stats = finalV6,
                 summary = summary ?: old.summary,
                 error = reason.label.takeIf { failed },
                 releaseUi = finished

@@ -1,18 +1,19 @@
 {
-  "versionCode": 154,
-  "versionName": "v1.0.21-beta4",
-  "build": 154,
-  "status": "testing",
+  "versionCode": 155,
+  "versionName": "v1.0.21",
+  "build": 155,
+  "status": "ready",
   "minReadyFileSize": 3000000,
-  "title": "发现测试版本 v1.0.21-beta4 build154",
+  "title": "NetSessionTester 正式版发布 v1.0.21 build155",
   "content": [
-    "重构底栏为 4-Tab 架构，推出「工具」中心（按网络诊断/性能测试/运营商工参分类），校准 WiFi 漫游归类",
-    "网络信息栏精简去冗：移除已迁移到工具页的快捷卡片，信息全量平铺直展不再折叠",
-    "高可靠公网 IPv4 检测：接入真实网络验证源，优化握手超时，秒级快速识别公网 IPv4",
-    "优化 NAT 诊断弹窗：卡片适度加宽，测试结果与进度置顶呈现免向下滚动，恢复单一默认 RFC5780 权威服务器",
-    "缓冲评级、iPerf3 增设目标/服务器弹出选择器，支持 5 个推荐目标与自定义目标，iPerf3 推荐节点更新为 192.168.5.1"
+    "全新 4-Tab 架构，推出独立「工具」中心（按网络诊断、性能测试、运营商工参分类）",
+    "校准 WiFi 漫游检测并与运营商工参彻底解耦，移除误导性双网对测",
+    "彻底修复连接测试异常中断导致的假死卡住、折线空白与停止按钮无响应问题",
+    "折线图渲染全面校准：即时记录折线点，杜绝结束时漏记，统称折线趋势",
+    "高可靠公网 IPv4 检测：秒级准确识别公网 IPv4 地址与归属",
+    "优化 NAT 诊断与 iPerf3 测速：增设目标选择器，推荐节点更新为 192.168.5.1"
   ],
-  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.0.21-beta4-154/NetSessionTester-v1.0.21-beta4-build154-signed.apk",
-  "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/tag/v1.0.21-beta4-154",
+  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.0.21-155/NetSessionTester-v1.0.21-build155-signed.apk",
+  "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/tag/v1.0.21-155",
   "force": false
 }
