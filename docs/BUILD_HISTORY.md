@@ -5,6 +5,7 @@ Formal user-facing release notes stay in `CHANGELOG.md`; current validation note
 
 ## v1.0.21 release line
 
+- build156: uncap 2,000 CPS limitation (broadened to 20,000 CPS), expanded IO dispatcher parallelism from 256 to 512, scaled maxPending window to 20,000, and adapted in-flight failure guard for high-CPS launching.
 - build155: official release of v1.0.21. Stabilized 4-Tab architecture with dedicated Tools center, recalibrated WiFi roaming under Performance, removed redundant Dual-Net, updated iPerf3 default targets to 192.168.5.1, fixed connection test crash/stall and missing chart line when failing/finishing, fortified stop button lifecycle, and unified line chart terminology.
 - build154: beta4 testing build with 4-Tab bottom navigation, Tools center layout, public IPv4 detection overhaul, and modal target selectors.
 
