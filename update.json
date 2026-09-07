@@ -1,19 +1,18 @@
 {
-  "versionCode": 155,
+  "versionCode": 156,
   "versionName": "v1.0.21",
-  "build": 155,
+  "build": 156,
   "status": "ready",
   "minReadyFileSize": 3000000,
-  "title": "NetSessionTester 正式版发布 v1.0.21 build155",
+  "title": "NetSessionTester 正式版发布 v1.0.21 build156",
   "content": [
-    "全新 4-Tab 架构，推出独立「工具」中心（按网络诊断、性能测试、运营商工参分类）",
-    "校准 WiFi 漫游检测并与运营商工参彻底解耦，移除误导性双网对测",
-    "彻底修复连接测试异常中断导致的假死卡住、折线空白与停止按钮无响应问题",
-    "折线图渲染全面校准：即时记录折线点，杜绝结束时漏记，统称折线趋势",
-    "高可靠公网 IPv4 检测：秒级准确识别公网 IPv4 地址与归属",
-    "优化 NAT 诊断与 iPerf3 测速：增设目标选择器，推荐节点更新为 192.168.5.1"
+    "解除 2000 CPS 速率限制：目标 CPS 截断上限全面放宽至 20,000，充分释放极限打流压测能力",
+    "并发 IO 协程调度器扩容：Dispatcher 并发线程池从 256 翻倍扩容至 512，避免高延迟网络下阻塞排队",
+    "重构自适应在飞失败保护：动态根据目标 CPS 自适应裕度配额，消除启动初期在飞连接预扣导致的降速卡顿",
+    "动态发射窗口扩容：最大在飞队列 maxPending 提升至 20,000，保障超大并发持续平滑打流",
+    "全新 4-Tab 架构与独立「工具」中心，校准 WiFi 漫游并彻底修复假死与折线渲染"
   ],
-  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.0.21-155/NetSessionTester-v1.0.21-build155-signed.apk",
-  "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/tag/v1.0.21-155",
+  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.0.21-156/NetSessionTester-v1.0.21-build156-signed.apk",
+  "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/tag/v1.0.21-156",
   "force": false
 }
