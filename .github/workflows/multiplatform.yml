@@ -231,12 +231,19 @@ jobs:
         shell: pwsh
         run: |
           choco install innosetup --no-progress -y
-          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-          if (Test-Path $iscc) {
-              & $iscc desktop\installer\installer.iss
-          } else {
-              iscc desktop\installer\installer.iss
+          $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+          $iscc = (Get-Command iscc.exe -ErrorAction SilentlyContinue)?.Source
+          if (-not $iscc) {
+              if (Test-Path "C:\Program Files (x86)\Inno Setup 6\ISCC.exe") {
+                  $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+              } elseif (Test-Path "C:\Program Files\Inno Setup 6\ISCC.exe") {
+                  $iscc = "C:\Program Files\Inno Setup 6\ISCC.exe"
+              } else {
+                  throw "ISCC compiler not found!"
+              }
           }
+          Write-Host "Compiling installer using: $iscc"
+          & "$iscc" desktop\installer\installer.iss
 
       - name: Upload Windows Portable Edition
         uses: actions/upload-artifact@v4

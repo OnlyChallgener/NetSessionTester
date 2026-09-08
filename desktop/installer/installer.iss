@@ -13,23 +13,21 @@ OutputDir=.
 OutputBaseFilename=NetSessionTester-Windows-x64-Setup
 ArchitecturesInstallIn64BitMode=x64
 WizardStyle=modern
-
-[Languages]
-Name: "chinesesimp"; MessagesFile: "compiler:Default.isl"
+SourceDir=..\..\
 
 [Tasks]
-Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加快捷方式:"
+Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"
 
 [Files]
 Source: "package-windows\NetSessionTester.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "package-windows\NetSessionTester.jar"; DestDir: "{app}"; Flags: ignoreversion
 Source: "package-windows\README.txt"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\assets\icon.ico"; DestDir: "{app}"; Flags: ignoreversion
+Source: "desktop\assets\icon.ico"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\NetSessionTester"; Filename: "{app}\NetSessionTester.exe"; IconFilename: "{app}\icon.ico"
-Name: "{group}\卸载 NetSessionTester"; Filename: "{uninstallexe}"
+Name: "{group}\Uninstall NetSessionTester"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\NetSessionTester"; Filename: "{app}\NetSessionTester.exe"; IconFilename: "{app}\icon.ico"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\NetSessionTester.exe"; Description: "启动 NetSessionTester"; Flags: postinstall nowait skipifsilent
+Filename: "{app}\NetSessionTester.exe"; Description: "Launch NetSessionTester"; Flags: postinstall nowait skipifsilent
