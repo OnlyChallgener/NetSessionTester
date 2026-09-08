@@ -36,9 +36,29 @@ kotlin {
             implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
         }
         jvmMain.dependencies {
+            implementation(compose.desktop.currentOs)
             implementation("org.jetbrains.kotlinx:kotlinx-coroutines-swing:1.9.0")
         }
     }
+}
+
+tasks.register<Jar>("desktopJar") {
+    dependsOn("jvmJar")
+    archiveBaseName.set("NetSessionTester-Desktop")
+    archiveClassifier.set("all")
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    manifest {
+        attributes["Main-Class"] = "com.demonv.netsessiontester.desktop.MainKt"
+    }
+    from({
+        val jvmTarget = kotlin.targets.getByName("jvm") as org.jetbrains.kotlin.gradle.targets.jvm.KotlinJvmTarget
+        val mainCompilation = jvmTarget.compilations.getByName("main")
+        mainCompilation.runtimeDependencyFiles?.filter { it.name.endsWith(".jar") }?.map { zipTree(it) } ?: emptyList<Any>()
+    })
+    from({
+        val jvmTarget = kotlin.targets.getByName("jvm") as org.jetbrains.kotlin.gradle.targets.jvm.KotlinJvmTarget
+        jvmTarget.compilations.getByName("main").output.classesDirs
+    })
 }
 
 android {
@@ -48,3 +68,4 @@ android {
         minSdk = 26
     }
 }
+

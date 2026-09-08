@@ -117,14 +117,14 @@ jobs:
         with:
           gradle-version: 8.11.1
 
-      - name: Compile Desktop Jar on macOS
+      - name: Build Standalone Desktop App on macOS
         run: |
-          gradle :shared:jvmJar --no-daemon
+          gradle :shared:desktopJar --no-daemon
 
       - name: Package macOS Desktop Bundle
         run: |
           mkdir -p package-macos
-          cp shared/build/libs/*.jar package-macos/NetSessionTester.jar
+          cp shared/build/libs/*all.jar package-macos/NetSessionTester.jar
           cat << 'EOF' > package-macos/run.command
           #!/bin/bash
           DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
@@ -158,15 +158,15 @@ jobs:
         with:
           gradle-version: 8.11.1
 
-      - name: Compile Desktop Jar on Windows
+      - name: Build Standalone Desktop App on Windows
         run: |
-          gradle :shared:jvmJar --no-daemon
+          gradle :shared:desktopJar --no-daemon
 
       - name: Package Windows Desktop Bundle
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path package-windows
-          Copy-Item shared/build/libs/*.jar package-windows/NetSessionTester.jar
+          Copy-Item shared/build/libs/*all.jar package-windows/NetSessionTester.jar
           @'
           @echo off
           cd /d "%~dp0"
