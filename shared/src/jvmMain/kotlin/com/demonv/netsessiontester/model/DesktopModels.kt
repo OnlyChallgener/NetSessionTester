@@ -4,6 +4,12 @@ import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
+enum class AppMode(val label: String) {
+    SESSION_HOLD("并发压测"),
+    PING_STANDALONE("独立 Ping"),
+    UNDERLOAD_PING("联动诊断 (Bufferbloat)")
+}
+
 enum class IpProtocol(val label: String) {
     IPV4("IPv4"),
     IPV6("IPv6")
@@ -41,7 +47,7 @@ data class SessionConfig(
 }
 
 data class ProtocolStats(
-    val protocol: IpProtocol,
+    val protocol: IpProtocol = IpProtocol.IPV4,
     val phase: String = "待测试",
     val resolvedAddresses: List<String> = emptyList(),
     val activeSessions: Int = 0,
@@ -55,11 +61,33 @@ data class ProtocolStats(
     val errorSummary: Map<String, Int> = emptyMap()
 )
 
+data class PingStats(
+    val host: String = "",
+    val port: Int = 80,
+    val currentLatencyMs: Int = 0,
+    val minLatencyMs: Int = 0,
+    val maxLatencyMs: Int = 0,
+    val avgLatencyMs: Int = 0,
+    val jitterMs: Int = 0,
+    val sentCount: Int = 0,
+    val receivedCount: Int = 0,
+    val lostCount: Int = 0,
+    val lossPercent: Float = 0f,
+    val isRunning: Boolean = false,
+    val phase: String = "就绪"
+)
+
 data class ChartPoint(
     val elapsedSec: Int,
     val active: Int,
     val failure: Int = 0,
     val protocol: IpProtocol = IpProtocol.IPV4
+)
+
+data class DualChartPoint(
+    val elapsedSec: Int,
+    val activeSessions: Int = 0,
+    val pingLatencyMs: Int = 0
 )
 
 enum class LogLevel { INFO, SUCCESS, WARN, ERROR, STAT }

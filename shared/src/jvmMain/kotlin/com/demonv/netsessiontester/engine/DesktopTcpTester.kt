@@ -59,28 +59,46 @@ class DesktopTcpTester {
     suspend fun runSessionHoldTest(
         rawConfig: SessionConfig,
         onStats: suspend (ProtocolStats) -> Unit,
-        onLog: suspend (LogLine) -> Unit
-    ): Pair<ProtocolStats?, ProtocolStats?> {
+        onLog: suspend (LogLine) -> Unit,
+        onPingSample: (suspend (Int) -> Unit)? = null
+    ): Pair<ProtocolStats?, ProtocolStats?> = coroutineScope {
         val config = rawConfig.normalized()
         var ipv4Stats: ProtocolStats? = null
         var ipv6Stats: ProtocolStats? = null
 
-        when (config.mode) {
-            TestMode.IPV4_ONLY -> ipv4Stats = runOneProtocol(config, IpProtocol.IPV4, onStats, onLog)
-            TestMode.IPV6_ONLY -> ipv6Stats = runOneProtocol(config, IpProtocol.IPV6, onStats, onLog)
-            TestMode.IPV4_THEN_IPV6 -> {
-                ipv4Stats = runOneProtocol(config.copy(mode = TestMode.IPV4_ONLY), IpProtocol.IPV4, onStats, onLog)
-                val releasedV4 = release(IpProtocol.IPV4)
-                ipv4Stats = ipv4Stats?.copy(activeSessions = 0, phase = "已释放")
-                ipv4Stats?.let { onStats(it) }
-                if (releasedV4 > 0) {
-                    onLog(LogLine(level = LogLevel.WARN, text = "IPv4 已释放 $releasedV4 条连接，切换 IPv6 测试"))
+        val pingJob: Job? = if (onPingSample != null) {
+            val pingTester = DesktopPingTester()
+            launch(Dispatchers.IO) {
+                while (isActive) {
+                    val rtt = pingTester.pingOnce(config.host, config.port, 1000)
+                    if (rtt != null) {
+                        onPingSample(rtt)
+                    }
+                    delay(400L)
                 }
-                delay(300L)
-                ipv6Stats = runOneProtocol(config.copy(mode = TestMode.IPV6_ONLY), IpProtocol.IPV6, onStats, onLog)
             }
+        } else null
+
+        try {
+            when (config.mode) {
+                TestMode.IPV4_ONLY -> ipv4Stats = runOneProtocol(config, IpProtocol.IPV4, onStats, onLog)
+                TestMode.IPV6_ONLY -> ipv6Stats = runOneProtocol(config, IpProtocol.IPV6, onStats, onLog)
+                TestMode.IPV4_THEN_IPV6 -> {
+                    ipv4Stats = runOneProtocol(config.copy(mode = TestMode.IPV4_ONLY), IpProtocol.IPV4, onStats, onLog)
+                    val releasedV4 = release(IpProtocol.IPV4)
+                    ipv4Stats = ipv4Stats?.copy(activeSessions = 0, phase = "已释放")
+                    ipv4Stats?.let { onStats(it) }
+                    if (releasedV4 > 0) {
+                        onLog(LogLine(level = LogLevel.WARN, text = "IPv4 已释放 $releasedV4 条连接，切换 IPv6 测试"))
+                    }
+                    delay(300L)
+                    ipv6Stats = runOneProtocol(config.copy(mode = TestMode.IPV6_ONLY), IpProtocol.IPV6, onStats, onLog)
+                }
+            }
+        } finally {
+            pingJob?.cancel()
         }
-        return ipv4Stats to ipv6Stats
+        return@coroutineScope ipv4Stats to ipv6Stats
     }
 
     private suspend fun runOneProtocol(

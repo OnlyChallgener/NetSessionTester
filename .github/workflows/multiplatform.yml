@@ -121,31 +121,69 @@ jobs:
         run: |
           gradle :shared:desktopJar --no-daemon
 
-      - name: Package macOS Desktop Bundle
+      - name: Package macOS Application (.app & .dmg)
         run: |
-          mkdir -p package-macos
-          cp shared/build/libs/NetSessionTester-Desktop-all.jar package-macos/NetSessionTester.jar
-          cat << 'EOF' > package-macos/run.command
-          #!/bin/bash
-          DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
-          cd "$DIR"
-          java -jar NetSessionTester.jar
-          EOF
-          chmod +x package-macos/run.command
-          cat << 'EOF' > package-macos/README.txt
-          NetSessionTester 桌面版 (macOS)
-          ---------------------------------
-          启动方式：
-          1. 双击 run.command，或者在终端进入当前目录执行：java -jar NetSessionTester.jar
-          2. 环境需求：已安装 Java 17 或更高版本 (JRE / JDK)
-          EOF
-          zip -r NetSessionTester-macOS-desktop.zip package-macos
+          mkdir -p "package-macos/NetSessionTester.app/Contents/MacOS"
+          mkdir -p "package-macos/NetSessionTester.app/Contents/Resources"
+          mkdir -p "package-macos/NetSessionTester.app/Contents/Java"
+          cp shared/build/libs/NetSessionTester-Desktop-all.jar package-macos/NetSessionTester.app/Contents/Java/NetSessionTester.jar
+          cp desktop/assets/icon.png package-macos/NetSessionTester.app/Contents/Resources/icon.png
 
-      - name: Upload macOS Desktop Package
+          cat << 'EOF' > package-macos/NetSessionTester.app/Contents/Info.plist
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleExecutable</key>
+              <string>NetSessionTester</string>
+              <key>CFBundleIdentifier</key>
+              <string>com.demonv.netsessiontester</string>
+              <key>CFBundleName</key>
+              <string>NetSessionTester</string>
+              <key>CFBundlePackageType</key>
+              <string>APPL</string>
+              <key>CFBundleShortVersionString</key>
+              <string>1.0.22</string>
+              <key>CFBundleVersion</key>
+              <string>1</string>
+              <key>NSHighResolutionCapable</key>
+              <true/>
+          </dict>
+          </plist>
+          EOF
+
+          cat << 'EOF' > package-macos/NetSessionTester.app/Contents/MacOS/NetSessionTester
+          #!/bin/bash
+          DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )/.." >/dev/null 2>&1 && pwd )"
+          if [ -n "$JAVA_HOME" ] && [ -x "$JAVA_HOME/bin/java" ]; then
+              EXEC_JAVA="$JAVA_HOME/bin/java"
+          elif command -v java >/dev/null 2>&1; then
+              EXEC_JAVA="java"
+          elif [ -x "/Library/Internet Plug-Ins/JavaAppletPlugin.plugin/Contents/Home/bin/java" ]; then
+              EXEC_JAVA="/Library/Internet Plug-Ins/JavaAppletPlugin.plugin/Contents/Home/bin/java"
+          else
+              osascript -e 'tell app "System Events" to display dialog "未检测到 Java 运行环境 (Java 17+)。请前往 adoptium.net 安装 Java。" with title "NetSessionTester" buttons {"确定"} default button 1 with icon stop'
+              open "https://adoptium.net/"
+              exit 1
+          fi
+          exec "$EXEC_JAVA" -jar "$DIR/Java/NetSessionTester.jar"
+          EOF
+          chmod +x package-macos/NetSessionTester.app/Contents/MacOS/NetSessionTester
+
+          hdiutil create -volname "NetSessionTester" -srcfolder package-macos/NetSessionTester.app -ov -format UDZO NetSessionTester-macOS.dmg
+          cd package-macos && zip -r ../NetSessionTester-macOS-app.zip NetSessionTester.app && cd ..
+
+      - name: Upload macOS DMG
         uses: actions/upload-artifact@v4
         with:
-          name: NetSessionTester-macOS-desktop.zip
-          path: NetSessionTester-macOS-desktop.zip
+          name: NetSessionTester-macOS.dmg
+          path: NetSessionTester-macOS.dmg
+
+      - name: Upload macOS App Bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: NetSessionTester-macOS-app.zip
+          path: NetSessionTester-macOS-app.zip
 
   build-windows:
     name: Build Windows Desktop
@@ -169,28 +207,45 @@ jobs:
         run: |
           gradle :shared:desktopJar --no-daemon
 
-      - name: Package Windows Desktop Bundle
+      - name: Compile Native Windows PE Launcher & Package Portable Edition
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path package-windows
-          Copy-Item shared/build/libs/NetSessionTester-Desktop-all.jar package-windows/NetSessionTester.jar
-          @'
-          @echo off
-          cd /d "%~dp0"
-          start javaw -jar NetSessionTester.jar
-          if errorlevel 1 java -jar NetSessionTester.jar
-          '@ | Set-Content -Path package-windows/Run.bat -Encoding Ascii
-          @'
-          NetSessionTester 桌面版 (Windows 64位)
-          ---------------------------------
-          启动方式：
-          1. 直接双击 Run.bat 或 NetSessionTester.jar 即可运行
-          2. 环境需求：已安装 Java 17 或更高版本 (JRE / JDK)
-          '@ | Set-Content -Path package-windows/README.txt -Encoding Utf8
-          Compress-Archive -Path package-windows/* -DestinationPath NetSessionTester-Windows-x64.zip
+          Copy-Item shared\build\libs\NetSessionTester-Desktop-all.jar package-windows\NetSessionTester.jar
+          Copy-Item desktop\assets\icon.ico package-windows\icon.ico
 
-      - name: Upload Windows Desktop Package
+          # Compile C# PE Launcher with embedded icon into NetSessionTester.exe
+          & "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /target:winexe /win32icon:desktop\assets\icon.ico /out:package-windows\NetSessionTester.exe desktop\launcher\Launcher.cs
+
+          @'
+          NetSessionTester 桌面便携版 (Windows 64位)
+          ------------------------------------------
+          启动方式：
+          1. 直接双击 NetSessionTester.exe 即可启动（内置高清图标，自动调用系统 Java 17+）
+          2. 环境要求：已安装 Java 17 或更高版本 (JRE / JDK)；若未安装，双击时将自动弹出指引
+          '@ | Set-Content -Path package-windows\README.txt -Encoding Utf8
+
+          Compress-Archive -Path package-windows\* -DestinationPath NetSessionTester-Windows-x64-Portable.zip
+
+      - name: Build Windows Installer (Inno Setup)
+        shell: pwsh
+        run: |
+          choco install innosetup --no-progress -y
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (Test-Path $iscc) {
+              & $iscc desktop\installer\installer.iss
+          } else {
+              iscc desktop\installer\installer.iss
+          }
+
+      - name: Upload Windows Portable Edition
         uses: actions/upload-artifact@v4
         with:
-          name: NetSessionTester-Windows-x64.zip
-          path: NetSessionTester-Windows-x64.zip
+          name: NetSessionTester-Windows-x64-Portable.zip
+          path: NetSessionTester-Windows-x64-Portable.zip
+
+      - name: Upload Windows Installer Setup
+        uses: actions/upload-artifact@v4
+        with:
+          name: NetSessionTester-Windows-x64-Setup.exe
+          path: desktop/installer/NetSessionTester-Windows-x64-Setup.exe
