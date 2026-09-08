@@ -1,6 +1,7 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Reflection;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
@@ -14,10 +15,84 @@ namespace NetSessionTester
             string appDir = AppDomain.CurrentDomain.BaseDirectory;
             string jarPath = Path.Combine(appDir, "NetSessionTester.jar");
 
+            // 1. 若本地不存在 NetSessionTester.jar，尝试从当前 EXE 内嵌资源提取 (单文件便携版)
+            if (!File.Exists(jarPath))
+            {
+                var assembly = Assembly.GetExecutingAssembly();
+                string resourceName = null;
+                foreach (string name in assembly.GetManifestResourceNames())
+                {
+                    if (name.EndsWith("NetSessionTester.jar", StringComparison.OrdinalIgnoreCase))
+                    {
+                        resourceName = name;
+                        break;
+                    }
+                }
+
+                if (resourceName != null)
+                {
+                    try
+                    {
+                        string cacheDir = Path.Combine(
+                            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                            "NetSessionTester"
+                        );
+                        if (!Directory.Exists(cacheDir))
+                        {
+                            Directory.CreateDirectory(cacheDir);
+                        }
+
+                        jarPath = Path.Combine(cacheDir, "NetSessionTester.jar");
+
+                        using (Stream resStream = assembly.GetManifestResourceStream(resourceName))
+                        {
+                            if (resStream != null)
+                            {
+                                bool needWrite = true;
+                                if (File.Exists(jarPath))
+                                {
+                                    FileInfo fi = new FileInfo(jarPath);
+                                    if (fi.Length == resStream.Length)
+                                    {
+                                        needWrite = false;
+                                    }
+                                }
+
+                                if (needWrite)
+                                {
+                                    string tmpJar = jarPath + ".tmp";
+                                    using (FileStream fs = new FileStream(tmpJar, FileMode.Create, FileAccess.Write, FileShare.None))
+                                    {
+                                        byte[] buf = new byte[65536];
+                                        int read;
+                                        while ((read = resStream.Read(buf, 0, buf.Length)) > 0)
+                                        {
+                                            fs.Write(buf, 0, read);
+                                        }
+                                    }
+                                    if (File.Exists(jarPath)) File.Delete(jarPath);
+                                    File.Move(tmpJar, jarPath);
+                                }
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        MessageBox.Show(
+                            "解包内置运行时失败：\n" + ex.Message,
+                            "NetSessionTester - 错误",
+                            MessageBoxButtons.OK,
+                            MessageBoxIcon.Error
+                        );
+                        return;
+                    }
+                }
+            }
+
             if (!File.Exists(jarPath))
             {
                 MessageBox.Show(
-                    "未在当前目录下找到 NetSessionTester.jar 主程序文件。\n请确保程序完整解压后再启动。",
+                    "未在当前目录下找到 NetSessionTester 核心运行时。\n请确保程序未被杀毒软件误拦截。",
                     "NetSessionTester - 缺少主程序",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error

@@ -13,6 +13,10 @@ import java.io.File
 import javax.imageio.ImageIO
 
 fun main() = application {
+    val isWindows = remember {
+        System.getProperty("os.name", "").lowercase().contains("windows")
+    }
+
     val iconPainter = remember {
         runCatching {
             val stream = Thread.currentThread().contextClassLoader.getResourceAsStream("icon.png")
@@ -21,16 +25,25 @@ fun main() = application {
         }.getOrNull()
     }
 
+    val windowState = rememberWindowState(
+        width = 1100.dp,
+        height = 740.dp,
+        position = WindowPosition(Alignment.Center)
+    )
+
     Window(
         onCloseRequest = ::exitApplication,
         title = "NetSessionTester",
         icon = iconPainter,
-        state = rememberWindowState(
-            width = 1060.dp,
-            height = 720.dp,
-            position = WindowPosition(Alignment.Center)
-        )
+        undecorated = isWindows,
+        resizable = true,
+        state = windowState
     ) {
-        DesktopApp()
+        DesktopApp(
+            windowState = windowState,
+            window = this.window,
+            onClose = ::exitApplication,
+            isWindows = isWindows
+        )
     }
 }

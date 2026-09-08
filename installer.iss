@@ -19,7 +19,6 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 
 [Files]
 Source: "package-windows\NetSessionTester.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "package-windows\NetSessionTester.jar"; DestDir: "{app}"; Flags: ignoreversion
 Source: "package-windows\README.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "package-windows\icon.ico"; DestDir: "{app}"; Flags: ignoreversion
 
