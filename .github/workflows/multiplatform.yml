@@ -73,7 +73,7 @@ jobs:
 
       - name: Compile Desktop Jar on macOS
         run: |
-          gradle :shared:desktopJar --no-daemon
+          gradle :shared:jvmJar --no-daemon
 
   build-windows:
     name: Build Windows Desktop
@@ -95,4 +95,4 @@ jobs:
 
       - name: Compile Desktop Jar on Windows
         run: |
-          gradle :shared:desktopJar --no-daemon
+          gradle :shared:jvmJar --no-daemon

@@ -21,7 +21,7 @@ kotlin {
         }
     }
 
-    jvm("desktop")
+    jvm()
 
     sourceSets {
         commonMain.dependencies {
@@ -35,8 +35,7 @@ kotlin {
             implementation("androidx.core:core-ktx:1.13.1")
             implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
         }
-        desktopMain.dependencies {
-            implementation(compose.desktop.common)
+        jvmMain.dependencies {
             implementation("org.jetbrains.kotlinx:kotlinx-coroutines-swing:1.9.0")
         }
     }
