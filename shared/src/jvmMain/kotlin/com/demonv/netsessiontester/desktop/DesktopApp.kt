@@ -40,7 +40,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.WindowPlacement
@@ -1366,7 +1368,7 @@ fun calculateSmartMaxLatency(actualMax: Int): Int {
 }
 
 /**
- * 专业双轴走势图卡片 (带紧凑自适应动态量程、鼠标跟随气泡、工具栏、滚轮缩放、拖拽平移与均值基准线)
+ * 专业双轴走势图卡片 (带紧凑自适应动态量程、鼠标实时跟随气泡、工具栏、滚轮缩放、拖拽平移与均值基准线)
  */
 @Composable
 internal fun DesktopDualChartCard(
@@ -1378,7 +1380,13 @@ internal fun DesktopDualChartCard(
     modifier: Modifier = Modifier
 ) {
     var hoveredPoint by remember(appMode) { mutableStateOf<DualChartPoint?>(null) }
-    LaunchedEffect(samples) { if (hoveredPoint !in samples) hoveredPoint = null }
+    var pointerOffset by remember(appMode) { mutableStateOf<Offset?>(null) }
+    LaunchedEffect(samples) {
+        if (hoveredPoint !in samples) {
+            hoveredPoint = null
+            pointerOffset = null
+        }
+    }
 
     var zoomScale by remember { mutableStateOf(1.0f) }
     var panOffsetX by remember { mutableStateOf(0.0f) }
@@ -1393,7 +1401,7 @@ internal fun DesktopDualChartCard(
     val actualMaxLatency = samples.mapNotNull { it.pingLatencyMs }.maxOrNull() ?: if (currentPingStats.receivedCount > 0) currentPingStats.maxLatencyMs else 0
     val maxLatency = calculateSmartMaxLatency(actualMaxLatency)
 
-    // 防崩溃的安全时间视口算法 (绝对杜绝 coerceIn 浮点精度倒置报错)
+    // 防崩溃的安全时间视口算法
     val totalSpan = max(0.001, rawMaxSec - rawMinSec)
     val windowSpan = (totalSpan / zoomScale.toDouble()).coerceIn(0.001, totalSpan)
     val maxPanSec = max(0.0, totalSpan - windowSpan)
@@ -1517,8 +1525,12 @@ internal fun DesktopDualChartCard(
 
                 Spacer(Modifier.width(6.dp))
 
-                // 核心走势图画布与鼠标跟随浮动卡片
-                Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                // 核心走势图画布与精准鼠标位置跟随浮动卡片
+                BoxWithConstraints(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                    val boxWidthPx = constraints.maxWidth.toFloat()
+                    val boxHeightPx = constraints.maxHeight.toFloat()
+                    val density = LocalDensity.current
+
                     DesktopDualChartCanvas(
                         samples = samples,
                         appMode = appMode,
@@ -1535,38 +1547,50 @@ internal fun DesktopDualChartCard(
                         avgLatencyMs = if (currentPingStats.receivedCount > 0) currentPingStats.avgLatencyMs else null,
                         hoveredPoint = hoveredPoint,
                         onHoverChange = { hoveredPoint = it },
+                        onPointerPositionChange = { pointerOffset = it },
                         modifier = Modifier.fillMaxSize()
                     )
 
-                    // 鼠标悬停跟随浮动指示卡片 (Floating Tooltip - 位于鼠标附近)
-                    if (hoveredPoint != null) {
+                    // 鼠标悬停精准跟随浮动指示卡片 (紧贴鼠标指针跟随，智能防溢出)
+                    if (hoveredPoint != null && pointerOffset != null) {
                         val hp = hoveredPoint!!
-                        val fracX = ((hp.elapsedSec - viewMinSec) / (viewMaxSec - viewMinSec).coerceAtLeast(0.001)).coerceIn(0.0, 1.0).toFloat()
-                        
+                        val pOffset = pointerOffset!!
+
+                        val cardEstimatedWidthPx = with(density) { 190.dp.toPx() }
+                        val cardEstimatedHeightPx = with(density) { 34.dp.toPx() }
+
+                        // X 轴跟随：右侧不够时翻转到左侧
+                        val tooltipX = if (pOffset.x + cardEstimatedWidthPx + 16f > boxWidthPx) {
+                            (pOffset.x - cardEstimatedWidthPx - 12f).coerceAtLeast(4f)
+                        } else {
+                            (pOffset.x + 14f).coerceAtLeast(4f)
+                        }
+
+                        // Y 轴跟随：上方不够时翻转到下方
+                        val tooltipY = if (pOffset.y - cardEstimatedHeightPx - 10f < 4f) {
+                            (pOffset.y + 16f).coerceAtMost(boxHeightPx - cardEstimatedHeightPx - 4f)
+                        } else {
+                            (pOffset.y - cardEstimatedHeightPx - 8f).coerceAtLeast(4f)
+                        }
+
                         Box(
                             modifier = Modifier
-                                .fillMaxSize()
-                                .padding(8.dp)
+                                .offset { IntOffset(tooltipX.toInt(), tooltipY.toInt()) }
+                                .clip(RoundedCornerShape(7.dp))
+                                .background(CardBg.copy(alpha = 0.96f))
+                                .border(0.5.dp, AppleBlue.copy(alpha = 0.40f), RoundedCornerShape(7.dp))
+                                .padding(horizontal = 8.dp, vertical = 4.5.dp)
                         ) {
-                            Box(
-                                modifier = Modifier
-                                    .align(if (fracX > 0.60f) Alignment.TopStart else if (fracX < 0.40f) Alignment.TopEnd else Alignment.TopCenter)
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(CardBg.copy(alpha = 0.96f))
-                                    .border(0.5.dp, AppleBlue.copy(alpha = 0.35f), RoundedCornerShape(8.dp))
-                                    .padding(horizontal = 10.dp, vertical = 6.dp)
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(7.dp)
                             ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    Text("⏱ ${String.format("%.2f", hp.elapsedSec)}s", fontSize = 10.5.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
-                                    if (appMode != AppMode.PING_STANDALONE) {
-                                        Text("● 会话: ${hp.activeSessions?.let { formatCompactNumber(it) } ?: "—"}", fontSize = 10.5.sp, fontWeight = FontWeight.Bold, color = AppleBlue)
-                                    }
-                                    if (appMode != AppMode.SESSION_HOLD) {
-                                        Text("● 延迟: ${if (hp.hasPingSample) formatLatency(hp.pingLatencyMs) else "—"}", fontSize = 10.5.sp, fontWeight = FontWeight.Bold, color = AppleOrange)
-                                    }
+                                Text("⏱ ${String.format("%.2f", hp.elapsedSec)}s", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
+                                if (appMode != AppMode.PING_STANDALONE) {
+                                    Text("● 会话: ${hp.activeSessions?.let { formatCompactNumber(it) } ?: "—"}", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppleBlue)
+                                }
+                                if (appMode != AppMode.SESSION_HOLD) {
+                                    Text("● 延迟: ${if (hp.hasPingSample) formatLatency(hp.pingLatencyMs) else "—"}", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppleOrange)
                                 }
                             }
                         }
@@ -1630,6 +1654,7 @@ private fun DesktopDualChartCanvas(
     avgLatencyMs: Int?,
     hoveredPoint: DualChartPoint?,
     onHoverChange: (DualChartPoint?) -> Unit,
+    onPointerPositionChange: (Offset?) -> Unit,
     modifier: Modifier = Modifier
 ) {
     Canvas(
@@ -1660,6 +1685,7 @@ private fun DesktopDualChartCanvas(
                         when (event.type) {
                             PointerEventType.Move -> {
                                 val pos = event.changes.firstOrNull()?.position
+                                onPointerPositionChange(pos)
                                 if (pos != null && samples.isNotEmpty()) {
                                     val ratio = (pos.x / size.width.toFloat()).coerceIn(0f, 1f)
                                     val secTarget = viewMinSec + ratio * (viewMaxSec - viewMinSec)
@@ -1677,6 +1703,7 @@ private fun DesktopDualChartCanvas(
                                 }
                             }
                             PointerEventType.Exit -> {
+                                onPointerPositionChange(null)
                                 onHoverChange(null)
                             }
                         }
@@ -1792,97 +1819,6 @@ private fun DesktopDualChartCanvas(
                     drawCircle(color = AppleOrange, radius = 2.5f, center = Offset(hx, py))
                 }
             }
-        }
-    }
-}
-
-/**
- * 版本检查与更新日志弹窗
- */
-@Composable
-private fun DesktopUpdateDialog(
-    onDismiss: () -> Unit
-) {
-    Dialog(onDismissRequest = onDismiss) {
-        Box(
-            modifier = Modifier
-                .width(480.dp)
-                .clip(RoundedCornerShape(14.dp))
-                .background(CardBg)
-                .border(0.5.dp, CardBorder, RoundedCornerShape(14.dp))
-                .padding(20.dp)
-        ) {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(
-                        modifier = Modifier
-                            .size(28.dp)
-                            .background(AppleBlue.copy(alpha = 0.12f), RoundedCornerShape(7.dp)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text("🚀", fontSize = 14.sp)
-                    }
-                    Spacer(Modifier.width(10.dp))
-                    Column {
-                        Text("NetSessionTester 版本更新", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
-                        Text("当前版本: $CURRENT_APP_VERSION · 状态: 已是最新预发行版", fontSize = 11.sp, color = TextSecondary)
-                    }
-                }
-
-                HorizontalDivider(color = CardBorder)
-
-                Text("✨ 本次核心升级与更新日志：", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AppleBlue)
-
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(InputBg)
-                        .padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    ChangelogItem("⚡", "顶栏 4-Tab 全景融合导航", "在并发压测、独立 Ping、联动诊断与测试历史间秒级平滑直达，保持上下文数据。")
-                    ChangelogItem("📈", "紧凑动态自适应量程图表", "自动适应小数值与大幅波动，告别死板直线，微小网络抖动清晰呈现。")
-                    ChangelogItem("🔍", "交互滚轮缩放与平移总览", "支持鼠标滚轮局部放大 (1x~10x)、按住拖拽平移、双击全景复位。")
-                    ChangelogItem("🎯", "鼠标悬浮跟随卡片", "数据探针直接在鼠标位置跟随吸附气泡，不再局限于右上角。")
-                    ChangelogItem("🛡", "独立 Ping 通道与 DNS 预热", "专职调度通道隔离高并发挤占，网络 RTT 与 DNS 冷解析彻底剥离。")
-                    ChangelogItem("🎛", "8 核心指标大盘 & 快速预设", "扩充 8 项性能瓷片与百度/腾讯/Cloudflare/网关一键点选。")
-                }
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.End,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    TextButton(onClick = onDismiss) {
-                        Text("稍后提醒", fontSize = 12.sp, color = TextSecondary)
-                    }
-                    Spacer(Modifier.width(8.dp))
-                    Button(
-                        onClick = {
-                            runCatching {
-                                Desktop.getDesktop().browse(URI(GITHUB_REPO_URL))
-                            }
-                            onDismiss()
-                        },
-                        colors = ButtonDefaults.buttonColors(containerColor = AppleBlue),
-                        shape = RoundedCornerShape(8.dp)
-                    ) {
-                        Text("前往 GitHub Releases 下载", fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun ChangelogItem(icon: String, title: String, desc: String) {
-    Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        Text(icon, fontSize = 11.sp)
-        Column {
-            Text(title, fontSize = 11.5.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
-            Text(desc, fontSize = 10.5.sp, lineHeight = 15.sp, color = TextSecondary)
         }
     }
 }
