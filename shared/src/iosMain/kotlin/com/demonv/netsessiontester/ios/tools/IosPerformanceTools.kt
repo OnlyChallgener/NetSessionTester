@@ -686,7 +686,7 @@ object IosPerformanceTools {
 
     private fun monotonicNanos(): Long = memScoped {
         val time = alloc<timespec>()
-        if (clock_gettime(CLOCK_MONOTONIC.convert(), time.ptr) == 0) {
+        if (clock_gettime(CLOCK_MONOTONIC.toUInt(), time.ptr) == 0) {
             time.tv_sec * 1_000_000_000L + time.tv_nsec
         } else {
             com.demonv.netsessiontester.ios.getMonotonicMs() * 1_000_000L
