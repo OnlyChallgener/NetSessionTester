@@ -41,6 +41,13 @@ android {
     }
 
     buildFeatures { compose = true }
+
+    // The current AndroidX lint detector crashes while reading Kotlin 2.2
+    // metadata (the APK compilation itself succeeds). Keep release lint
+    // usable by disabling only the affected detector.
+    lint {
+        disable += "NullSafeMutableLiveData"
+    }
 }
 
 kotlin { jvmToolchain(17) }
