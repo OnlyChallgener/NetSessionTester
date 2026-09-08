@@ -16797,7 +16797,7 @@ private fun BottomNav(selectedTab: MainTab, onSelect: (MainTab) -> Unit) {
             .fillMaxWidth()
             .height(64.dp)
             .background(GlassNavSurface)
-            .border(width = 0.5.dp, brush = GlassBorderBrush)
+            .border(width = 0.5.dp, brush = GlassBorderBrush, shape = RoundedCornerShape(0.dp))
             .padding(horizontal = 16.dp, vertical = 4.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically
