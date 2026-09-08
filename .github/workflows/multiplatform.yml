@@ -29,7 +29,7 @@ jobs:
 
       - name: Build Android App & Shared
         run: |
-          gradle :shared:assemble :app:assembleDebug --no-daemon
+          gradle :app:assembleDebug --no-daemon
 
       - name: Upload Android APK
         uses: actions/upload-artifact@v4
@@ -124,7 +124,7 @@ jobs:
       - name: Package macOS Desktop Bundle
         run: |
           mkdir -p package-macos
-          cp shared/build/libs/*all.jar package-macos/NetSessionTester.jar
+          cp shared/build/libs/NetSessionTester-Desktop-all.jar package-macos/NetSessionTester.jar
           cat << 'EOF' > package-macos/run.command
           #!/bin/bash
           DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
@@ -132,6 +132,13 @@ jobs:
           java -jar NetSessionTester.jar
           EOF
           chmod +x package-macos/run.command
+          cat << 'EOF' > package-macos/README.txt
+          NetSessionTester 桌面版 (macOS)
+          ---------------------------------
+          启动方式：
+          1. 双击 run.command，或者在终端进入当前目录执行：java -jar NetSessionTester.jar
+          2. 环境需求：已安装 Java 17 或更高版本 (JRE / JDK)
+          EOF
           zip -r NetSessionTester-macOS-desktop.zip package-macos
 
       - name: Upload macOS Desktop Package
@@ -166,13 +173,20 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path package-windows
-          Copy-Item shared/build/libs/*all.jar package-windows/NetSessionTester.jar
+          Copy-Item shared/build/libs/NetSessionTester-Desktop-all.jar package-windows/NetSessionTester.jar
           @'
           @echo off
           cd /d "%~dp0"
           start javaw -jar NetSessionTester.jar
           if errorlevel 1 java -jar NetSessionTester.jar
           '@ | Set-Content -Path package-windows/Run.bat -Encoding Ascii
+          @'
+          NetSessionTester 桌面版 (Windows 64位)
+          ---------------------------------
+          启动方式：
+          1. 直接双击 Run.bat 或 NetSessionTester.jar 即可运行
+          2. 环境需求：已安装 Java 17 或更高版本 (JRE / JDK)
+          '@ | Set-Content -Path package-windows/README.txt -Encoding Utf8
           Compress-Archive -Path package-windows/* -DestinationPath NetSessionTester-Windows-x64.zip
 
       - name: Upload Windows Desktop Package

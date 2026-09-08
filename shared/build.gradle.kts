@@ -50,14 +50,17 @@ tasks.register<Jar>("desktopJar") {
     manifest {
         attributes["Main-Class"] = "com.demonv.netsessiontester.desktop.MainKt"
     }
+    exclude("META-INF/*.SF")
+    exclude("META-INF/*.DSA")
+    exclude("META-INF/*.RSA")
     from({
         val jvmTarget = kotlin.targets.getByName("jvm") as org.jetbrains.kotlin.gradle.targets.jvm.KotlinJvmTarget
         val mainCompilation = jvmTarget.compilations.getByName("main")
-        mainCompilation.runtimeDependencyFiles?.filter { it.name.endsWith(".jar") }?.map { zipTree(it) } ?: emptyList<Any>()
+        mainCompilation.runtimeDependencyFiles.filter { it.name.endsWith(".jar") }.map { zipTree(it) }
     })
     from({
         val jvmTarget = kotlin.targets.getByName("jvm") as org.jetbrains.kotlin.gradle.targets.jvm.KotlinJvmTarget
-        jvmTarget.compilations.getByName("main").output.classesDirs
+        jvmTarget.compilations.getByName("main").output.allOutputs
     })
 }
 
