@@ -5405,7 +5405,7 @@ private fun ReorderableCardItem(
                 )
             },
             contentAlignment = Alignment.TopCenter
-        )
+        ) {}
     }
 }
 
@@ -6018,20 +6018,20 @@ private fun FullRunLogPage(
     }
 }
 
+private data class ToolEntry(
+    val title: String,
+    val subtitle: String,
+    val mark: String,
+    val markBg: Color,
+    val markFg: Color,
+    val page: AppToolPage
+)
+
 @Composable
 private fun ToolsPage(
     onOpenTool: (AppToolPage) -> Unit,
     onOpenNatDiagnostics: () -> Unit = {}
 ) {
-    data class ToolEntry(
-        val title: String,
-        val subtitle: String,
-        val mark: String,
-        val markBg: Color,
-        val markFg: Color,
-        val page: AppToolPage
-    )
-
     val networkDiagTools = remember {
         listOf(
             ToolEntry("NAT 类型检测", "STUN手动检测 · IPv4 · UDP", "nat", BlueSoft, Blue, AppToolPage.NONE),
@@ -6119,8 +6119,8 @@ private fun AppleToolGroup(
     title: String,
     mark: String,
     color: Color,
-    tools: List<ToolEntryItem>,
-    onToolClick: (ToolEntryItem) -> Unit
+    tools: List<ToolEntry>,
+    onToolClick: (ToolEntry) -> Unit
 ) {
     Column(modifier = Modifier.fillMaxWidth()) {
         Row(
