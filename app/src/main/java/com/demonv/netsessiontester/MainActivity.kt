@@ -3072,7 +3072,7 @@ private fun NetSessionTesterApp() {
     var intervalMs by remember { mutableStateOf("100") }
     var timeoutMs by remember { mutableStateOf("1200") }
     var successLimit by remember { mutableStateOf("65535") }
-    var failureLimit by remember { mutableStateOf("600") }
+    var failureLimit by remember { mutableStateOf("200") }
     var keepConnections by remember { mutableStateOf(true) }
     var maskPrivacy by remember { mutableStateOf(false) }
     var historyLimit by remember { mutableStateOf("30") }
@@ -4007,7 +4007,7 @@ private fun NetSessionTesterApp() {
                 intervalMs = intervalMs.toLongOrNull() ?: 100L,
                 timeoutMs = timeoutMs.toIntOrNull() ?: 1200,
                 successLimit = successLimit.toIntOrNull() ?: 65535,
-                failureLimit = failureLimit.toIntOrNull() ?: 600,
+                failureLimit = failureLimit.toIntOrNull() ?: 200,
                 keepConnectionsAfterStop = true
             ).normalized()
         }.getOrElse { error ->
@@ -4477,7 +4477,7 @@ private fun NetSessionTesterApp() {
                     onRestoreDefault = {
                         host = "www.baidu.com"; port = "80"; mode = TestMode.IPV4_THEN_IPV6
                         batchSize = "200"; intervalMs = "100"; timeoutMs = "1200"
-                        successLimit = "65535"; failureLimit = "600"; keepConnections = true; maskPrivacy = false; historyLimit = "30"
+                        successLimit = "65535"; failureLimit = "200"; keepConnections = true; maskPrivacy = false; historyLimit = "30"
                         pingEnabled = true; pingTarget = "223.5.5.5"; pingIntervalSetting = "1000"; pingCountSetting = "无限"; pingTimeoutSetting = recommendedPingTimeoutMsForInterval(1000).toString(); pingProtocolSetting = PingProtocolMode.AUTO
                     }
                 )

@@ -13,7 +13,7 @@ data class SavedSettings(
     val intervalMs: String = "100",
     val timeoutMs: String = "1200",
     val successLimit: String = "65535",
-    val failureLimit: String = "600",
+    val failureLimit: String = "200",
     val keepConnections: Boolean = true,
     val maskPrivacy: Boolean = false,
     val historyLimit: String = "30",
@@ -40,10 +40,10 @@ class SettingsStore(context: Context) {
             !migratedFix3 && savedBatchSize.trim() == "1000" -> "200"
             else -> savedBatchSize
         }
-        val savedFailureLimit = prefs.getString(KEY_FAILURE_LIMIT, "600") ?: "600"
+        val savedFailureLimit = prefs.getString(KEY_FAILURE_LIMIT, "200") ?: "200"
         val performanceFailureLimit = when {
-            savedFailureLimit.isBlank() -> "600"
-            !migratedV86Failure && savedFailureLimit.trim() == "1200" -> "600"
+            savedFailureLimit.isBlank() -> "200"
+            !migratedV86Failure && (savedFailureLimit.trim() == "1200" || savedFailureLimit.trim() == "600") -> "200"
             else -> savedFailureLimit
         }
         if (!migratedFix3 || !migratedV86Failure) {

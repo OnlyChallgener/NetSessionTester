@@ -326,7 +326,7 @@ object DesktopHistoryStore {
         intervalMs = value.long("intervalMs", 50L),
         timeoutMs = value.int("timeoutMs", 1_500),
         successLimit = value.int("successLimit", 10_000),
-        failureLimit = value.int("failureLimit", 2_000),
+        failureLimit = value.int("failureLimit", 200),
         keepConnectionsAfterStop = value.boolean("keepConnectionsAfterStop", true)
     )
 

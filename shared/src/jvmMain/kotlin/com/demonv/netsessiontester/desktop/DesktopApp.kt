@@ -109,7 +109,7 @@ fun WindowScope.DesktopApp(
     var testMode by remember { mutableStateOf(TestMode.IPV4_ONLY) }
     var targetCps by remember { mutableStateOf(500) }
     var successLimit by remember { mutableStateOf(10000) }
-    var failureLimit by remember { mutableStateOf(2000) }
+    var failureLimit by remember { mutableStateOf(200) }
     var keepConnections by remember { mutableStateOf(true) }
     var pingIntervalMs by remember { mutableStateOf(500L) }
     var timeoutMs by remember { mutableStateOf(1500) }
@@ -1021,7 +1021,7 @@ private fun DesktopControlCard(
                 Spacer(Modifier.width(4.dp))
                 DesktopCompactInput(
                     value = failureLimit.toString(),
-                    onValueChange = { onFailureLimitChange(it.toIntOrNull() ?: 2000) },
+                    onValueChange = { onFailureLimitChange(it.toIntOrNull() ?: 200) },
                     keyboardType = KeyboardType.Number,
                     modifier = Modifier.weight(1f)
                 )

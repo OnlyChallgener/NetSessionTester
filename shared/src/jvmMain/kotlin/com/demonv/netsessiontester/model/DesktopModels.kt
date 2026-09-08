@@ -29,7 +29,7 @@ data class SessionConfig(
     val intervalMs: Long = 50L,
     val timeoutMs: Int = 1500,
     val successLimit: Int = 10000,
-    val failureLimit: Int = 2000,
+    val failureLimit: Int = 200,
     val keepConnectionsAfterStop: Boolean = true
 ) {
     fun normalized(): SessionConfig {
