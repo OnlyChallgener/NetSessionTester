@@ -37,7 +37,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.WindowDraggableArea
 import androidx.compose.ui.window.WindowPlacement
 import androidx.compose.ui.window.WindowScope
 import androidx.compose.ui.window.WindowState
@@ -141,6 +140,7 @@ fun WindowScope.DesktopApp(
                 isRunning = isRunning,
                 isWindows = isWindows,
                 isMaximized = isMaximized,
+                window = window,
                 onModeChange = {
                     if (!isRunning) {
                         appMode = it
@@ -285,25 +285,35 @@ fun WindowScope.DesktopApp(
  * 融合式现代标题栏 (参考 Antigravity IDE 质感)
  */
 @Composable
-private fun WindowScope.DesktopTitleBar(
+private fun DesktopTitleBar(
     appMode: AppMode,
     isRunning: Boolean,
     isWindows: Boolean,
     isMaximized: Boolean,
+    window: Window?,
     onModeChange: (AppMode) -> Unit,
     onMinimize: () -> Unit,
     onMaximizeToggle: () -> Unit,
     onClose: () -> Unit
 ) {
-    WindowDraggableArea(modifier = Modifier.fillMaxWidth().height(42.dp)) {
-        Row(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(CardBg)
-                .border(0.5.dp, Color(0x14000000))
-                .padding(start = 12.dp, end = if (isWindows) 0.dp else 12.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(42.dp)
+            .background(CardBg)
+            .border(0.5.dp, Color(0x14000000))
+            .pointerInput(isMaximized, window) {
+                detectDragGestures { _, dragAmount ->
+                    window?.let { w ->
+                        if (!isMaximized) {
+                            w.setLocation(w.x + dragAmount.x.toInt(), w.y + dragAmount.y.toInt())
+                        }
+                    }
+                }
+            }
+            .padding(start = 12.dp, end = if (isWindows) 0.dp else 12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
             // 应用小波形图标
             Box(
                 modifier = Modifier
@@ -407,7 +417,6 @@ private fun WindowScope.DesktopTitleBar(
             }
         }
     }
-}
 
 /**
  * Windows 现代窗口控制三键 (最小化、最大化/还原、关闭)
@@ -629,7 +638,7 @@ private fun BoxScope.WindowResizeBorders(
                     val newW = (window.width + dx).coerceAtLeast(minWidth)
                     val newH = (window.height - dy).coerceAtLeast(minHeight)
                     val newY = window.y + (window.height - newH)
-                    window.setBounds(newX, window.y, newW, newH)
+                    window.setBounds(window.x, newY, newW, newH)
                 }
             }
     )

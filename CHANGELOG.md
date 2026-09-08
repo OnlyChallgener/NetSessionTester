@@ -1,3 +1,19 @@
+## v1.0.22
+
+- **全平台 Compose Multiplatform (CMP) 原生交付**：全面升级覆盖 Android、iOS、macOS、Windows 四大主流平台。
+- **iOS 原生全功能落地 (Apple HIG 规范)**：
+  - **功能 100% 对齐**：并发持链压测、独立高频 Ping 探测、Bufferbloat 联动诊断三大模式全面就绪。
+  - **系统级沙盒网络优化**：基于 POSIX 非阻塞 Socket 与 NAT64/IPv6 兼容寻址，实现微秒级 TCP 握手测量与 Socket 维持。
+  - **系统级常亮与触感**：测试期间动态开启 `idleTimerDisabled` 防止自动灭屏休眠，集成 Taptic Engine 原生震动反馈。
+  - **Apple 顶级毛玻璃美学**：符合 `design.md` 规范的深浅自适应色、8pt 网格、平滑 Squircle 圆角。
+  - **专业双轴动态折线图**：左轴并发数、右轴延迟 ms、底部时间基准，带触摸划动 Scrubbing 发丝探针与实时数据气泡。
+  - **原生应用打包**：生成带 `[IosAppKt MainViewController]` 入口并链接 `shared.framework` 的 arm64 原生 iOS IPA 包。
+- **Windows 桌面端现代融合窗口与单文件 EXE**：
+  - 彻底去除黑色原生标题栏，实现 Antigravity IDE 级融合标题栏与边框平滑拉伸手柄。
+  - C# 启动器内嵌 JAR，交付单一便携版 `NetSessionTester.exe`（内置高清矢量图标与自动 Java 17 探测）。
+- **macOS 桌面端应用视网膜级适配**：
+  - 生成 16~1024 Retina 级 `icon.icns`，优化原生托盘与 `/Applications` 拖拽安装 DMG 镜像。
+
 ## v1.0.21 build156
 
 - **解除 2000 CPS 速率限制**：将底层目标 CPS（`batchSize`）截断上限从 2,000 彻底放宽至 20,000，充分释放手机在局域网高性能压测与极速并发环境下的打流能力。
