@@ -16795,10 +16795,11 @@ private fun BottomNav(selectedTab: MainTab, onSelect: (MainTab) -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .height(58.dp)
+            .height(64.dp)
             .background(GlassNavSurface)
-            .padding(horizontal = 18.dp, vertical = 4.dp),
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
+            .border(width = 0.5.dp, brush = GlassBorderBrush)
+            .padding(horizontal = 16.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         MainTab.entries.forEach { tab ->
@@ -16809,18 +16810,17 @@ private fun BottomNav(selectedTab: MainTab, onSelect: (MainTab) -> Unit) {
                 MainTab.LOGS -> Icons.Filled.Article
                 MainTab.SETTINGS -> Icons.Filled.Settings
             }
-            val shape = RoundedCornerShape(24.dp)
+            val shape = RoundedCornerShape(16.dp)
             val interactionSource = remember(tab) { MutableInteractionSource() }
             val selectionModifier = if (selected) {
-                Modifier
-                    .background(GlassNavSelectionSurface, shape)
+                Modifier.background(GlassNavSelectionSurface, shape)
             } else {
                 Modifier
             }
             Column(
                 modifier = Modifier
                     .weight(1f)
-                    .height(50.dp)
+                    .height(52.dp)
                     .clip(shape)
                     .then(selectionModifier)
                     .clickable(
@@ -16828,7 +16828,7 @@ private fun BottomNav(selectedTab: MainTab, onSelect: (MainTab) -> Unit) {
                         indication = null,
                         onClick = { onSelect(tab) }
                     )
-                    .padding(top = 5.dp, bottom = 4.dp),
+                    .padding(vertical = 4.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Center
             ) {
@@ -16836,13 +16836,14 @@ private fun BottomNav(selectedTab: MainTab, onSelect: (MainTab) -> Unit) {
                     image,
                     contentDescription = tab.label,
                     tint = if (selected) Blue else Muted,
-                    modifier = Modifier.width(19.dp).height(19.dp)
+                    modifier = Modifier.width(20.dp).height(20.dp)
                 )
-                Spacer(Modifier.height(2.dp))
+                Spacer(Modifier.height(3.dp))
                 Text(
                     tab.label,
-                    color = TextDark,
+                    color = if (selected) Blue else Muted,
                     fontSize = 11.sp,
+                    fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
                     lineHeight = 12.sp,
                     maxLines = 1,
                     overflow = TextOverflow.Clip
@@ -16943,42 +16944,41 @@ private fun String.onlyDigits(): String = filter { it.isDigit() }
 private val IPV4_REGEX = Regex("""\b(?:\d{1,3}\.){3}\d{1,3}\b""")
 private val IPV6_REGEX = Regex("""(?i)(?<![\w.])(?:[0-9a-f]{1,4}:){2,}[0-9a-f]{0,4}(?:%[\w.]+)?(?![\w.])""")
 
-private val TextDark = Color(0xFF111827)
-private val Muted = Color(0xFF64748B)
-private val Border = Color(0xFFE5E7EB)
-private val Blue = Color(0xFF2563EB)
-private val BlueSoft = Color(0xFFEFF6FF)
-private val Green = Color(0xFF16A34A)
-private val GreenSoft = Color(0xFFEAFBF0)
-private val ErrorRed = Color(0xFFEF4444)
-private val RedSoft = Color(0xFFFFF1F2)
-private val Orange = Color(0xFFF97316)
-private val Purple = Color(0xFF7C3AED)
-private val Navy = Color(0xFF0F2F6E)
-private val ShapeL = RoundedCornerShape(20.dp)
-private val ShapeM = RoundedCornerShape(14.dp)
-private val ShapeS = RoundedCornerShape(10.dp)
+private val TextDark = Color(0xFF000000)
+private val Muted = Color(0x993C3C43) // 60% secondary label
+private val Border = Color(0x1F3C3C43) // 12% hairline border
+private val Blue = Color(0xFF007AFF) // Apple System Blue
+private val BlueSoft = Color(0xFFE5F1FF)
+private val Green = Color(0xFF34C759) // Apple System Green
+private val GreenSoft = Color(0xFFEAF9ED)
+private val ErrorRed = Color(0xFFFF3B30) // Apple System Red
+private val RedSoft = Color(0xFFFFECEB)
+private val Orange = Color(0xFFFF9500) // Apple System Orange
+private val Purple = Color(0xFF5856D6) // Apple System Indigo
+private val Navy = Color(0xFF003F8A)
+private val ShapeL = RoundedCornerShape(20.dp) // Apple RadiusLarge
+private val ShapeM = RoundedCornerShape(14.dp) // Apple RadiusMedium
+private val ShapeS = RoundedCornerShape(8.dp)  // Apple RadiusSmall (8pt grid)
 
-// Apple-inspired glass tokens. A single page background plus translucent
-// surfaces keeps the visual depth without stacking multiple blur render layers.
-private val GlassBackgroundTop = Color(0xFFF4F8FF)
-private val GlassBackgroundMid = Color(0xFFF8F7FF)
-private val GlassBackgroundBottom = Color(0xFFF7F9FF)
-private val GlassBlueGlow = Color(0x5960A5FA)
-private val GlassPurpleGlow = Color(0x4FBEA7FF)
+// Apple HIG - iOS 26 / macOS Tahoe 精密微量液态玻璃与极低色散材质规范
+private val GlassBackgroundTop = Color(0xFFF2F2F7)
+private val GlassBackgroundMid = Color(0xFFF6F6F9)
+private val GlassBackgroundBottom = Color(0xFFF2F2F7)
+private val GlassBlueGlow = Color(0x1F007AFF)   // 极低色散冷调微光 (<0.02)
+private val GlassPurpleGlow = Color(0x145856D6) // 极低色散微光，杜绝彩虹眩光与塑料感
 private val GlassCardBrush = Brush.verticalGradient(
-    listOf(Color.White.copy(alpha = 0.86f), Color(0xFFF8FBFF).copy(alpha = 0.68f))
+    listOf(Color.White.copy(alpha = 0.82f), Color.White.copy(alpha = 0.70f))
 )
 private val GlassCompactBrush = Brush.verticalGradient(
-    listOf(Color.White.copy(alpha = 0.90f), Color(0xFFF8FBFF).copy(alpha = 0.74f))
+    listOf(Color.White.copy(alpha = 0.88f), Color.White.copy(alpha = 0.78f))
 )
-private val GlassBorderBrush = Brush.linearGradient(
-    listOf(Color.White.copy(alpha = 0.96f), Color(0xFFCBDCF4).copy(alpha = 0.58f))
+private val GlassBorderBrush = Brush.verticalGradient(
+    listOf(Color.White.copy(alpha = 0.55f), Color.White.copy(alpha = 0.15f), Color(0x0A000000))
 )
-private val GlassSwipeSurface = Color(0xFFF8FBFF)
-private val DeleteActionSurface = Color(0xFFE5484D)
-private val GlassNavSurface = Color(0xFFF8FBFF)
-private val GlassNavSelectionSurface = Color(0xFFE7ECFF)
-private val GlassPopupSurface = Color(0xFFF8FBFF)
-private val GlassPopupBorder = Color(0xFFD8E3F1)
-private val GlassPopupShape = RoundedCornerShape(26.dp)
+private val GlassSwipeSurface = Color(0xFFF8F8FA)
+private val DeleteActionSurface = Color(0xFFFF3B30)
+private val GlassNavSurface = Color(0xE6FFFFFF)
+private val GlassNavSelectionSurface = Color(0x1F007AFF)
+private val GlassPopupSurface = Color(0xF5FFFFFF)
+private val GlassPopupBorder = Color(0x2E007AFF)
+private val GlassPopupShape = RoundedCornerShape(28.dp) // Apple RadiusModal

@@ -1,0 +1,98 @@
+name: Multiplatform Matrix Build (Android / iOS / macOS / Windows)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - 'feature/**'
+      - 'feat/**'
+
+jobs:
+  build-android:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 9.5.1
+
+      - name: Build Android App & Shared
+        run: |
+          gradle :shared:assemble :app:assembleDebug --no-daemon
+
+  build-ios:
+    name: Build iOS Multiplatform Framework
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 9.5.1
+
+      - name: Compile iOS Framework
+        run: |
+          gradle :shared:linkReleaseFrameworkIosArm64 --no-daemon
+
+  build-macos:
+    name: Build macOS Desktop
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 9.5.1
+
+      - name: Compile Desktop Jar on macOS
+        run: |
+          gradle :shared:desktopJar --no-daemon
+
+  build-windows:
+    name: Build Windows Desktop
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 9.5.1
+
+      - name: Compile Desktop Jar on Windows
+        run: |
+          gradle :shared:desktopJar --no-daemon
