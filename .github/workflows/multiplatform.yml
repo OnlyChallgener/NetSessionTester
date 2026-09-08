@@ -39,10 +39,15 @@ jobs:
 
   build-ios:
     name: Build iOS Multiplatform Package
-    runs-on: macos-latest
+    runs-on: macos-15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Select Xcode for native Liquid Glass
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '26.0'
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -87,6 +92,25 @@ jobs:
               <string>1</string>
               <key>LSRequiresIPhoneOS</key>
               <true/>
+              <key>MinimumOSVersion</key>
+              <string>15.0</string>
+              <key>UIApplicationSceneManifest</key>
+              <dict>
+                  <key>UIApplicationSupportsMultipleScenes</key>
+                  <false/>
+                  <key>UISceneConfigurations</key>
+                  <dict>
+                      <key>UIWindowSceneSessionRoleApplication</key>
+                      <array>
+                          <dict>
+                              <key>UISceneConfigurationName</key>
+                              <string>Default</string>
+                              <key>UISceneDelegateClassName</key>
+                              <string>SceneDelegate</string>
+                          </dict>
+                      </array>
+                  </dict>
+              </dict>
               <key>UIRequiredDeviceCapabilities</key>
               <array>
                   <string>arm64</string>
@@ -99,6 +123,8 @@ jobs:
               </array>
               <key>UIViewControllerBasedStatusBarAppearance</key>
               <true/>
+              <key>NSLocalNetworkUsageDescription</key>
+              <string>NetSessionTester 需要访问本地网络设备以执行网络连通性和性能诊断。</string>
           </dict>
           </plist>
           EOF
@@ -112,7 +138,8 @@ jobs:
             desktop/launcher/ios_main.m -o build/Payload/NetSessionTester.app/NetSessionTester
 
           chmod +x build/Payload/NetSessionTester.app/NetSessionTester
-          codesign -s - --force --deep build/Payload/NetSessionTester.app || true
+          codesign -s - --force build/Payload/NetSessionTester.app/Frameworks/shared.framework
+          codesign -s - --force build/Payload/NetSessionTester.app
           cd build && zip -r ../NetSessionTester-iOS-unsigned.ipa Payload
 
       - name: Upload iOS IPA
@@ -139,102 +166,19 @@ jobs:
         with:
           gradle-version: 8.11.1
 
-      - name: Build Standalone Desktop App on macOS
+      - name: Build self-contained macOS application
         run: |
-          gradle :shared:desktopJar --no-daemon
+          gradle :shared:packageDmg --no-daemon
 
-      - name: Package macOS Application (.app & .dmg)
+      - name: Rename macOS distribution
         run: |
-          mkdir -p "package-macos/NetSessionTester.app/Contents/MacOS"
-          mkdir -p "package-macos/NetSessionTester.app/Contents/Resources"
-          mkdir -p "package-macos/NetSessionTester.app/Contents/Java"
-          cp shared/build/libs/NetSessionTester-Desktop-all.jar package-macos/NetSessionTester.app/Contents/Java/NetSessionTester.jar
-          cp desktop/assets/icon.icns package-macos/NetSessionTester.app/Contents/Resources/icon.icns
-          cp desktop/assets/icon.png package-macos/NetSessionTester.app/Contents/Resources/icon.png
-
-          cat << 'EOF' > package-macos/NetSessionTester.app/Contents/Info.plist
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-              <key>CFBundleExecutable</key>
-              <string>NetSessionTester</string>
-              <key>CFBundleIconFile</key>
-              <string>icon.icns</string>
-              <key>CFBundleIdentifier</key>
-              <string>com.demonv.netsessiontester</string>
-              <key>CFBundleName</key>
-              <string>NetSessionTester</string>
-              <key>CFBundleDisplayName</key>
-              <string>NetSessionTester</string>
-              <key>CFBundlePackageType</key>
-              <string>APPL</string>
-              <key>CFBundleShortVersionString</key>
-              <string>1.0.22</string>
-              <key>CFBundleVersion</key>
-              <string>1</string>
-              <key>NSHighResolutionCapable</key>
-              <true/>
-              <key>LSMinimumSystemVersion</key>
-              <string>11.0</string>
-          </dict>
-          </plist>
-          EOF
-
-          cat << 'EOF' > package-macos/NetSessionTester.app/Contents/MacOS/NetSessionTester
-          #!/bin/bash
-          DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )/.." >/dev/null 2>&1 && pwd )"
-          EXEC_JAVA=""
-
-          if [ -x "/usr/libexec/java_home" ]; then
-              JH=$(/usr/libexec/java_home -v 17+ 2>/dev/null)
-              if [ -n "$JH" ] && [ -x "$JH/bin/java" ]; then
-                  EXEC_JAVA="$JH/bin/java"
-              fi
-          fi
-
-          if [ -z "$EXEC_JAVA" ]; then
-              for jpath in \
-                  "/Library/Java/JavaVirtualMachines"/*/Contents/Home/bin/java \
-                  "$HOME/Library/Java/JavaVirtualMachines"/*/Contents/Home/bin/java \
-                  "/opt/homebrew/opt/openjdk"*/bin/java \
-                  "/usr/local/opt/openjdk"*/bin/java \
-                  "/usr/bin/java"
-              do
-                  if [ -x "$jpath" ]; then
-                      EXEC_JAVA="$jpath"
-                      break
-                  fi
-              done
-          fi
-
-          if [ -z "$EXEC_JAVA" ]; then
-              osascript -e 'display alert "NetSessionTester 运行环境提示" message "未检测到 Java 17 或更高版本。\n\nNetSessionTester 需要 Java 17+ 运行时支撑。点击【前往下载】前往 Adoptium 官网安装后即可使用。" as critical buttons {"取消", "前往下载"} default button "前往下载"'
-              open "https://adoptium.net/temurin/releases/?os=mac"
-              exit 1
-          fi
-
-          exec "$EXEC_JAVA" -Xdock:name="NetSessionTester" -Xdock:icon="$DIR/Resources/icon.icns" -Dapple.laf.useScreenMenuBar=true -jar "$DIR/Java/NetSessionTester.jar"
-          EOF
-          chmod +x package-macos/NetSessionTester.app/Contents/MacOS/NetSessionTester
-
-          mkdir -p dmg-staging
-          cp -R package-macos/NetSessionTester.app dmg-staging/
-          ln -s /Applications dmg-staging/Applications
-          hdiutil create -volname "NetSessionTester" -srcfolder dmg-staging -ov -format UDZO NetSessionTester-macOS.dmg
-          cd package-macos && zip -r ../NetSessionTester-macOS-app.zip NetSessionTester.app && cd ..
+          cp shared/build/compose/binaries/main/dmg/*.dmg NetSessionTester-macOS.dmg
 
       - name: Upload macOS DMG
         uses: actions/upload-artifact@v4
         with:
           name: NetSessionTester-macOS.dmg
           path: NetSessionTester-macOS.dmg
-
-      - name: Upload macOS App Bundle
-        uses: actions/upload-artifact@v4
-        with:
-          name: NetSessionTester-macOS-app.zip
-          path: NetSessionTester-macOS-app.zip
 
   build-windows:
     name: Build Windows Desktop
@@ -254,34 +198,19 @@ jobs:
         with:
           gradle-version: 8.11.1
 
-      - name: Build Standalone Desktop App on Windows
+      - name: Build self-contained Windows app image
         run: |
-          gradle :shared:desktopJar --no-daemon
+          gradle :shared:createDistributable --no-daemon
 
-      - name: Compile Native Windows PE Launcher & Package Portable Edition
+      - name: Package Windows distributions
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path package-windows
-          Copy-Item shared\build\libs\NetSessionTester-Desktop-all.jar package-windows\NetSessionTester.jar
-          Copy-Item desktop\assets\icon.ico package-windows\icon.ico
-
-          # Compile C# PE Launcher with EMBEDDED JAR into standalone single-file NetSessionTester.exe
-          & "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /target:winexe /win32icon:desktop\assets\icon.ico /resource:package-windows\NetSessionTester.jar,NetSessionTester.jar /out:package-windows\NetSessionTester.exe desktop\launcher\Launcher.cs
-
-          # Create standalone single-file portable directory (ONLY single NetSessionTester.exe and README.txt)
-          New-Item -ItemType Directory -Force -Path portable-windows
-          Copy-Item package-windows\NetSessionTester.exe portable-windows\NetSessionTester.exe
-
-          @'
-          NetSessionTester 桌面单文件便携版 (Windows 64位)
-          -----------------------------------------------
-          启动方式：
-          1. 直接双击 NetSessionTester.exe 即可启动（独立自包含单文件，内置高清图标）
-          2. 环境要求：已安装 Java 17 或更高版本 (JRE / JDK)；若未安装，双击时将自动弹出指引
-          '@ | Set-Content -Path portable-windows\README.txt -Encoding Utf8
-          Copy-Item portable-windows\README.txt package-windows\README.txt
-
-          Compress-Archive -Path portable-windows\* -DestinationPath NetSessionTester-Windows-x64-Portable.zip
+          $appImage = Get-ChildItem shared\build\compose\binaries\main\app -Directory | Select-Object -First 1
+          if (-not $appImage) { throw "Compose app image not found" }
+          New-Item -ItemType Directory -Force -Path package-windows | Out-Null
+          Copy-Item "$($appImage.FullName)\*" package-windows -Recurse -Force
+          Copy-Item desktop\assets\icon.ico package-windows\icon.ico -Force
+          Compress-Archive -Path package-windows\* -DestinationPath NetSessionTester-Windows-x64-Portable.zip
 
       - name: Build Windows Installer (Inno Setup)
         shell: pwsh

@@ -1,6 +1,6 @@
 package com.demonv.netsessiontester.desktop
 
-import androidx.compose.runtime.remember
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.graphics.painter.BitmapPainter
 import androidx.compose.ui.graphics.toComposeImageBitmap
@@ -13,6 +13,7 @@ import java.io.File
 import javax.imageio.ImageIO
 
 fun main() = application {
+    var closeRequested by remember { mutableStateOf(false) }
     val isWindows = remember {
         System.getProperty("os.name", "").lowercase().contains("windows")
     }
@@ -32,7 +33,7 @@ fun main() = application {
     )
 
     Window(
-        onCloseRequest = ::exitApplication,
+        onCloseRequest = { closeRequested = true },
         title = "NetSessionTester",
         icon = iconPainter,
         undecorated = isWindows,
@@ -43,6 +44,7 @@ fun main() = application {
             windowState = windowState,
             window = this.window,
             onClose = ::exitApplication,
+            closeRequested = closeRequested,
             isWindows = isWindows
         )
     }

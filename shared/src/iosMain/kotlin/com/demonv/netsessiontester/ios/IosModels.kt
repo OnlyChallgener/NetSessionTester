@@ -5,6 +5,9 @@ import kotlinx.cinterop.alloc
 import kotlinx.cinterop.memScoped
 import kotlinx.cinterop.ptr
 import platform.posix.gettimeofday
+import platform.posix.clock_gettime
+import platform.posix.CLOCK_MONOTONIC
+import platform.posix.timespec
 import platform.posix.timeval
 
 /**
@@ -17,13 +20,24 @@ fun getEpochMs(): Long = memScoped {
     (tv.tv_sec * 1000L) + (tv.tv_usec / 1000L)
 }
 
+/** 测试计时使用单调时钟，避免系统时间校准导致 RTT、CPS 和横轴跳变。 */
+@OptIn(ExperimentalForeignApi::class)
+fun getMonotonicMs(): Long = memScoped {
+    val ts = alloc<timespec>()
+    if (clock_gettime(CLOCK_MONOTONIC, ts.ptr) == 0) {
+        (ts.tv_sec * 1000L) + (ts.tv_nsec / 1_000_000L)
+    } else {
+        getEpochMs()
+    }
+}
+
 /**
  * iOS 测试模式枚举
  */
 enum class IosAppMode(val label: String) {
     SESSION_HOLD("并发压测"),
     PING_STANDALONE("独立 Ping"),
-    UNDERLOAD_PING("联动诊断 (Bufferbloat)")
+    UNDERLOAD_PING("联动诊断")
 }
 
 /**
@@ -44,16 +58,17 @@ enum class IosTestMode(val label: String) {
 }
 
 /**
- * 测试会话参数配置 (严格符合 iOS 沙盒与 HIG 规范)
+ * 测试会话参数配置
  */
 data class IosSessionConfig(
     val host: String = "www.baidu.com",
     val port: Int = 80,
     val mode: IosTestMode = IosTestMode.IPV4_ONLY,
-    val batchSize: Int = 50,          // 单批并发建立数 (CPS 速率)
-    val intervalMs: Long = 50L,       // 建连步进间隔 (ms)
+    val batchSize: Int = 50,          // 目标发起速率（次/秒），保留字段名兼容现有配置
+    val intervalMs: Long = 20L,       // 调度器刷新间隔，不代表批次间隔
+    val pingIntervalMs: Long = 500L,
     val timeoutMs: Int = 1500,        // 握手超时 (ms)
-    val successLimit: Int = 500,      // 目标保持并发会话数 (iOS 安全上限 100~2000)
+    val successLimit: Int = 500,      // 累计成功握手目标；当前仍存活的连接单独统计
     val failureLimit: Int = 200,      // 失败容忍上限
     val keepConnectionsAfterStop: Boolean = true // 停止测试后保持连接
 ) {
@@ -63,7 +78,8 @@ data class IosSessionConfig(
             host = cleanHost,
             port = port.coerceIn(1, 65535),
             batchSize = batchSize.coerceIn(1, 5000),
-            intervalMs = intervalMs.coerceIn(20L, 1000L),
+            intervalMs = intervalMs.coerceIn(10L, 100L),
+            pingIntervalMs = pingIntervalMs.coerceIn(100L, 5000L),
             timeoutMs = timeoutMs.coerceIn(200, 10000),
             successLimit = successLimit.coerceIn(10, 5000),
             failureLimit = failureLimit.coerceIn(10, 5000)
@@ -95,7 +111,8 @@ data class IosProtocolStats(
 data class IosPingStats(
     val host: String = "",
     val port: Int = 80,
-    val currentLatencyMs: Int = 0,
+    val protocol: IosIpProtocol = IosIpProtocol.IPV4,
+    val currentLatencyMs: Int? = null,
     val minLatencyMs: Int = 0,
     val maxLatencyMs: Int = 0,
     val avgLatencyMs: Int = 0,
@@ -112,11 +129,15 @@ data class IosPingStats(
  * 专业双轴动态走势采样点
  */
 data class IosDualChartPoint(
-    val elapsedSec: Int,
-    val activeSessions: Int = 0,
-    val pingLatencyMs: Int = 0,
-    val cps: Int = 0
-)
+    val elapsedMs: Long,
+    val activeSessions: Int? = null,
+    val pingLatencyMs: Int? = null,
+    val cps: Int = 0,
+    val hasPingSample: Boolean = false,
+    val protocol: IosIpProtocol = IosIpProtocol.IPV4
+) {
+    val elapsedSec: Double get() = elapsedMs / 1000.0
+}
 
 /**
  * 日志级别

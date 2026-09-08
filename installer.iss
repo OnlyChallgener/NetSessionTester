@@ -18,9 +18,8 @@ WizardStyle=modern
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"
 
 [Files]
-Source: "package-windows\NetSessionTester.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "package-windows\README.txt"; DestDir: "{app}"; Flags: ignoreversion
-Source: "package-windows\icon.ico"; DestDir: "{app}"; Flags: ignoreversion
+; package-windows is the jpackage app image and includes its private Java runtime.
+Source: "package-windows\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\NetSessionTester"; Filename: "{app}\NetSessionTester.exe"; IconFilename: "{app}\icon.ico"

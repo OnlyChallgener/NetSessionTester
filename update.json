@@ -1,18 +1,18 @@
 {
-  "versionCode": 156,
-  "versionName": "v1.0.21",
-  "build": 156,
-  "status": "ready",
+  "versionCode": 157,
+  "versionName": "v1.0.22-beta1",
+  "build": 157,
+  "status": "beta",
   "minReadyFileSize": 3000000,
-  "title": "NetSessionTester 正式版发布 v1.0.21 build156",
+  "title": "NetSessionTester 测试版 v1.0.22-beta1 build157",
   "content": [
-    "解除 2000 CPS 速率限制：目标 CPS 截断上限全面放宽至 20,000，充分释放极限打流压测能力",
-    "并发 IO 协程调度器扩容：Dispatcher 并发线程池从 256 翻倍扩容至 512，避免高延迟网络下阻塞排队",
-    "重构自适应在飞失败保护：动态根据目标 CPS 自适应裕度配额，消除启动初期在飞连接预扣导致的降速卡顿",
-    "动态发射窗口扩容：最大在飞队列 maxPending 提升至 20,000，保障超大并发持续平滑打流",
-    "全新 4-Tab 架构与独立「工具」中心，校准 WiFi 漫游并彻底修复假死与折线渲染"
+    "修复 Windows/macOS 连接数、独立 TCP Ping 和联动诊断的采样、失败统计与连接释放",
+    "新增桌面历史记录：保存测试参数、真实曲线和运行日志，支持筛选、删除和 CSV 导出",
+    "iOS 接入核心网络工具、历史和设置，并使用系统标签栏承载 Liquid Glass",
+    "清理已移除的双网对测残余和旧版外部 Java 桌面启动器",
+    "本版只完成 Python 源契约与协议样例检查，未完成平台编译和真机验收"
   ],
-  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.0.21-156/NetSessionTester-v1.0.21-build156-signed.apk",
-  "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/tag/v1.0.21-156",
+  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.0.22-beta1/NetSessionTester-v1.0.22-beta1-build157-signed.apk",
+  "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/tag/v1.0.22-beta1",
   "force": false
 }

@@ -43,35 +43,40 @@ import androidx.compose.ui.window.WindowState
 import com.demonv.netsessiontester.engine.DesktopPingTester
 import com.demonv.netsessiontester.engine.DesktopTcpTester
 import com.demonv.netsessiontester.model.*
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
+import com.demonv.netsessiontester.history.DesktopHistoryStore
+import kotlinx.coroutines.*
 import java.awt.Cursor
 import java.awt.Window
 
-private val AppleBlue = Color(0xFF007AFF)
-private val AppleGreen = Color(0xFF34C759)
-private val AppleOrange = Color(0xFFFF9500)
-private val AppleRed = Color(0xFFFF3B30)
-private val ApplePurple = Color(0xFF5856D6)
-private val WindowBg = Color(0xFFF3F3F5)
-private val CardBg = Color(0xFFFFFFFF)
-private val CardBorder = Color(0x18000000)
-private val TextPrimary = Color(0xFF1C1C1E)
-private val TextSecondary = Color(0xFF8E8E93)
-private val InputBg = Color(0xFFF6F6F8)
-private val InputBorder = Color(0xFFDCDCE2)
+internal val AppleBlue = Color(0xFF007AFF)
+internal val AppleGreen = Color(0xFF34C759)
+internal val AppleOrange = Color(0xFFFF9500)
+internal val AppleRed = Color(0xFFFF3B30)
+internal val ApplePurple = Color(0xFF5856D6)
+internal val WindowBg = Color(0xFFF3F3F5)
+internal val CardBg = Color(0xFFFFFFFF)
+internal val CardBorder = Color(0x18000000)
+internal val TextPrimary = Color(0xFF1C1C1E)
+internal val TextSecondary = Color(0xFF8E8E93)
+internal val InputBg = Color(0xFFF6F6F8)
+internal val InputBorder = Color(0xFFDCDCE2)
 
 @Composable
 fun WindowScope.DesktopApp(
     windowState: WindowState,
     window: Window? = null,
     onClose: () -> Unit = {},
+    closeRequested: Boolean = false,
     isWindows: Boolean = true
 ) {
     val sessionTester = remember { DesktopTcpTester() }
     val pingTester = remember { DesktopPingTester() }
     val scope = rememberCoroutineScope()
+
+    var historyVisible by remember { mutableStateOf(false) }
+    var localCloseRequested by remember { mutableStateOf(false) }
+    val historyError by DesktopHistoryStore.error.collectAsState()
+    LaunchedEffect(Unit) { DesktopHistoryStore.load() }
 
     var appMode by remember { mutableStateOf(AppMode.UNDERLOAD_PING) }
     var host by remember { mutableStateOf("www.baidu.com") }
@@ -81,7 +86,7 @@ fun WindowScope.DesktopApp(
     var successLimit by remember { mutableStateOf(10000) }
     var failureLimit by remember { mutableStateOf(2000) }
     var keepConnections by remember { mutableStateOf(true) }
-    var pingIntervalMs by remember { mutableStateOf(400L) }
+    var pingIntervalMs by remember { mutableStateOf(500L) }
 
     var isRunning by remember { mutableStateOf(false) }
     var currentStats by remember { mutableStateOf(ProtocolStats(IpProtocol.IPV4)) }
@@ -90,24 +95,201 @@ fun WindowScope.DesktopApp(
     var logs by remember { mutableStateOf(listOf(LogLine(text = "NetSessionTester 桌面版就绪 (Windows 11 Fluent / macOS Tahoe)"))) }
 
     var testJob by remember { mutableStateOf<Job?>(null) }
+    var isStopping by remember { mutableStateOf(false) }
+    var releaseOnStop by remember { mutableStateOf(false) }
+    var runId by remember { mutableStateOf(0L) }
+    var startedAtNanos by remember { mutableStateOf(0L) }
     val logListState = rememberLazyListState()
 
     fun log(text: String, level: LogLevel = LogLevel.INFO) {
-        logs = logs + LogLine(text = text, level = level)
+        logs = (logs + LogLine(text = text, level = level)).takeLast(600)
     }
 
-    // 动态采样图表数据
-    LaunchedEffect(isRunning, appMode) {
-        if (isRunning) {
-            val startMs = System.currentTimeMillis()
-            while (isRunning) {
-                val sec = ((System.currentTimeMillis() - startMs) / 1000L).toInt()
-                chartSamples = chartSamples + DualChartPoint(
-                    elapsedSec = sec,
-                    activeSessions = currentStats.activeSessions,
-                    pingLatencyMs = currentPingStats.currentLatencyMs
+    fun appendPoint(active: Int? = null, ping: PingStats? = null, protocol: IpProtocol = currentStats.protocol) {
+        val sampleAt = ping?.sampleTimeNanos?.takeIf { it > 0L } ?: System.nanoTime()
+        val elapsedMs = ((sampleAt - startedAtNanos) / 1_000_000L).coerceAtLeast(0L)
+        val point = DualChartPoint(
+            elapsedMs = maxOf(elapsedMs, chartSamples.lastOrNull()?.elapsedMs ?: 0L),
+            activeSessions = active,
+            pingLatencyMs = ping?.currentLatencyMs,
+            hasPingSample = ping != null,
+            protocol = ping?.protocol ?: protocol
+        )
+        chartSamples = (chartSamples + point).takeLast(2400)
+    }
+
+    LaunchedEffect(closeRequested, localCloseRequested) {
+        if (closeRequested || localCloseRequested) {
+            isStopping = true
+            releaseOnStop = true
+            log("关闭程序，停止测试并释放连接", LogLevel.WARN)
+            sessionTester.stop()
+            pingTester.stop()
+            testJob?.cancelAndJoin()
+            sessionTester.close()
+            pingTester.close()
+            onClose()
+        }
+    }
+
+    // Completed samples drive the chart. An idle timer must never invent successful probes.
+    DisposableEffect(sessionTester, pingTester) {
+        onDispose {
+            testJob?.cancel()
+            pingTester.close()
+            sessionTester.close()
+        }
+    }
+
+    LaunchedEffect(isRunning, currentStats.protocol) {
+        if (!isRunning) {
+            while (isActive) {
+                val count = sessionTester.activeCount(currentStats.protocol)
+                currentStats = currentStats.copy(activeSessions = count, cps = 0)
+                delay(500L)
+            }
+        }
+    }
+
+    fun stopTest(release: Boolean = false) {
+        if (isStopping) return
+        isStopping = true
+        val id = runId
+        val runningJob = testJob
+        releaseOnStop = release
+        log(if (release) "停止测试并释放连接" else "用户主动停止测试", LogLevel.WARN)
+        sessionTester.stop()
+        pingTester.stop()
+        runningJob?.cancel()
+        scope.launch {
+            runningJob?.join()
+            if (release) {
+                val released = sessionTester.release()
+                if (runningJob == null) log("已释放 $released 条长连接", LogLevel.WARN)
+            }
+            if (id == runId) {
+                currentStats = currentStats.copy(
+                    activeSessions = sessionTester.activeCount(currentStats.protocol),
+                    cps = 0,
+                    phase = if (release) "已释放" else "已停止"
                 )
-                delay(300L)
+                currentPingStats = currentPingStats.copy(isRunning = false)
+                isRunning = false
+                isStopping = false
+                testJob = null
+            }
+        }
+    }
+
+    fun startTest() {
+        if (isRunning || isStopping || testJob?.isActive == true) return
+        val targetPort = port.toIntOrNull()
+        if (host.isBlank() || targetPort == null || targetPort !in 1..65535) {
+            log("请输入有效目标和 1–65535 范围内的端口", LogLevel.ERROR)
+            return
+        }
+        val selectedMode = appMode
+        val selectedProtocol = if (testMode == TestMode.IPV6_ONLY) IpProtocol.IPV6 else IpProtocol.IPV4
+        val selectedInterval = pingIntervalMs
+        val config = SessionConfig(
+            host = host.trim(), port = targetPort, mode = testMode,
+            batchSize = targetCps, successLimit = successLimit,
+            failureLimit = failureLimit, keepConnectionsAfterStop = keepConnections
+        ).normalized()
+        val id = ++runId
+        releaseOnStop = false
+        val startedEpoch = System.currentTimeMillis()
+        currentStats = ProtocolStats(selectedProtocol)
+        currentPingStats = PingStats(protocol = selectedProtocol)
+        chartSamples = emptyList()
+        logs = emptyList()
+        startedAtNanos = System.nanoTime()
+        if (selectedMode != AppMode.PING_STANDALONE) appendPoint(active = 0, protocol = selectedProtocol)
+        isRunning = true
+        val statsCallback: suspend (ProtocolStats) -> Unit = { stats ->
+            withContext(Dispatchers.Main) {
+                if (id == runId) {
+                    if (currentStats.protocol != stats.protocol) currentPingStats = PingStats(protocol = stats.protocol)
+                    currentStats = stats
+                    appendPoint(active = stats.activeSessions, protocol = stats.protocol)
+                }
+            }
+        }
+        val pingCallback: suspend (PingStats) -> Unit = { stats ->
+            withContext(Dispatchers.Main) {
+                if (id == runId) {
+                    val isNewSample = stats.isRunning && stats.sentCount > 0 && (
+                        stats.sampleTimeNanos != currentPingStats.sampleTimeNanos ||
+                            stats.protocol != currentPingStats.protocol
+                        )
+                    currentPingStats = stats
+                    if (isNewSample) appendPoint(ping = stats)
+                }
+            }
+        }
+        val logCallback: suspend (LogLine) -> Unit = { line ->
+            withContext(Dispatchers.Main) { if (id == runId) log(line.text, line.level) }
+        }
+        testJob = scope.launch {
+            var outcome = "已完成"
+            try {
+                val staleConnections = sessionTester.release()
+                if (staleConnections > 0) log("新测试前已释放 $staleConnections 条旧连接")
+                if (selectedMode == AppMode.PING_STANDALONE) {
+                    pingTester.runContinuousPing(
+                        host = config.host, port = config.port, intervalMs = selectedInterval,
+                        timeoutMs = config.timeoutMs, protocol = selectedProtocol, onStats = pingCallback, onLog = logCallback
+                    )
+                } else {
+                    sessionTester.runSessionHoldTest(
+                        rawConfig = config, onStats = statsCallback, onLog = logCallback,
+                        pingIntervalMs = selectedInterval,
+                        onPingStats = if (selectedMode == AppMode.UNDERLOAD_PING) pingCallback else null
+                    )
+                }
+            } catch (cancelled: CancellationException) {
+                outcome = "已停止"
+                throw cancelled
+            } catch (error: Exception) {
+                outcome = "测试异常：${error.message ?: error.javaClass.simpleName}"
+                if (!isStopping) log("测试异常：${error.message ?: error.javaClass.simpleName}", LogLevel.ERROR)
+            } finally {
+                withContext(NonCancellable + Dispatchers.Main) {
+                    if (id == runId) {
+                        if (releaseOnStop) {
+                            val released = sessionTester.release()
+                            log("已释放 $released 条长连接", LogLevel.WARN)
+                        }
+                        val finalSession = currentStats.copy(
+                            activeSessions = sessionTester.activeCount(currentStats.protocol), cps = 0,
+                            phase = if (releaseOnStop) "已释放" else if (outcome == "已停止") "已停止" else currentStats.phase
+                        )
+                        val finalPing = currentPingStats.copy(isRunning = false)
+                        val finalOutcome = if (outcome == "已停止" && releaseOnStop) "已停止并释放"
+                            else if (outcome != "已完成") outcome
+                            else if (selectedMode == AppMode.PING_STANDALONE && finalPing.sentCount == 0) finalPing.phase
+                            else if (finalSession.totalFailure >= config.failureLimit) "达到失败上限"
+                            else if (finalSession.phase.contains("失败")) finalSession.phase
+                            else outcome
+                        try {
+                            DesktopHistoryStore.append(DesktopHistoryRecord(
+                                id = startedEpoch, startedAtEpochMs = startedEpoch,
+                                durationMs = ((System.nanoTime() - startedAtNanos) / 1_000_000L).coerceAtLeast(0L),
+                                outcome = finalOutcome, appMode = selectedMode, config = config,
+                                pingIntervalMs = selectedInterval, sessionStats = finalSession,
+                                pingStats = finalPing, points = chartSamples.toList(), logs = logs.toList()
+                            ))
+                        } catch (error: Exception) {
+                            log("保存历史失败：${error.message ?: "未知错误"}", LogLevel.ERROR)
+                        }
+                    }
+                    if (id == runId && !isStopping) {
+                        currentStats = currentStats.copy(activeSessions = sessionTester.activeCount(currentStats.protocol), cps = 0)
+                        currentPingStats = currentPingStats.copy(isRunning = false)
+                        isRunning = false
+                        testJob = null
+                    }
+                }
             }
         }
     }
@@ -137,23 +319,37 @@ fun WindowScope.DesktopApp(
             // 1. 顶栏：完全融合式现代标题栏 (消除原生黑边与双层顶栏)
             DesktopTitleBar(
                 appMode = appMode,
-                isRunning = isRunning,
+                isRunning = isRunning || isStopping,
+                historyVisible = historyVisible,
+                onHistoryChange = { historyVisible = it },
                 isWindows = isWindows,
                 isMaximized = isMaximized,
                 window = window,
                 onModeChange = {
-                    if (!isRunning) {
+                    historyVisible = false
+                    if (!isRunning && !isStopping) {
                         appMode = it
+                        if (it == AppMode.PING_STANDALONE && testMode == TestMode.IPV4_THEN_IPV6) testMode = TestMode.IPV4_ONLY
                         chartSamples = emptyList()
+                        currentPingStats = PingStats()
                     }
                 },
                 onMinimize = { windowState.isMinimized = true },
                 onMaximizeToggle = {
                     windowState.placement = if (isMaximized) WindowPlacement.Floating else WindowPlacement.Maximized
                 },
-                onClose = onClose
+                onClose = { localCloseRequested = true }
             )
-
+            if (historyError != null) {
+                Text(historyError.orEmpty(), fontSize = 11.sp, color = AppleRed, modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp))
+            }
+            if (historyVisible) {
+                DesktopHistoryPage(
+                    modifier = Modifier.fillMaxSize().weight(1f).padding(12.dp),
+                    window = window,
+                    onBack = { historyVisible = false }
+                )
+            } else {
             // 2. 主双栏结构 (左侧紧凑表单，右侧数据仪表盘)
             Row(
                 modifier = Modifier
@@ -174,89 +370,17 @@ fun WindowScope.DesktopApp(
                     failureLimit = failureLimit,
                     keepConnections = keepConnections,
                     pingIntervalMs = pingIntervalMs,
-                    isRunning = isRunning,
-                    onHostChange = { host = it },
-                    onPortChange = { port = it },
-                    onTestModeChange = { testMode = it },
-                    onCpsChange = { targetCps = it },
-                    onSuccessLimitChange = { successLimit = it },
-                    onFailureLimitChange = { failureLimit = it },
-                    onKeepChange = { keepConnections = it },
-                    onPingIntervalChange = { pingIntervalMs = it },
-                    onStartStop = {
-                        if (isRunning) {
-                            testJob?.cancel()
-                            pingTester.stop()
-                            isRunning = false
-                            log("用户主动停止测试", LogLevel.WARN)
-                        } else {
-                            isRunning = true
-                            chartSamples = emptyList()
-                            when (appMode) {
-                                AppMode.SESSION_HOLD -> {
-                                    val config = SessionConfig(
-                                        host = host,
-                                        port = port.toIntOrNull() ?: 80,
-                                        mode = testMode,
-                                        batchSize = targetCps,
-                                        successLimit = successLimit,
-                                        failureLimit = failureLimit,
-                                        keepConnectionsAfterStop = keepConnections
-                                    )
-                                    testJob = scope.launch {
-                                        sessionTester.runSessionHoldTest(
-                                            rawConfig = config,
-                                            onStats = { currentStats = it },
-                                            onLog = { log(it.text, it.level) }
-                                        )
-                                        isRunning = false
-                                    }
-                                }
-                                AppMode.PING_STANDALONE -> {
-                                    testJob = scope.launch {
-                                        pingTester.runContinuousPing(
-                                            host = host,
-                                            port = port.toIntOrNull() ?: 80,
-                                            intervalMs = pingIntervalMs,
-                                            timeoutMs = 1000,
-                                            onStats = { currentPingStats = it },
-                                            onLog = { log(it.text, it.level) }
-                                        )
-                                        isRunning = false
-                                    }
-                                }
-                                AppMode.UNDERLOAD_PING -> {
-                                    val config = SessionConfig(
-                                        host = host,
-                                        port = port.toIntOrNull() ?: 80,
-                                        mode = testMode,
-                                        batchSize = targetCps,
-                                        successLimit = successLimit,
-                                        failureLimit = failureLimit,
-                                        keepConnectionsAfterStop = keepConnections
-                                    )
-                                    testJob = scope.launch {
-                                        sessionTester.runSessionHoldTest(
-                                            rawConfig = config,
-                                            onStats = { currentStats = it },
-                                            onLog = { log(it.text, it.level) },
-                                            onPingSample = { latency ->
-                                                currentPingStats = currentPingStats.copy(currentLatencyMs = latency)
-                                            }
-                                        )
-                                        isRunning = false
-                                    }
-                                }
-                            }
-                        }
-                    },
-                    onRelease = {
-                        scope.launch {
-                            val released = sessionTester.release()
-                            currentStats = currentStats.copy(activeSessions = 0, phase = "已释放")
-                            log("已强制释放全部 $released 条长连接", LogLevel.WARN)
-                        }
-                    }
+                    isRunning = isRunning || isStopping,
+                    onHostChange = { if (!isRunning && !isStopping) host = it },
+                    onPortChange = { if (!isRunning && !isStopping) port = it },
+                    onTestModeChange = { if (!isRunning && !isStopping) testMode = it },
+                    onCpsChange = { if (!isRunning && !isStopping) targetCps = it },
+                    onSuccessLimitChange = { if (!isRunning && !isStopping) successLimit = it },
+                    onFailureLimitChange = { if (!isRunning && !isStopping) failureLimit = it },
+                    onKeepChange = { if (!isRunning && !isStopping) keepConnections = it },
+                    onPingIntervalChange = { if (!isRunning && !isStopping) pingIntervalMs = it },
+                    onStartStop = { if (isRunning) stopTest() else startTest() },
+                    onRelease = { stopTest(release = true) }
                 )
 
                 // 右侧专业数据仪表盘 (弹性宽屏)
@@ -271,6 +395,7 @@ fun WindowScope.DesktopApp(
                     logs = logs,
                     logListState = logListState
                 )
+            }
             }
         }
 
@@ -288,6 +413,8 @@ fun WindowScope.DesktopApp(
 private fun DesktopTitleBar(
     appMode: AppMode,
     isRunning: Boolean,
+    historyVisible: Boolean,
+    onHistoryChange: (Boolean) -> Unit,
     isWindows: Boolean,
     isMaximized: Boolean,
     window: Window?,
@@ -348,7 +475,7 @@ private fun DesktopTitleBar(
                     .background(AppleBlue.copy(alpha = 0.10f), RoundedCornerShape(4.dp))
                     .padding(horizontal = 5.dp, vertical = 1.5.dp)
             ) {
-                Text("v1.0.22", fontSize = 9.5.sp, fontWeight = FontWeight.SemiBold, color = AppleBlue)
+                Text("v1.0.22-beta1", fontSize = 9.5.sp, fontWeight = FontWeight.SemiBold, color = AppleBlue)
             }
 
             Spacer(Modifier.width(16.dp))
@@ -362,7 +489,7 @@ private fun DesktopTitleBar(
                 horizontalArrangement = Arrangement.spacedBy(2.dp)
             ) {
                 AppMode.entries.forEach { mode ->
-                    val selected = appMode == mode
+                    val selected = !historyVisible && appMode == mode
                     Box(
                         modifier = Modifier
                             .clip(RoundedCornerShape(5.dp))
@@ -383,6 +510,17 @@ private fun DesktopTitleBar(
                         )
                     }
                 }
+            }
+
+            Spacer(Modifier.width(8.dp))
+            Box(
+                Modifier.clip(RoundedCornerShape(6.dp))
+                    .background(if (historyVisible) AppleBlue.copy(alpha = 0.10f) else Color.Transparent)
+                    .clickable { onHistoryChange(!historyVisible) }
+                    .padding(horizontal = 12.dp, vertical = 6.dp)
+            ) {
+                Text("历史", fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
+                    color = if (historyVisible) AppleBlue else TextSecondary)
             }
 
             Spacer(Modifier.weight(1f)) // 可拖动空白区域
@@ -718,7 +856,7 @@ private fun DesktopControlCard(
             )
         }
 
-        if (appMode != AppMode.PING_STANDALONE) {
+        run {
             // 网络模式选择
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("协议", fontSize = 11.5.sp, color = TextSecondary, modifier = Modifier.width(42.dp))
@@ -730,14 +868,14 @@ private fun DesktopControlCard(
                         .padding(2.dp),
                     horizontalArrangement = Arrangement.spacedBy(2.dp)
                 ) {
-                    TestMode.entries.forEach { item ->
+                    TestMode.entries.filter { appMode != AppMode.PING_STANDALONE || it != TestMode.IPV4_THEN_IPV6 }.forEach { item ->
                         val selected = testMode == item
                         Box(
                             modifier = Modifier
                                 .weight(1f)
                                 .clip(RoundedCornerShape(4.dp))
                                 .background(if (selected) CardBg else Color.Transparent)
-                                .clickable { onTestModeChange(item) }
+                                .clickable(enabled = !isRunning) { onTestModeChange(item) }
                                 .padding(vertical = 4.dp),
                             contentAlignment = Alignment.Center
                         ) {
@@ -752,6 +890,9 @@ private fun DesktopControlCard(
                 }
             }
 
+        }
+
+        if (appMode != AppMode.PING_STANDALONE) {
             // 发射速率 CPS
             Column {
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -759,6 +900,7 @@ private fun DesktopControlCard(
                     Text("$targetCps CPS", fontSize = 11.5.sp, fontWeight = FontWeight.Bold, color = AppleBlue)
                 }
                 Slider(
+                    enabled = !isRunning,
                     value = targetCps.toFloat(),
                     onValueChange = { onCpsChange(it.toInt()) },
                     valueRange = 50f..5000f,
@@ -777,7 +919,7 @@ private fun DesktopControlCard(
                     modifier = Modifier.weight(1f)
                 )
                 Spacer(Modifier.width(6.dp))
-                Text("上限", fontSize = 11.5.sp, color = TextSecondary)
+                Text("失败上限", fontSize = 11.5.sp, color = TextSecondary)
                 Spacer(Modifier.width(4.dp))
                 DesktopCompactInput(
                     value = failureLimit.toString(),
@@ -790,7 +932,7 @@ private fun DesktopControlCard(
             // 保持连接开关
             Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text("测试完成后保持连接", fontSize = 11.5.sp, color = TextPrimary, modifier = Modifier.weight(1f))
-                Switch(checked = keepConnections, onCheckedChange = onKeepChange, modifier = Modifier.height(26.dp))
+                Switch(enabled = !isRunning, checked = keepConnections, onCheckedChange = onKeepChange, modifier = Modifier.height(26.dp))
             }
         }
 
@@ -813,7 +955,7 @@ private fun DesktopControlCard(
                                 .weight(1f)
                                 .clip(RoundedCornerShape(4.dp))
                                 .background(if (selected) CardBg else Color.Transparent)
-                                .clickable { onPingIntervalChange(iv) }
+                                .clickable(enabled = !isRunning) { onPingIntervalChange(iv) }
                                 .padding(vertical = 4.dp),
                             contentAlignment = Alignment.Center
                         ) {
@@ -865,7 +1007,7 @@ private fun DesktopControlCard(
  * 桌面标准紧凑输入控件 (高度 32dp，0.5dp 柔边，浅微灰底色，彻底摒弃移动端粗框)
  */
 @Composable
-private fun DesktopCompactInput(
+internal fun DesktopCompactInput(
     value: String,
     onValueChange: (String) -> Unit,
     modifier: Modifier = Modifier,
@@ -928,15 +1070,15 @@ private fun DesktopDashboardCard(
                     CompactMetricCard(Modifier.weight(1f), "瞬时速率", "${currentStats.cps}/s", ApplePurple)
                 }
                 AppMode.PING_STANDALONE -> {
-                    CompactMetricCard(Modifier.weight(1f), "当前延迟", "${currentPingStats.currentLatencyMs} ms", AppleOrange)
-                    CompactMetricCard(Modifier.weight(1f), "最小 / 最大", "${currentPingStats.minLatencyMs} / ${currentPingStats.maxLatencyMs} ms", AppleBlue)
-                    CompactMetricCard(Modifier.weight(1f), "网络抖动", "${currentPingStats.jitterMs} ms", ApplePurple)
-                    CompactMetricCard(Modifier.weight(1f), "丢包率", String.format("%.1f%%", currentPingStats.lossPercent), if (currentPingStats.lossPercent > 0) AppleRed else AppleGreen)
+                    CompactMetricCard(Modifier.weight(1f), "TCP 建连延迟", formatLatency(currentPingStats.currentLatencyMs), AppleOrange)
+                    CompactMetricCard(Modifier.weight(1f), "最小 / 最大", if (currentPingStats.receivedCount > 0) "${currentPingStats.minLatencyMs} / ${currentPingStats.maxLatencyMs} ms" else "—", AppleBlue)
+                    CompactMetricCard(Modifier.weight(1f), "网络抖动", if (currentPingStats.receivedCount > 1) "${currentPingStats.jitterMs} ms" else "—", ApplePurple)
+                    CompactMetricCard(Modifier.weight(1f), "探测失败率", if (currentPingStats.sentCount > 0) String.format("%.1f%%", currentPingStats.lossPercent) else "—", if (currentPingStats.lossPercent > 0) AppleRed else AppleGreen)
                 }
                 AppMode.UNDERLOAD_PING -> {
                     CompactMetricCard(Modifier.weight(1f), "并发会话", currentStats.activeSessions.toString(), AppleBlue)
-                    CompactMetricCard(Modifier.weight(1f), "实时延迟", "${currentPingStats.currentLatencyMs} ms", AppleOrange)
-                    CompactMetricCard(Modifier.weight(1f), "丢包率", String.format("%.1f%%", currentPingStats.lossPercent), if (currentPingStats.lossPercent > 0) AppleRed else AppleGreen)
+                    CompactMetricCard(Modifier.weight(1f), "TCP 建连延迟", formatLatency(currentPingStats.currentLatencyMs), AppleOrange)
+                    CompactMetricCard(Modifier.weight(1f), "探测失败率", if (currentPingStats.sentCount > 0) String.format("%.1f%%", currentPingStats.lossPercent) else "—", if (currentPingStats.lossPercent > 0) AppleRed else AppleGreen)
                     CompactMetricCard(Modifier.weight(1f), "瞬时速率", "${currentStats.cps}/s", ApplePurple)
                 }
             }
@@ -969,19 +1111,19 @@ private fun DesktopDashboardCard(
 
                     when (appMode) {
                         AppMode.SESSION_HOLD -> {
-                            DesktopAdviceRow("1", "桌面操作系统 TCP 协议栈可原生支撑上万级并发会话。")
+                            DesktopAdviceRow("1", "目标 CPS 表示每秒尝试建连数，实际成功速率取决于目标和网络。")
                             DesktopAdviceRow("2", "若出现大量超时或拒绝，请排查目标服务防火墙与端口限制。")
                             DesktopAdviceRow("3", "观察路由器 CPU 与 NAT 表，评估路由器硬件并发极限。")
                         }
                         AppMode.PING_STANDALONE -> {
-                            DesktopAdviceRow("1", "正常局域网 RTT 应 < 5ms，城域公网应稳定在 10 ~ 40ms。")
-                            DesktopAdviceRow("2", "若抖动 (Jitter) 超过 30ms，说明上行链路存在排队竞争。")
-                            DesktopAdviceRow("3", "出现丢包往往由无线信号衰减或运营商拥塞造成。")
+                            DesktopAdviceRow("1", "当前为 TCP 建连探测，延迟不包含 DNS 解析，与 ICMP Ping 口径不同。")
+                            DesktopAdviceRow("2", "探测失败包括超时、拒绝和路由错误，不能直接等同于 ICMP 丢包。")
+                            DesktopAdviceRow("3", "曲线缺口表示失败探测，底部红标表示失败事件。")
                         }
                         AppMode.UNDERLOAD_PING -> {
-                            DesktopAdviceRow("1", "并发数爬升时若延迟由 15ms 陡增至 300ms+，表明发生 Bufferbloat。")
-                            DesktopAdviceRow("2", "若延迟平稳但连接失败，说明触碰到了目标端口最大并发连接限制。")
-                            DesktopAdviceRow("3", "两者曲线可直接确定网络设备的健康承载拐点。")
+                            DesktopAdviceRow("1", "观察建连压力下的延迟变化；本测试不单独判定 Bufferbloat。")
+                            DesktopAdviceRow("2", "连接失败需结合错误类型排查目标限流、本机资源与网络状态。")
+                            DesktopAdviceRow("3", "Ping 独立采样；失败保留缺口，切换协议时曲线分段。")
                         }
                     }
                 }
@@ -1016,7 +1158,7 @@ private fun DesktopDashboardCard(
 }
 
 @Composable
-private fun CompactMetricCard(modifier: Modifier, label: String, value: String, color: Color) {
+internal fun CompactMetricCard(modifier: Modifier, label: String, value: String, color: Color) {
     Box(
         modifier = modifier
             .clip(RoundedCornerShape(10.dp))
@@ -1036,7 +1178,7 @@ private fun CompactMetricCard(modifier: Modifier, label: String, value: String, 
  * 专业双轴走势图卡片 (带左 Y 轴会话数、右 Y 轴延迟毫秒、底部 X 轴时间刻度与 Hover 实时探针)
  */
 @Composable
-private fun DesktopDualChartCard(
+internal fun DesktopDualChartCard(
     samples: List<DualChartPoint>,
     appMode: AppMode,
     currentStats: ProtocolStats,
@@ -1044,15 +1186,17 @@ private fun DesktopDualChartCard(
     successLimit: Int,
     modifier: Modifier = Modifier
 ) {
-    var hoveredPoint by remember { mutableStateOf<DualChartPoint?>(null) }
+    var hoveredPoint by remember(appMode) { mutableStateOf<DualChartPoint?>(null) }
+    LaunchedEffect(samples) { if (hoveredPoint !in samples) hoveredPoint = null }
 
     // 计算刻度上下限
-    val maxSec = samples.maxOfOrNull { it.elapsedSec }?.coerceAtLeast(10) ?: 10
-    val rawMaxSessions = samples.maxOfOrNull { it.activeSessions }?.coerceAtLeast(100)
+    val maxSec = samples.maxOfOrNull { it.elapsedSec }?.coerceAtLeast(10.0) ?: 10.0
+    val minSec = samples.firstOrNull()?.elapsedSec ?: 0.0
+    val rawMaxSessions = samples.mapNotNull { it.activeSessions }.maxOrNull()?.coerceAtLeast(100)
         ?: if (appMode != AppMode.PING_STANDALONE) successLimit.coerceAtLeast(1000) else 100
     val maxSessions = roundUpSessions(rawMaxSessions)
 
-    val rawMaxLatency = samples.maxOfOrNull { it.pingLatencyMs }?.coerceAtLeast(50) ?: 100
+    val rawMaxLatency = samples.mapNotNull { it.pingLatencyMs }.maxOrNull()?.coerceAtLeast(50) ?: 100
     val maxLatency = roundUpLatency(rawMaxLatency)
 
     Box(
@@ -1071,8 +1215,8 @@ private fun DesktopDualChartCard(
                 Text(
                     text = when (appMode) {
                         AppMode.SESSION_HOLD -> "并发会话承载走势"
-                        AppMode.PING_STANDALONE -> "网络往返延迟 (RTT) 走势"
-                        AppMode.UNDERLOAD_PING -> "会话承载与网络延迟对照走势 (Bufferbloat 检测)"
+                        AppMode.PING_STANDALONE -> "TCP 建连延迟走势"
+                        AppMode.UNDERLOAD_PING -> "会话数与 TCP 建连延迟对照"
                     },
                     fontSize = 12.5.sp,
                     fontWeight = FontWeight.Bold,
@@ -1092,12 +1236,12 @@ private fun DesktopDualChartCard(
                             .padding(horizontal = 8.dp, vertical = 2.dp),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Text("⏱ ${hp.elapsedSec}s", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
+                        Text("⏱ ${String.format("%.2f", hp.elapsedSec)}s", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
                         if (appMode != AppMode.PING_STANDALONE) {
-                            Text("● 会话: ${formatCompactNumber(hp.activeSessions)}", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppleBlue)
+                            Text("● 会话: ${hp.activeSessions?.let { formatCompactNumber(it) } ?: "—"}", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppleBlue)
                         }
                         if (appMode != AppMode.SESSION_HOLD) {
-                            Text("● 延迟: ${hp.pingLatencyMs} ms", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppleOrange)
+                            Text("● 延迟: ${if (hp.hasPingSample) formatLatency(hp.pingLatencyMs) else "—"}", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppleOrange)
                         }
                     }
                 } else {
@@ -1115,7 +1259,7 @@ private fun DesktopDualChartCard(
                     } else if (appMode == AppMode.SESSION_HOLD) {
                         Text("峰值: ${currentStats.maxStableSessions}", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = AppleBlue)
                     } else {
-                        Text("均值: ${currentPingStats.avgLatencyMs} ms", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = AppleOrange)
+                        Text("均值: ${if (currentPingStats.receivedCount > 0) formatLatency(currentPingStats.avgLatencyMs) else "—"}", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = AppleOrange)
                     }
                 }
             }
@@ -1150,6 +1294,7 @@ private fun DesktopDualChartCard(
                     DesktopDualChartCanvas(
                         samples = samples,
                         appMode = appMode,
+                        minSec = minSec,
                         maxSec = maxSec,
                         maxSessions = maxSessions,
                         maxLatency = maxLatency,
@@ -1187,9 +1332,9 @@ private fun DesktopDualChartCard(
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 repeat(5) { i ->
-                    val sec = (maxSec * i / 4)
+                    val sec = minSec + (maxSec - minSec) * i / 4
                     Text(
-                        text = "${sec}s",
+                        text = "${String.format("%.1f", sec)}s",
                         fontSize = 9.sp,
                         color = TextSecondary
                     )
@@ -1203,7 +1348,8 @@ private fun DesktopDualChartCard(
 private fun DesktopDualChartCanvas(
     samples: List<DualChartPoint>,
     appMode: AppMode,
-    maxSec: Int,
+    minSec: Double,
+    maxSec: Double,
     maxSessions: Int,
     maxLatency: Int,
     hoveredPoint: DualChartPoint?,
@@ -1213,7 +1359,7 @@ private fun DesktopDualChartCanvas(
     Canvas(
         modifier = modifier
             .fillMaxSize()
-            .pointerInput(samples, maxSec) {
+            .pointerInput(samples, minSec, maxSec) {
                 awaitPointerEventScope {
                     while (true) {
                         val event = awaitPointerEvent()
@@ -1222,7 +1368,7 @@ private fun DesktopDualChartCanvas(
                                 val pos = event.changes.firstOrNull()?.position
                                 if (pos != null && samples.isNotEmpty()) {
                                     val ratio = (pos.x / size.width.toFloat()).coerceIn(0f, 1f)
-                                    val secTarget = ratio * maxSec
+                                    val secTarget = minSec + ratio * (maxSec - minSec)
                                     val closest = samples.minByOrNull { kotlin.math.abs(it.elapsedSec - secTarget) }
                                     onHoverChange(closest)
                                 }
@@ -1249,82 +1395,52 @@ private fun DesktopDualChartCanvas(
             )
         }
 
-        if (samples.size < 2) return@Canvas
+        if (samples.isEmpty()) return@Canvas
 
-        fun xOf(sec: Int): Float = (sec.toFloat() / maxSec.toFloat()) * w
-        fun ySession(sessions: Int): Float = h - (sessions.toFloat() / maxSessions.toFloat()) * (h * 0.88f)
-        fun yPing(latency: Int): Float = h - (latency.toFloat() / maxLatency.toFloat()) * (h * 0.88f)
+        fun xOf(sec: Double): Float = (((sec - minSec) / (maxSec - minSec).coerceAtLeast(0.001)).toFloat() * w).coerceIn(0f, w)
+        fun ySession(sessions: Int): Float = h - (sessions.toFloat() / maxSessions.toFloat()) * h
+        fun yPing(latency: Int): Float = h - (latency.toFloat() / maxLatency.toFloat()) * h
 
-        // 1. 绘制会话数走势 (蓝色折线 + 渐变填充)
-        if (appMode == AppMode.SESSION_HOLD || appMode == AppMode.UNDERLOAD_PING) {
-            val sessionPath = Path()
-            val fillPath = Path()
-            samples.forEachIndexed { idx, s ->
-                val px = xOf(s.elapsedSec)
-                val py = ySession(s.activeSessions)
-                if (idx == 0) {
-                    sessionPath.moveTo(px, py)
-                    fillPath.moveTo(px, h)
-                    fillPath.lineTo(px, py)
-                } else {
-                    sessionPath.lineTo(px, py)
-                    fillPath.lineTo(px, py)
+        fun drawSeries(points: List<DualChartPoint>, color: Color, valueOf: (DualChartPoint) -> Int?, yOf: (Int) -> Float) {
+            var previous: DualChartPoint? = null
+            for (point in points) {
+                val value = valueOf(point)
+                if (value == null) {
+                    previous = null
+                    continue
                 }
+                val x = xOf(point.elapsedSec)
+                val y = yOf(value)
+                val before = previous
+                val beforeValue = before?.let(valueOf)
+                if (before != null && beforeValue != null && before.protocol == point.protocol) {
+                    val from = Offset(xOf(before.elapsedSec), yOf(beforeValue))
+                    val fill = Path().apply {
+                        moveTo(from.x, h)
+                        lineTo(from.x, from.y)
+                        lineTo(x, y)
+                        lineTo(x, h)
+                        close()
+                    }
+                    drawPath(fill, Brush.verticalGradient(listOf(color.copy(alpha = 0.13f), Color.Transparent)))
+                    drawLine(color, from, Offset(x, y), strokeWidth = 2.2f, cap = StrokeCap.Round)
+                } else {
+                    drawCircle(color, radius = 2.2f, center = Offset(x, y))
+                }
+                previous = point
             }
-            val lastX = xOf(samples.last().elapsedSec)
-            fillPath.lineTo(lastX, h)
-            fillPath.close()
-
-            drawPath(
-                path = fillPath,
-                brush = Brush.verticalGradient(
-                    colors = listOf(AppleBlue.copy(alpha = 0.15f), Color.Transparent),
-                    startY = 0f,
-                    endY = h
-                )
-            )
-
-            drawPath(
-                path = sessionPath,
-                color = AppleBlue,
-                style = Stroke(width = 2.2f, cap = StrokeCap.Round)
-            )
         }
-
-        // 2. 绘制延迟走势 (橙色折线 + 渐变填充)
-        if (appMode == AppMode.PING_STANDALONE || appMode == AppMode.UNDERLOAD_PING) {
-            val pingPath = Path()
-            val pingFillPath = Path()
-            samples.forEachIndexed { idx, s ->
-                val px = xOf(s.elapsedSec)
-                val py = yPing(s.pingLatencyMs)
-                if (idx == 0) {
-                    pingPath.moveTo(px, py)
-                    pingFillPath.moveTo(px, h)
-                    pingFillPath.lineTo(px, py)
-                } else {
-                    pingPath.lineTo(px, py)
-                    pingFillPath.lineTo(px, py)
-                }
+        if (appMode != AppMode.PING_STANDALONE) {
+            drawSeries(samples.filter { it.activeSessions != null }, AppleBlue, { it.activeSessions }, ::ySession)
+        }
+        if (appMode != AppMode.SESSION_HOLD) {
+            val probes = samples.filter { it.hasPingSample }
+            drawSeries(probes, AppleOrange, { it.pingLatencyMs }, ::yPing)
+            // Failed probes break the line; the bottom marker is an event, not a zero RTT.
+            probes.filter { it.pingLatencyMs == null }.forEach {
+                val x = xOf(it.elapsedSec)
+                drawLine(AppleRed, Offset(x, h - 5f), Offset(x, h), strokeWidth = 2f)
             }
-            val lastX = xOf(samples.last().elapsedSec)
-            pingFillPath.lineTo(lastX, h)
-            pingFillPath.close()
-
-            drawPath(
-                path = pingFillPath,
-                brush = Brush.verticalGradient(
-                    colors = listOf(AppleOrange.copy(alpha = 0.12f), Color.Transparent),
-                    startY = 0f,
-                    endY = h
-                )
-            )
-
-            drawPath(
-                path = pingPath,
-                color = AppleOrange,
-                style = Stroke(width = 2.2f, cap = StrokeCap.Round)
-            )
         }
 
         // 3. 鼠标悬浮拾取交互：发丝对齐线与高亮节点圆环
@@ -1340,7 +1456,7 @@ private fun DesktopDualChartCanvas(
             )
 
             // 会话数节点高亮环
-            if (appMode == AppMode.SESSION_HOLD || appMode == AppMode.UNDERLOAD_PING) {
+            if (appMode != AppMode.PING_STANDALONE && hoveredPoint.activeSessions != null) {
                 val sy = ySession(hoveredPoint.activeSessions)
                 drawCircle(color = AppleBlue.copy(alpha = 0.25f), radius = 6.5f, center = Offset(hx, sy))
                 drawCircle(color = Color.White, radius = 4f, center = Offset(hx, sy))
@@ -1348,7 +1464,7 @@ private fun DesktopDualChartCanvas(
             }
 
             // 延迟节点高亮环
-            if (appMode == AppMode.PING_STANDALONE || appMode == AppMode.UNDERLOAD_PING) {
+            if (appMode != AppMode.SESSION_HOLD && hoveredPoint.hasPingSample && hoveredPoint.pingLatencyMs != null) {
                 val py = yPing(hoveredPoint.pingLatencyMs)
                 drawCircle(color = AppleOrange.copy(alpha = 0.25f), radius = 6.5f, center = Offset(hx, py))
                 drawCircle(color = Color.White, radius = 4f, center = Offset(hx, py))
@@ -1428,7 +1544,7 @@ private fun DesktopAdviceRow(num: String, content: String) {
 }
 
 @Composable
-private fun DesktopLogItem(line: LogLine) {
+internal fun DesktopLogItem(line: LogLine) {
     val tagColor = when (line.level) {
         LogLevel.INFO -> TextSecondary
         LogLevel.SUCCESS -> AppleGreen
@@ -1461,3 +1577,5 @@ private fun DesktopLogItem(line: LogLine) {
         )
     }
 }
+
+private fun formatLatency(value: Int?): String = value?.let { "${it} ms" } ?: "—"

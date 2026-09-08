@@ -7,7 +7,7 @@ import java.time.format.DateTimeFormatter
 enum class AppMode(val label: String) {
     SESSION_HOLD("并发压测"),
     PING_STANDALONE("独立 Ping"),
-    UNDERLOAD_PING("联动诊断 (Bufferbloat)")
+    UNDERLOAD_PING("联动诊断")
 }
 
 enum class IpProtocol(val label: String) {
@@ -64,7 +64,7 @@ data class ProtocolStats(
 data class PingStats(
     val host: String = "",
     val port: Int = 80,
-    val currentLatencyMs: Int = 0,
+    val currentLatencyMs: Int? = null,
     val minLatencyMs: Int = 0,
     val maxLatencyMs: Int = 0,
     val avgLatencyMs: Int = 0,
@@ -74,21 +74,20 @@ data class PingStats(
     val lostCount: Int = 0,
     val lossPercent: Float = 0f,
     val isRunning: Boolean = false,
-    val phase: String = "就绪"
-)
-
-data class ChartPoint(
-    val elapsedSec: Int,
-    val active: Int,
-    val failure: Int = 0,
-    val protocol: IpProtocol = IpProtocol.IPV4
+    val phase: String = "就绪",
+    val sampleTimeNanos: Long = 0L,
+    val protocol: IpProtocol? = null
 )
 
 data class DualChartPoint(
-    val elapsedSec: Int,
-    val activeSessions: Int = 0,
-    val pingLatencyMs: Int = 0
-)
+    val elapsedMs: Long,
+    val activeSessions: Int? = null,
+    val pingLatencyMs: Int? = null,
+    val hasPingSample: Boolean = false,
+    val protocol: IpProtocol = IpProtocol.IPV4
+) {
+    val elapsedSec: Double get() = elapsedMs / 1000.0
+}
 
 enum class LogLevel { INFO, SUCCESS, WARN, ERROR, STAT }
 

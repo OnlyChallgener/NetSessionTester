@@ -1,4 +1,16 @@
-# v1.0.21 build156 测试重点
+# 当前多平台分支测试说明
+
+本轮完成 Windows/macOS 的连接数、独立 Ping 和联动诊断修复，新增融合现有布局的桌面历史页面，并接入 iOS 核心工具、历史、设置及原生 Liquid Glass 标签栏。已清理安卓双网对测残余及旧桌面启动器。实现范围、系统能力限制和官方文档依据见 [多平台修复说明](docs/MULTIPLATFORM_REPAIR.md)。
+
+本地 43 项 Python 源契约、协议样例和配置检查通过；另通过 Python YAML 解析和 Git 差异格式检查。未运行 Kotlin/Gradle/Xcode 编译、平台网络测试或实际安装包测试。下列旧版清单是待回归项目，不能视为本轮已通过记录。
+
+执行本轮 Python 检查：`python -m unittest discover -s docs/validation -p 'test_*.py' -v`。
+
+优先实机检查：连续运行的起始曲线不继承旧值；失败 Ping 不复用旧延迟；停止和释放后活动连接归零；对端关闭被识别；IPv6 不回退 IPv4；iOS 工具切换和退后台停止探测；有/无权限均能结束；系统标签栏不遮挡内容。
+
+---
+
+# v1.0.21 build156 历史回归清单
 
 ## 版本与发版文件
 

@@ -1,18 +1,10 @@
-## v1.0.22
+## v1.0.22-beta1 build157
 
-- **全平台 Compose Multiplatform (CMP) 原生交付**：全面升级覆盖 Android、iOS、macOS、Windows 四大主流平台。
-- **iOS 原生全功能落地 (Apple HIG 规范)**：
-  - **功能 100% 对齐**：并发持链压测、独立高频 Ping 探测、Bufferbloat 联动诊断三大模式全面就绪。
-  - **系统级沙盒网络优化**：基于 POSIX 非阻塞 Socket 与 NAT64/IPv6 兼容寻址，实现微秒级 TCP 握手测量与 Socket 维持。
-  - **系统级常亮与触感**：测试期间动态开启 `idleTimerDisabled` 防止自动灭屏休眠，集成 Taptic Engine 原生震动反馈。
-  - **Apple 顶级毛玻璃美学**：符合 `design.md` 规范的深浅自适应色、8pt 网格、平滑 Squircle 圆角。
-  - **专业双轴动态折线图**：左轴并发数、右轴延迟 ms、底部时间基准，带触摸划动 Scrubbing 发丝探针与实时数据气泡。
-  - **原生应用打包**：生成带 `[IosAppKt MainViewController]` 入口并链接 `shared.framework` 的 arm64 原生 iOS IPA 包。
-- **Windows 桌面端现代融合窗口与单文件 EXE**：
-  - 彻底去除黑色原生标题栏，实现 Antigravity IDE 级融合标题栏与边框平滑拉伸手柄。
-  - C# 启动器内嵌 JAR，交付单一便携版 `NetSessionTester.exe`（内置高清矢量图标与自动 Java 17 探测）。
-- **macOS 桌面端应用视网膜级适配**：
-  - 生成 16~1024 Retina 级 `icon.icns`，优化原生托盘与 `/Applications` 拖拽安装 DMG 镜像。
+- 修复 Windows/macOS 连接数、独立 TCP Ping 和联动诊断的亚秒采样、失败统计、地址族隔离与连接释放。
+- 新增 Windows/macOS 历史页面，保存测试参数、真实曲线和日志，支持筛选、删除和 CSV 导出。
+- iOS 接入核心网络工具、历史和设置；系统标签栏按 Apple 官方 Liquid Glass 设计接入。
+- 清理已移除的双网对测残余代码和旧版外部 Java 桌面启动器。
+- 本版仅完成 Python 源契约、协议样例和配置检查，尚未完成平台编译、签名和真机验收。
 
 ## v1.0.21 build156
 

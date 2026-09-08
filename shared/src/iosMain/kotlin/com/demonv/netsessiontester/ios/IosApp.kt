@@ -42,9 +42,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.ComposeUIViewController
 import kotlinx.cinterop.ExperimentalForeignApi
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.*
 import platform.UIKit.UIPasteboard
 import platform.UIKit.UIViewController
 import kotlin.math.max
@@ -54,13 +52,9 @@ import kotlin.math.roundToInt
 /**
  * iOS 导出入口：提供原生 UIViewController 挂载 Compose Multiplatform
  */
-@OptIn(kotlin.experimental.ExperimentalNativeApi::class)
-@kotlin.native.CName("createMainViewController")
 fun createMainViewController(): UIViewController = ComposeUIViewController {
     IosApp()
 }
-
-fun MainViewController(): UIViewController = createMainViewController()
 
 // ==========================================
 // Apple HIG 语义色彩 Token
@@ -100,12 +94,13 @@ fun IosApp() {
     val appleRed = if (isDark) AppleRedDark else AppleRedLight
 
     val scope = rememberCoroutineScope()
+    val cleanupScope = remember { CoroutineScope(SupervisorJob() + Dispatchers.Default) }
     val engine = remember { IosTcpEngine() }
 
     // 运行状态
     var appMode by remember { mutableStateOf(IosAppMode.SESSION_HOLD) }
     var isRunning by remember { mutableStateOf(false) }
-    var config by remember { mutableStateOf(IosSessionConfig()) }
+    var config by remember { mutableStateOf(IosPreferences.loadConfig()) }
     var protocolStats by remember { mutableStateOf(IosProtocolStats()) }
     var pingStats by remember { mutableStateOf(IosPingStats()) }
     var heldSocketsCount by remember { mutableStateOf(0) }
@@ -113,7 +108,8 @@ fun IosApp() {
     // 双轴走势历史采样
     var chartSamples by remember { mutableStateOf(listOf<IosDualChartPoint>()) }
     var activeTestJob by remember { mutableStateOf<Job?>(null) }
-    var chartTickerJob by remember { mutableStateOf<Job?>(null) }
+    var startedAtMs by remember { mutableStateOf(0L) }
+    var runGeneration by remember { mutableStateOf(0) }
 
     // 实时日志流
     var logs by remember { mutableStateOf(listOf<IosLogLine>()) }
@@ -121,7 +117,8 @@ fun IosApp() {
     val logListState = rememberLazyListState()
 
     fun appendLog(line: IosLogLine) {
-        logs = (logs + line).takeLast(600)
+        val timestamped = if (line.timeEpochMs == 0L) line.copy(timeEpochMs = getEpochMs()) else line
+        logs = (logs + timestamped).takeLast(600)
         scope.launch {
             if (logs.isNotEmpty()) {
                 logListState.animateScrollToItem(logs.size - 1)
@@ -129,107 +126,159 @@ fun IosApp() {
         }
     }
 
-    // 开始并发压测 / 联动诊断
-    fun startSessionHoldTest(underloadPing: Boolean) {
-        if (isRunning) return
-        isRunning = true
-        chartSamples = emptyList()
-        val startEpoch = getEpochMs() / 1000L
-
-        chartTickerJob = scope.launch {
-            while (isRunning) {
-                delay(1000L)
-                val elapsed = ((getEpochMs() / 1000L) - startEpoch).toInt()
-                val pt = IosDualChartPoint(
-                    elapsedSec = elapsed,
-                    activeSessions = protocolStats.activeSessions,
-                    pingLatencyMs = if (underloadPing) pingStats.currentLatencyMs else protocolStats.averageConnectLatencyMs,
-                    cps = protocolStats.cps
-                )
-                chartSamples = (chartSamples + pt).takeLast(120)
-                heldSocketsCount = engine.getHeldCount()
-            }
+    val preferencesRevision by IosPreferences.revision.collectAsState()
+    LaunchedEffect(preferencesRevision) {
+        if (!isRunning) config = IosPreferences.loadConfig()
+    }
+    LaunchedEffect(isRunning) {
+        if (!isRunning) while (isActive) {
+            heldSocketsCount = engine.getHeldCount()
+            protocolStats = protocolStats.copy(activeSessions = heldSocketsCount, cps = 0)
+            delay(500L)
         }
+    }
 
+    fun appendPoint(active: Int? = null, ping: IosPingStats? = null, protocol: IosIpProtocol = protocolStats.protocol) {
+        val point = IosDualChartPoint(
+            elapsedMs = (getMonotonicMs() - startedAtMs).coerceAtLeast(0L),
+            activeSessions = active, pingLatencyMs = ping?.currentLatencyMs,
+            hasPingSample = ping != null, protocol = ping?.protocol ?: protocol,
+            cps = protocolStats.cps
+        )
+        chartSamples = (chartSamples + point).takeLast(2400)
+    }
+
+    fun startTest(mode: IosAppMode) {
+        if (isRunning || activeTestJob?.isActive == true) return
+        if (config.host.isBlank() || config.port !in 1..65535) {
+            appendLog(IosLogLine(level = IosLogLevel.ERROR, text = "请输入有效目标与端口"))
+            return
+        }
+        val runId = ++runGeneration
+        val runConfig = config.normalized()
+        val protocol = if (runConfig.mode == IosTestMode.IPV6_ONLY) IosIpProtocol.IPV6 else IosIpProtocol.IPV4
+        isRunning = true
+        protocolStats = IosProtocolStats(protocol = protocol)
+        pingStats = IosPingStats(host = runConfig.host, port = runConfig.port, protocol = protocol)
+        chartSamples = emptyList()
+        logs = emptyList()
+        heldSocketsCount = 0
+        startedAtMs = getMonotonicMs()
+        if (mode != IosAppMode.PING_STANDALONE) appendPoint(active = 0, protocol = protocol)
         activeTestJob = scope.launch {
+            var completion = "测试完成"
+            val onPing: suspend (IosPingStats) -> Unit = { stats ->
+                withContext(Dispatchers.Main) {
+                    if (runGeneration == runId) {
+                        val isNew = stats.sentCount > 0 &&
+                            (stats.sentCount != pingStats.sentCount || stats.protocol != pingStats.protocol)
+                        pingStats = stats
+                        if (isNew) appendPoint(ping = stats)
+                    }
+                }
+            }
+            val onLog: suspend (IosLogLine) -> Unit = { line ->
+                withContext(Dispatchers.Main) { if (runGeneration == runId) appendLog(line) }
+            }
             try {
-                appendLog(IosLogLine(level = IosLogLevel.INFO, text = "启动 iOS Socket 测试 [${config.host}:${config.port}]"))
-                engine.runSessionHoldTest(
-                    rawConfig = config,
-                    onStats = { stats ->
-                        protocolStats = stats
+                IosTaskRegistry.awaitIdle()
+                // Starting an independent probe must not inherit load from a retained earlier test.
+                engine.releaseHeldSockets()
+                if (mode == IosAppMode.PING_STANDALONE) {
+                    engine.runStandalonePing(runConfig, onPing, onLog)
+                } else {
+                    engine.runSessionHoldTest(
+                        rawConfig = runConfig,
+                        onStats = { stats ->
+                            withContext(Dispatchers.Main) {
+                                if (runGeneration == runId) {
+                                    if (protocolStats.protocol != stats.protocol) pingStats = IosPingStats(protocol = stats.protocol)
+                                    protocolStats = stats
+                                    heldSocketsCount = stats.activeSessions
+                                    appendPoint(active = stats.activeSessions, protocol = stats.protocol)
+                                }
+                            }
+                        },
+                        onLog = onLog,
+                        onPingStats = if (mode == IosAppMode.UNDERLOAD_PING) onPing else null
+                    )
+                }
+            } catch (cancelled: CancellationException) {
+                completion = "已停止"
+                throw cancelled
+            } catch (error: Exception) {
+                completion = "测试失败：${error.message ?: "未知错误"}"
+                appendLog(IosLogLine(level = IosLogLevel.ERROR, text = completion))
+            } finally {
+                withContext(NonCancellable + Dispatchers.Main) {
+                    if (runGeneration == runId) {
                         heldSocketsCount = engine.getHeldCount()
-                    },
-                    onLog = { line -> appendLog(line) },
-                    onPingSample = if (underloadPing) {
-                        { rtt ->
-                            pingStats = pingStats.copy(currentLatencyMs = rtt, isRunning = true)
+                        protocolStats = protocolStats.copy(activeSessions = heldSocketsCount, cps = 0)
+                        pingStats = pingStats.copy(isRunning = false)
+                        val result = if (mode == IosAppMode.PING_STANDALONE)
+                            "$completion · 探测 ${pingStats.sentCount} 次，失败 ${pingStats.lostCount} 次"
+                            else "$completion · 成功 ${protocolStats.totalSuccess}，失败 ${protocolStats.totalFailure}，现存 $heldSocketsCount"
+                        val rawPoints = chartSamples.joinToString("\n") {
+                            "${it.elapsedMs},${it.protocol.label},${it.activeSessions ?: ""},${if (it.hasPingSample) it.pingLatencyMs?.toString() ?: "failed" else ""}"
                         }
-                    } else null
-                )
-            } finally {
-                isRunning = false
-                chartTickerJob?.cancel()
-                heldSocketsCount = engine.getHeldCount()
+                        IosHistoryStore.append(mode.label, "${runConfig.host}:${runConfig.port}", result,
+                            logs.joinToString("\n") { "${it.timeText} ${it.level} ${it.text}" } +
+                                "\n\nelapsed_ms,protocol,active,tcp_latency_ms\n" + rawPoints)
+                        isRunning = false
+                        activeTestJob = null
+                    }
+                }
             }
         }
     }
 
-    // 开始独立 Ping
-    fun startStandalonePing() {
-        if (isRunning) return
-        isRunning = true
-        chartSamples = emptyList()
-        val startEpoch = getEpochMs() / 1000L
-
-        chartTickerJob = scope.launch {
-            while (isRunning) {
-                delay(1000L)
-                val elapsed = ((getEpochMs() / 1000L) - startEpoch).toInt()
-                val pt = IosDualChartPoint(
-                    elapsedSec = elapsed,
-                    activeSessions = 0,
-                    pingLatencyMs = max(0, pingStats.currentLatencyMs),
-                    cps = 0
-                )
-                chartSamples = (chartSamples + pt).takeLast(120)
-            }
-        }
-
-        activeTestJob = scope.launch {
-            try {
-                engine.runStandalonePing(
-                    host = config.host,
-                    port = config.port,
-                    onStats = { stats -> pingStats = stats },
-                    onLog = { line -> appendLog(line) }
-                )
-            } finally {
-                isRunning = false
-                chartTickerJob?.cancel()
-            }
-        }
-    }
-
-    fun stopAnyTest() {
+    fun stopAnyTest(reason: String = "用户主动停止测试") {
+        if (!isRunning && activeTestJob == null) return
         engine.stopTest()
         activeTestJob?.cancel()
-        chartTickerJob?.cancel()
-        isRunning = false
-        heldSocketsCount = engine.getHeldCount()
-        appendLog(IosLogLine(level = IosLogLevel.WARN, text = "用户主动停止测试"))
+        appendLog(IosLogLine(level = IosLogLevel.WARN, text = reason))
+    }
+
+    DisposableEffect(engine) {
+        IosTaskRegistry.register("main") {
+            val previous = activeTestJob
+            if (previous == null && heldSocketsCount == 0) return@register null
+            stopAnyTest("页面切换或进入后台，停止测试")
+            cleanupScope.launch {
+                previous?.join()
+                engine.releaseHeldSockets()
+                withContext(Dispatchers.Main) {
+                    heldSocketsCount = 0
+                    protocolStats = protocolStats.copy(activeSessions = 0, cps = 0)
+                }
+            }
+        }
+        onDispose {
+            IosTaskRegistry.unregister("main")
+            val previous = activeTestJob
+            engine.stopTest()
+            engine.setScreenKeepAwake(false)
+            cleanupScope.launch {
+                previous?.cancelAndJoin()
+                engine.releaseHeldSockets()
+                cleanupScope.cancel()
+            }
+        }
     }
 
     fun releaseHeldConnections() {
+        val previous = activeTestJob
+        stopAnyTest("释放连接，停止新增任务")
         scope.launch {
+            previous?.join()
             val count = engine.releaseHeldSockets()
             heldSocketsCount = 0
-            protocolStats = protocolStats.copy(activeSessions = 0, phase = "已全部释放")
-            appendLog(IosLogLine(level = IosLogLevel.WARN, text = "已安全释放全部 $count 个持链 Socket 描述符"))
+            protocolStats = protocolStats.copy(activeSessions = 0, cps = 0, phase = "已全部释放")
+            appendLog(IosLogLine(level = IosLogLevel.WARN, text = "已释放 $count 个持链连接"))
         }
     }
 
-    // 智能 Bufferbloat 与网络诊断建议
+    // 基于已完成样本的网络诊断说明
     val diagnosticAdvice = remember(protocolStats, pingStats, appMode) {
         generateDiagnosticAdvice(appMode, protocolStats, pingStats)
     }
@@ -238,7 +287,7 @@ fun IosApp() {
         modifier = Modifier
             .fillMaxSize()
             .background(bgColor)
-            .windowInsetsPadding(WindowInsets.statusBars)
+            .windowInsetsPadding(WindowInsets.safeDrawing)
     ) {
         Column(
             modifier = Modifier
@@ -329,9 +378,9 @@ fun IosApp() {
                 appleOrange = appleOrange,
                 onStart = {
                     when (appMode) {
-                        IosAppMode.SESSION_HOLD -> startSessionHoldTest(underloadPing = false)
-                        IosAppMode.PING_STANDALONE -> startStandalonePing()
-                        IosAppMode.UNDERLOAD_PING -> startSessionHoldTest(underloadPing = true)
+                        IosAppMode.SESSION_HOLD -> startTest(IosAppMode.SESSION_HOLD)
+                        IosAppMode.PING_STANDALONE -> startTest(IosAppMode.PING_STANDALONE)
+                        IosAppMode.UNDERLOAD_PING -> startTest(IosAppMode.UNDERLOAD_PING)
                     }
                 },
                 onStop = { stopAnyTest() },
@@ -407,7 +456,7 @@ private fun IosHeaderBar(
                         .padding(horizontal = 6.dp, vertical = 2.dp)
                 ) {
                     Text(
-                        text = "iOS v1.0.22",
+                        text = "iOS v1.0.22-beta1",
                         fontSize = 11.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = appleBlue
@@ -415,7 +464,7 @@ private fun IosHeaderBar(
                 }
             }
             Text(
-                text = "高并发 Socket 维持 · 独立 Ping · Bufferbloat 拥塞分析",
+                text = "连接数测试 · TCP Ping · 负载延迟对照",
                 fontSize = 12.sp,
                 color = textSecondary
             )
@@ -534,7 +583,7 @@ private fun IosMetricCardsGrid(
 
             // Card 2: 实时握手延迟
             val latText = if (appMode == IosAppMode.PING_STANDALONE || appMode == IosAppMode.UNDERLOAD_PING) {
-                if (pingStats.currentLatencyMs > 0) "${pingStats.currentLatencyMs}ms" else "--"
+                pingStats.currentLatencyMs?.let { "${it}ms" } ?: "--"
             } else {
                 if (protocolStats.averageConnectLatencyMs > 0) "${protocolStats.averageConnectLatencyMs}ms" else "--"
             }
@@ -574,21 +623,22 @@ private fun IosMetricCardsGrid(
             )
 
             // Card 4: 丢包与异常
-            val lossVal = if (appMode == IosAppMode.PING_STANDALONE) {
+            val showsPingLoss = appMode == IosAppMode.PING_STANDALONE || appMode == IosAppMode.UNDERLOAD_PING
+            val lossVal = if (showsPingLoss) {
                 "${pingStats.lossPercent.roundToInt()}%"
             } else {
                 "${protocolStats.totalFailure}"
             }
 
-            val lossSub = if (appMode == IosAppMode.PING_STANDALONE) {
-                "丢失: ${pingStats.lostCount} / 发送: ${pingStats.sentCount}"
+            val lossSub = if (showsPingLoss) {
+                "${pingStats.protocol.label} · 丢失 ${pingStats.lostCount} / 发送 ${pingStats.sentCount}"
             } else {
                 "建连被拒 / 超时计数"
             }
 
             IosSingleMetricCard(
                 modifier = Modifier.weight(1f),
-                title = if (appMode == IosAppMode.PING_STANDALONE) "探测丢包率" else "累计异常失败",
+                title = if (showsPingLoss) "探测丢包率" else "累计异常失败",
                 value = lossVal,
                 valueColor = appleRed,
                 subText = lossSub,
@@ -659,7 +709,16 @@ private fun IosDualAxisChartCard(
     appleBlue: Color,
     appleOrange: Color
 ) {
-    var touchFraction by remember { mutableStateOf<Float?>(null) }
+    var touchFraction by remember(appMode) { mutableStateOf<Float?>(null) }
+    val minTime = samples.firstOrNull()?.elapsedMs ?: 0L
+    val maxTime = maxOf(minTime + 1000L, samples.lastOrNull()?.elapsedMs ?: 1000L)
+    val maxSessions = max(100, samples.mapNotNull { it.activeSessions }.maxOrNull() ?: successLimit)
+    val maxLatency = max(50, samples.mapNotNull { it.pingLatencyMs }.maxOrNull() ?: 50)
+    fun closest(fraction: Float): IosDualChartPoint? {
+        val target = minTime + (maxTime - minTime) * fraction
+        return samples.minByOrNull { kotlin.math.abs(it.elapsedMs - target) }
+    }
+
 
     Box(
         modifier = Modifier
@@ -737,8 +796,6 @@ private fun IosDualAxisChartCard(
                         )
                     }
             ) {
-                val maxSessions = max(successLimit, samples.maxOfOrNull { it.activeSessions } ?: 500)
-                val maxLatency = max(100, samples.maxOfOrNull { it.pingLatencyMs } ?: 100)
 
                 Canvas(modifier = Modifier.fillMaxSize()) {
                     val w = size.width
@@ -758,86 +815,51 @@ private fun IosDualAxisChartCard(
                         )
                     }
 
-                    if (samples.size >= 2) {
-                        val stepX = w / (samples.size - 1)
-
-                        // 2. 绘制并发会话数折线与液态填充光晕 (蓝色)
-                        val sessionPath = Path()
-                        val sessionFillPath = Path()
-
-                        samples.forEachIndexed { i, pt ->
-                            val x = i * stepX
-                            val sessionFrac = (pt.activeSessions.toFloat() / maxSessions).coerceIn(0f, 1f)
-                            val y = bottomY - sessionFrac * chartHeight
-                            if (i == 0) {
-                                sessionPath.moveTo(x, y)
-                                sessionFillPath.moveTo(x, bottomY)
-                                sessionFillPath.lineTo(x, y)
-                            } else {
-                                sessionPath.lineTo(x, y)
-                                sessionFillPath.lineTo(x, y)
+                    fun xOf(point: IosDualChartPoint): Float =
+                        ((point.elapsedMs - minTime).toFloat() / (maxTime - minTime)) * w
+                    fun drawSeries(points: List<IosDualChartPoint>, color: Color, valueOf: (IosDualChartPoint) -> Int?, maximum: Int) {
+                        var previous: IosDualChartPoint? = null
+                        for (point in points) {
+                            val value = valueOf(point)
+                            if (value == null) { previous = null; continue }
+                            val x = xOf(point)
+                            val y = bottomY - (value.toFloat() / maximum).coerceIn(0f, 1f) * chartHeight
+                            val before = previous
+                            val beforeValue = before?.let(valueOf)
+                            if (before != null && beforeValue != null && before.protocol == point.protocol) {
+                                val from = Offset(xOf(before), bottomY - (beforeValue.toFloat() / maximum).coerceIn(0f, 1f) * chartHeight)
+                                val fill = Path().apply {
+                                    moveTo(from.x, bottomY); lineTo(from.x, from.y)
+                                    lineTo(x, y); lineTo(x, bottomY); close()
+                                }
+                                drawPath(fill, Brush.verticalGradient(listOf(color.copy(alpha = 0.18f), Color.Transparent)))
+                                drawLine(color, from, Offset(x, y), strokeWidth = 2.2f, cap = StrokeCap.Round)
+                            } else drawCircle(color, radius = 2.2f, center = Offset(x, y))
+                            previous = point
+                        }
+                    }
+                    if (appMode != IosAppMode.PING_STANDALONE) {
+                        drawSeries(samples.filter { it.activeSessions != null }, appleBlue, { it.activeSessions }, maxSessions)
+                    }
+                    if (appMode != IosAppMode.SESSION_HOLD) {
+                        val probes = samples.filter { it.hasPingSample }
+                        drawSeries(probes, appleOrange, { it.pingLatencyMs }, maxLatency)
+                        probes.filter { it.pingLatencyMs == null }.forEach {
+                            drawLine(Color(0xFFFF3B30), Offset(xOf(it), bottomY - 5f), Offset(xOf(it), bottomY), strokeWidth = 2f)
+                        }
+                    }
+                    touchFraction?.let { fraction ->
+                        closest(fraction)?.let { point ->
+                            val x = xOf(point)
+                            drawLine(Color(0x807E7E7E), Offset(x, topY), Offset(x, bottomY), strokeWidth = 1f)
+                            point.activeSessions?.let { value ->
+                                val y = bottomY - (value.toFloat() / maxSessions) * chartHeight
+                                drawCircle(appleBlue, radius = 3f, center = Offset(x, y))
                             }
-                        }
-                        sessionFillPath.lineTo((samples.size - 1) * stepX, bottomY)
-                        sessionFillPath.close()
-
-                        // 绘制蓝色光晕填充
-                        drawPath(
-                            path = sessionFillPath,
-                            brush = Brush.verticalGradient(
-                                listOf(appleBlue.copy(alpha = 0.25f), Color.Transparent),
-                                startY = topY,
-                                endY = bottomY
-                            )
-                        )
-
-                        // 绘制蓝色趋势折线
-                        drawPath(
-                            path = sessionPath,
-                            color = appleBlue,
-                            style = Stroke(width = 2.2f, cap = StrokeCap.Round)
-                        )
-
-                        // 3. 绘制延迟走势折线 (橙色)
-                        val latPath = Path()
-                        samples.forEachIndexed { i, pt ->
-                            val x = i * stepX
-                            val latFrac = (pt.pingLatencyMs.toFloat() / maxLatency).coerceIn(0f, 1f)
-                            val y = bottomY - latFrac * chartHeight
-                            if (i == 0) latPath.moveTo(x, y) else latPath.lineTo(x, y)
-                        }
-
-                        drawPath(
-                            path = latPath,
-                            color = appleOrange,
-                            style = Stroke(width = 1.8f, cap = StrokeCap.Round)
-                        )
-
-                        // 4. 触摸探针：绘制发丝准星与数据聚焦点
-                        touchFraction?.let { frac ->
-                            val touchX = frac * w
-                            val index = ((samples.size - 1) * frac).roundToInt().coerceIn(0, samples.size - 1)
-                            val selectedPoint = samples[index]
-
-                            // 发丝准星虚线
-                            drawLine(
-                                color = Color(0x807E7E7E),
-                                start = Offset(touchX, topY),
-                                end = Offset(touchX, bottomY),
-                                strokeWidth = 1f
-                            )
-
-                            // 会话聚焦点同心圆
-                            val sFrac = (selectedPoint.activeSessions.toFloat() / maxSessions).coerceIn(0f, 1f)
-                            val sY = bottomY - sFrac * chartHeight
-                            drawCircle(appleBlue.copy(alpha = 0.3f), radius = 6f, center = Offset(touchX, sY))
-                            drawCircle(Color.White, radius = 3f, center = Offset(touchX, sY))
-
-                            // 延迟聚焦点同心圆
-                            val lFrac = (selectedPoint.pingLatencyMs.toFloat() / maxLatency).coerceIn(0f, 1f)
-                            val lY = bottomY - lFrac * chartHeight
-                            drawCircle(appleOrange.copy(alpha = 0.3f), radius = 6f, center = Offset(touchX, lY))
-                            drawCircle(Color.White, radius = 3f, center = Offset(touchX, lY))
+                            if (point.hasPingSample) point.pingLatencyMs?.let { value ->
+                                val y = bottomY - (value.toFloat() / maxLatency) * chartHeight
+                                drawCircle(appleOrange, radius = 3f, center = Offset(x, y))
+                            }
                         }
                     }
                 }
@@ -845,8 +867,7 @@ private fun IosDualAxisChartCard(
                 // 触摸悬浮气泡卡片
                 touchFraction?.let { frac ->
                     if (samples.isNotEmpty()) {
-                        val index = ((samples.size - 1) * frac).roundToInt().coerceIn(0, samples.size - 1)
-                        val sample = samples[index]
+                        val sample = closest(frac) ?: samples.first()
 
                         Box(
                             modifier = Modifier
@@ -865,7 +886,7 @@ private fun IosDualAxisChartCard(
                                     color = textPrimary
                                 )
                                 Text(
-                                    text = "会话: ${sample.activeSessions} | 延迟: ${sample.pingLatencyMs}ms",
+                                    text = "会话: ${sample.activeSessions ?: "--"} | 延迟: ${sample.pingLatencyMs?.let { "${it}ms" } ?: "--"}",
                                     fontSize = 9.5.sp,
                                     color = textSecondary
                                 )
@@ -880,9 +901,9 @@ private fun IosDualAxisChartCard(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Text("左轴: 0 ~ $successLimit 会话", fontSize = 10.sp, color = appleBlue)
+                Text("左轴: 0 ~ $maxSessions 会话", fontSize = 10.sp, color = appleBlue)
                 Text("触摸划动拾取数据点", fontSize = 9.5.sp, color = textSecondary)
-                Text("右轴: 延迟 (ms)", fontSize = 10.sp, color = appleOrange)
+                Text("右轴: 0 ~ $maxLatency ms", fontSize = 10.sp, color = appleOrange)
             }
         }
     }
@@ -966,6 +987,31 @@ private fun IosConfigPanel(
                     unfocusedBorderColor = Color(0x20000000)
                 )
             )
+
+            Spacer(Modifier.height(10.dp))
+
+            // 地址族必须显式选择，测试期间不允许静默回退到另一协议。
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                IosTestMode.values().forEach { testMode ->
+                    FilterChip(
+                        selected = config.mode == testMode,
+                        onClick = { onConfigChange(config.copy(mode = testMode)) },
+                        enabled = enabled,
+                        label = {
+                            Text(
+                                text = testMode.label,
+                                fontSize = 10.5.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        },
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
 
             Spacer(Modifier.height(10.dp))
 
@@ -1104,7 +1150,7 @@ private fun IosActionControls(
         }
 
         // 释放持链按钮
-        if (heldCount > 0) {
+        if (!isRunning && heldCount > 0) {
             OutlinedButton(
                 onClick = onRelease,
                 modifier = Modifier
@@ -1349,61 +1395,32 @@ private fun IosLogConsoleCard(
 // 辅助计算：Bufferbloat 与网络诊断建议
 // ==========================================
 private fun generateDiagnosticAdvice(
-    mode: IosAppMode,
+    appMode: IosAppMode,
     protocolStats: IosProtocolStats,
     pingStats: IosPingStats
 ): IosDiagnosticAdvice {
-    if (mode == IosAppMode.UNDERLOAD_PING) {
-        val lat = pingStats.currentLatencyMs
-        val avg = pingStats.avgLatencyMs
-        val lost = pingStats.lostCount
-
-        return if (lost > 2) {
-            IosDiagnosticAdvice(
-                title = "【拥塞丢包】Bufferbloat 导致队列溢出",
-                level = IosLogLevel.ERROR,
-                description = "在并发持链压力下检测到明显的 Ping 丢包，路由器或网关队列已满，发生主动丢包现象。"
-            )
-        } else if (lat > 200 || avg > 150) {
-            IosDiagnosticAdvice(
-                title = "【严重缓冲区膨胀】Bufferbloat 评分: F",
-                level = IosLogLevel.WARN,
-                description = "当并发会话升高时，网络延迟剧烈恶化超 300%。建议在路由器开启 FQ-CoDel 或 CAKE 智能队列算法以抑制高并发排队延迟。"
-            )
-        } else if (lat > 60 || avg > 50) {
-            IosDiagnosticAdvice(
-                title = "【轻度缓冲区膨胀】Bufferbloat 评分: B",
-                level = IosLogLevel.INFO,
-                description = "高负载下延迟有轻度上浮，但整体网络尚可保持平稳，未发生拥塞丢包。"
-            )
-        } else {
-            IosDiagnosticAdvice(
-                title = "【优良网络体质】Bufferbloat 评分: A+",
-                level = IosLogLevel.SUCCESS,
-                description = "在当前并发建连压力下，网络握手与往返延迟始终维持在极低基准线，路由缓冲调度极为优秀。"
-            )
-        }
-    }
-
-    if (protocolStats.totalFailure > 50) {
+    if (appMode != IosAppMode.SESSION_HOLD) {
+        if (pingStats.sentCount == 0) return IosDiagnosticAdvice(
+            "等待探测结果", IosLogLevel.INFO,
+            "收到真实样本后显示统计。主测试测量 TCP 建连耗时，不包含 DNS 解析。"
+        )
+        if (pingStats.lostCount > 0) return IosDiagnosticAdvice(
+            "检测到探测失败", IosLogLevel.WARN,
+            "已完成 ${pingStats.sentCount} 次探测，其中 ${pingStats.lostCount} 次失败。曲线缺口保留失败事件，不能据此单独判定路由器拥塞或 Bufferbloat。"
+        )
         return IosDiagnosticAdvice(
-            title = "【连接受限预警】NAT 会话表可能饱和",
-            level = IosLogLevel.WARN,
-            description = "并发连接出现大量被拒或超时，可能已触碰当前 Wi-Fi 路由器或移动蜂窝运营商分配的 NAT 会话跟踪表上限。"
+            "已接收 ${pingStats.receivedCount} 个 TCP 样本", IosLogLevel.INFO,
+            if (appMode == IosAppMode.UNDERLOAD_PING)
+                "观察建连压力下的延迟变化。本测试未验证带宽饱和，不能给出 Bufferbloat 等级。"
+            else "TCP 建连延迟与 ICMP Ping 口径不同；抖动只统计相邻成功探测，不跨失败样本计算。"
         )
     }
-
-    if (protocolStats.activeSessions > 200) {
-        return IosDiagnosticAdvice(
-            title = "【高并发连接稳态】Socket 维持良好",
-            level = IosLogLevel.SUCCESS,
-            description = "iOS 沙盒环境下已稳定维持超过 200 个并发套接字，网络握手成功率达 98% 以上。"
-        )
-    }
-
+    if (protocolStats.totalFailure > 0) return IosDiagnosticAdvice(
+        "连接测试出现失败", IosLogLevel.WARN,
+        "成功 ${protocolStats.totalSuccess}，失败 ${protocolStats.totalFailure}。请结合日志区分本机资源限制、目标拒绝、超时和路由异常。"
+    )
     return IosDiagnosticAdvice(
-        title = "【就绪就绪】等待开始性能测试",
-        level = IosLogLevel.INFO,
-        description = "点击上方【开始并发压测】即可发起真实的非阻塞 Socket 握手与长连接压测，全方位观测网络承载力。"
+        if (protocolStats.totalSuccess > 0) "连接状态" else "等待开始测试", IosLogLevel.INFO,
+        "累计成功与当前活动连接分别统计；对端关闭会降低活动数。CPS 设置表示每秒尝试建连数。"
     )
 }

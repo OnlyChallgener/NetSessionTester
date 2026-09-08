@@ -12,9 +12,8 @@ enum class PlatformType {
 
 /**
  * 平台毛玻璃与液态玻璃渲染能力特征。
- * iOS 端采用原生液态玻璃 (Native Liquid Glass / UIBlurEffect)，
- * macOS / Windows 具备原生窗口级磨砂透明，
- * Android 及其他环境自动优雅降级为高保真硬件毛玻璃表面。
+ * 能力描述不等于控件已经应用该效果。iOS 26 系统导航采用 Liquid Glass；
+ * 传统 UIBlurEffect 与 Liquid Glass 不等价。各 UI 按平台能力选择外观。
  */
 data class GlassCapabilities(
     val platform: PlatformType,
