@@ -279,6 +279,7 @@ jobs:
           1. 直接双击 NetSessionTester.exe 即可启动（独立自包含单文件，内置高清图标）
           2. 环境要求：已安装 Java 17 或更高版本 (JRE / JDK)；若未安装，双击时将自动弹出指引
           '@ | Set-Content -Path portable-windows\README.txt -Encoding Utf8
+          Copy-Item portable-windows\README.txt package-windows\README.txt
 
           Compress-Archive -Path portable-windows\* -DestinationPath NetSessionTester-Windows-x64-Portable.zip
 

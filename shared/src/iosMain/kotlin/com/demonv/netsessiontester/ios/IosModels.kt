@@ -1,9 +1,21 @@
 package com.demonv.netsessiontester.ios
 
-import platform.Foundation.NSDate
-import platform.Foundation.NSDateFormatter
-import platform.Foundation.NSTimeZone
-import platform.Foundation.timeIntervalSince1970
+import kotlinx.cinterop.ExperimentalForeignApi
+import kotlinx.cinterop.alloc
+import kotlinx.cinterop.memScoped
+import kotlinx.cinterop.ptr
+import platform.posix.gettimeofday
+import platform.posix.timeval
+
+/**
+ * 获取当前毫秒级时间戳 (基于 POSIX 极速时间系统)
+ */
+@OptIn(ExperimentalForeignApi::class)
+fun getEpochMs(): Long = memScoped {
+    val tv = alloc<timeval>()
+    gettimeofday(tv.ptr, null)
+    (tv.tv_sec * 1000L) + (tv.tv_usec / 1000L)
+}
 
 /**
  * iOS 测试模式枚举
@@ -115,18 +127,17 @@ enum class IosLogLevel { INFO, SUCCESS, WARN, ERROR, STAT }
  * 实时诊断日志项
  */
 data class IosLogLine(
-    val timeEpochMs: Long = (NSDate().timeIntervalSince1970 * 1000.0).toLong(),
+    val timeEpochMs: Long = 0L,
     val level: IosLogLevel = IosLogLevel.INFO,
     val text: String
 ) {
     val timeText: String
         get() {
-            val date = NSDate(timeIntervalSince1970 = timeEpochMs / 1000.0)
-            val formatter = NSDateFormatter().apply {
-                dateFormat = "HH:mm:ss"
-                timeZone = NSTimeZone.systemTimeZone
-            }
-            return formatter.stringFromDate(date)
+            val totalSec = if (timeEpochMs > 0) timeEpochMs / 1000 else 0
+            val s = totalSec % 60
+            val m = (totalSec / 60) % 60
+            val h = (totalSec / 3600 + 8) % 24
+            return "${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}"
         }
 }
 

@@ -4,8 +4,6 @@ import kotlinx.cinterop.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import platform.Foundation.NSDate
-import platform.Foundation.timeIntervalSince1970
 import platform.UIKit.UIApplication
 import platform.UIKit.UIImpactFeedbackGenerator
 import platform.UIKit.UIImpactFeedbackStyle
@@ -21,8 +19,6 @@ import kotlin.math.min
 class IosTcpEngine {
     private val socketMutex = Mutex()
     private val heldSocketFds = mutableListOf<Int>()
-
-    @Volatile
     private var isTesting = false
 
     /**
@@ -37,8 +33,13 @@ class IosTcpEngine {
     /**
      * 触发 iOS 系统原生 Taptic Engine 震动反馈
      */
-    fun triggerHapticFeedback(style: Long = 1L) {
+    fun triggerHapticFeedback(isHeavy: Boolean = false) {
         runCatching {
+            val style = if (isHeavy) {
+                UIImpactFeedbackStyle.UIImpactFeedbackStyleHeavy
+            } else {
+                UIImpactFeedbackStyle.UIImpactFeedbackStyleMedium
+            }
             val generator = UIImpactFeedbackGenerator(style)
             generator.prepare()
             generator.impactOccurred()
@@ -64,26 +65,33 @@ class IosTcpEngine {
             val status = getaddrinfo(cleanHost, null, hints.ptr, res.ptr)
             if (status == 0) {
                 var curr = res.value
-                val ipBuf = allocArray<ByteVar>(64)
+                val hostBuf = allocArray<ByteVar>(128)
                 while (curr != null) {
                     val family = curr.pointed.ai_family
                     if (family == AF_INET) {
                         val sin = curr.pointed.ai_addr?.reinterpret<sockaddr_in>()
                         if (sin != null) {
-                            val ntopRes = inet_ntop(AF_INET, sin.pointed.sin_addr.ptr, ipBuf, 64u)
-                            if (ntopRes != null) {
-                                val ip = ntopRes.toKString()
-                                if (ip !in v4List) v4List.add(ip)
-                            }
+                            val addrVal = sin.pointed.sin_addr.s_addr
+                            val b0 = addrVal and 0xFFu
+                            val b1 = (addrVal shr 8) and 0xFFu
+                            val b2 = (addrVal shr 16) and 0xFFu
+                            val b3 = (addrVal shr 24) and 0xFFu
+                            val ip = "$b0.$b1.$b2.$b3"
+                            if (ip !in v4List) v4List.add(ip)
                         }
                     } else if (family == AF_INET6) {
-                        val sin6 = curr.pointed.ai_addr?.reinterpret<sockaddr_in6>()
-                        if (sin6 != null) {
-                            val ntopRes = inet_ntop(AF_INET6, sin6.pointed.sin6_addr.ptr, ipBuf, 64u)
-                            if (ntopRes != null) {
-                                val ip = ntopRes.toKString()
-                                if (ip !in v6List) v6List.add(ip)
-                            }
+                        val nameRet = getnameinfo(
+                            curr.pointed.ai_addr,
+                            curr.pointed.ai_addrlen,
+                            hostBuf,
+                            128u,
+                            null,
+                            0u,
+                            NI_NUMERICHOST
+                        )
+                        if (nameRet == 0) {
+                            val ip = hostBuf.toKString()
+                            if (ip !in v6List) v6List.add(ip)
                         }
                     }
                     curr = curr.pointed.ai_next
@@ -141,11 +149,11 @@ class IosTcpEngine {
                     val flags = fcntl(fd, F_GETFL, 0)
                     fcntl(fd, F_SETFL, flags or O_NONBLOCK)
 
-                    val t0 = (NSDate().timeIntervalSince1970 * 1000.0).toLong()
+                    val t0 = getEpochMs()
                     val connRet = connect(fd, targetAddrInfo.pointed.ai_addr, targetAddrInfo.pointed.ai_addrlen)
 
                     if (connRet == 0) {
-                        val t1 = (NSDate().timeIntervalSince1970 * 1000.0).toLong()
+                        val t1 = getEpochMs()
                         resultFd = fd
                         latencyMs = (t1 - t0).toInt().coerceAtLeast(1)
                     } else if (errno == EINPROGRESS) {
@@ -162,7 +170,7 @@ class IosTcpEngine {
                             getsockopt(fd, SOL_SOCKET, SO_ERROR, soErr.ptr, errLen.ptr)
 
                             if (soErr.value == 0) {
-                                val t1 = (NSDate().timeIntervalSince1970 * 1000.0).toLong()
+                                val t1 = getEpochMs()
                                 resultFd = fd
                                 latencyMs = (t1 - t0).toInt().coerceAtLeast(1)
                             } else {
@@ -194,7 +202,7 @@ class IosTcpEngine {
         val config = rawConfig.normalized()
         isTesting = true
         setScreenKeepAwake(true)
-        triggerHapticFeedback(1L)
+        triggerHapticFeedback(false)
 
         var ipv4Stats: IosProtocolStats? = null
         var ipv6Stats: IosProtocolStats? = null
@@ -223,7 +231,7 @@ class IosTcpEngine {
                 IosTestMode.IPV4_THEN_IPV6 -> {
                     ipv4Stats = runOneProtocol(config.copy(mode = IosTestMode.IPV4_ONLY), IosIpProtocol.IPV4, onStats, onLog)
                     val released = releaseHeldSockets()
-                    onLog(IosLogLine(level = IosLogLevel.WARN, text = "IPv4 压测结束并释放 $released 条连接，切换 IPv6 压测..."))
+                    onLog(IosLogLine(timeEpochMs = getEpochMs(), level = IosLogLevel.WARN, text = "IPv4 压测结束并释放 $released 条连接，切换 IPv6 压测..."))
                     delay(300L)
                     ipv6Stats = runOneProtocol(config.copy(mode = IosTestMode.IPV6_ONLY), IosIpProtocol.IPV6, onStats, onLog)
                 }
@@ -232,7 +240,7 @@ class IosTcpEngine {
             isTesting = false
             pingJob?.cancel()
             setScreenKeepAwake(false)
-            triggerHapticFeedback(0L)
+            triggerHapticFeedback(false)
             if (!config.keepConnectionsAfterStop) {
                 releaseHeldSockets()
             }
@@ -248,14 +256,14 @@ class IosTcpEngine {
         onLog: suspend (IosLogLine) -> Unit
     ): IosProtocolStats = coroutineScope {
         val preferIpv6 = (protocol == IosIpProtocol.IPV6)
-        onLog(IosLogLine(level = IosLogLevel.INFO, text = "开始 ${protocol.label} 握手压测: ${config.host}:${config.port}"))
+        onLog(IosLogLine(timeEpochMs = getEpochMs(), level = IosLogLevel.INFO, text = "开始 ${protocol.label} 握手压测: ${config.host}:${config.port}"))
 
         val resolveRes = resolveHost(config.host)
         val targetIps = if (preferIpv6) resolveRes.ipv6 else resolveRes.ipv4
         if (targetIps.isEmpty()) {
-            onLog(IosLogLine(level = IosLogLevel.WARN, text = "未发现 ${protocol.label} 对应解析 IP，尝试使用默认路由握手"))
+            onLog(IosLogLine(timeEpochMs = getEpochMs(), level = IosLogLevel.WARN, text = "未发现 ${protocol.label} 对应解析 IP，尝试使用默认路由握手"))
         } else {
-            onLog(IosLogLine(level = IosLogLevel.INFO, text = "${protocol.label} 解析目标: ${targetIps.joinToString(", ")}"))
+            onLog(IosLogLine(timeEpochMs = getEpochMs(), level = IosLogLevel.INFO, text = "${protocol.label} 解析目标: ${targetIps.joinToString(", ")}"))
         }
 
         var activeSessions = 0
@@ -274,7 +282,7 @@ class IosTcpEngine {
         )
         onStats(stats)
 
-        var lastSecondMark = (NSDate().timeIntervalSince1970 * 1000.0).toLong()
+        var lastSecondMark = getEpochMs()
         var batchSuccessInSecond = 0
 
         while (isActive && isTesting && totalSuccess < config.successLimit && totalFailure < config.failureLimit) {
@@ -309,7 +317,7 @@ class IosTcpEngine {
                 }
             }
 
-            val now = (NSDate().timeIntervalSince1970 * 1000.0).toLong()
+            val now = getEpochMs()
             val cps = if (now - lastSecondMark >= 1000L) {
                 val currentCps = (batchSuccessInSecond * 1000.0 / (now - lastSecondMark)).toInt()
                 lastSecondMark = now
@@ -337,6 +345,7 @@ class IosTcpEngine {
 
             if (totalSuccess % 100 < config.batchSize || totalFailure % 50 == 0) {
                 onLog(IosLogLine(
+                    timeEpochMs = getEpochMs(),
                     level = if (totalFailure > 0) IosLogLevel.WARN else IosLogLevel.STAT,
                     text = "活跃: $activeSessions | 成功: $totalSuccess | 失败: $totalFailure | 均延: ${avgLatency}ms | CPS: $cps"
                 ))
@@ -347,7 +356,7 @@ class IosTcpEngine {
 
         stats = stats.copy(phase = if (config.keepConnectionsAfterStop) "连接已维持" else "测试完成")
         onStats(stats)
-        onLog(IosLogLine(level = IosLogLevel.SUCCESS, text = "${protocol.label} 压测结束: 稳定维持 $activeSessions 链路, 峰值 $maxStable"))
+        onLog(IosLogLine(timeEpochMs = getEpochMs(), level = IosLogLevel.SUCCESS, text = "${protocol.label} 压测结束: 稳定维持 $activeSessions 链路, 峰值 $maxStable"))
         stats
     }
 
@@ -362,7 +371,7 @@ class IosTcpEngine {
     ) = coroutineScope {
         isTesting = true
         setScreenKeepAwake(true)
-        triggerHapticFeedback(1L)
+        triggerHapticFeedback(false)
 
         val cleanHost = host.trim().removePrefix("[").removeSuffix("]").ifBlank { "www.baidu.com" }
         var sent = 0
@@ -375,7 +384,7 @@ class IosTcpEngine {
         var jitterSum = 0.0
         var jitterCount = 0
 
-        onLog(IosLogLine(level = IosLogLevel.INFO, text = "启动独立高频 Ping 探测: $cleanHost:$port"))
+        onLog(IosLogLine(timeEpochMs = getEpochMs(), level = IosLogLevel.INFO, text = "启动独立高频 Ping 探测: $cleanHost:$port"))
 
         try {
             while (isActive && isTesting) {
@@ -417,7 +426,7 @@ class IosTcpEngine {
                         phase = "探测中"
                     )
                     onStats(pingStats)
-                    onLog(IosLogLine(level = IosLogLevel.STAT, text = "Ping #$sent: 耗时=${rtt}ms, 均值=${avg}ms, 抖动=${jitter}ms"))
+                    onLog(IosLogLine(timeEpochMs = getEpochMs(), level = IosLogLevel.STAT, text = "Ping #$sent: 耗时=${rtt}ms, 均值=${avg}ms, 抖动=${jitter}ms"))
                 } else {
                     lost++
                     val lossPct = (lost.toFloat() / sent) * 100f
@@ -438,7 +447,7 @@ class IosTcpEngine {
                         phase = "超时丢包"
                     )
                     onStats(pingStats)
-                    onLog(IosLogLine(level = IosLogLevel.ERROR, text = "Ping #$sent: 请求超时无响应 (丢包率: ${lossPct.toInt()}%)"))
+                    onLog(IosLogLine(timeEpochMs = getEpochMs(), level = IosLogLevel.ERROR, text = "Ping #$sent: 请求超时无响应 (丢包率: ${lossPct.toInt()}%)"))
                 }
 
                 delay(600L)
@@ -446,7 +455,7 @@ class IosTcpEngine {
         } finally {
             isTesting = false
             setScreenKeepAwake(false)
-            triggerHapticFeedback(0L)
+            triggerHapticFeedback(false)
         }
     }
 

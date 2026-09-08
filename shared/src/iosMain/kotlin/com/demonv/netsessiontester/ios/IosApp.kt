@@ -130,12 +130,12 @@ fun IosApp() {
         if (isRunning) return
         isRunning = true
         chartSamples = emptyList()
-        val startEpoch = platform.Foundation.NSDate().timeIntervalSince1970
+        val startEpoch = getEpochMs() / 1000L
 
         chartTickerJob = scope.launch {
             while (isRunning) {
                 delay(1000L)
-                val elapsed = (platform.Foundation.NSDate().timeIntervalSince1970 - startEpoch).toInt()
+                val elapsed = ((getEpochMs() / 1000L) - startEpoch).toInt()
                 val pt = IosDualChartPoint(
                     elapsedSec = elapsed,
                     activeSessions = protocolStats.activeSessions,
@@ -176,12 +176,12 @@ fun IosApp() {
         if (isRunning) return
         isRunning = true
         chartSamples = emptyList()
-        val startEpoch = platform.Foundation.NSDate().timeIntervalSince1970
+        val startEpoch = getEpochMs() / 1000L
 
         chartTickerJob = scope.launch {
             while (isRunning) {
                 delay(1000L)
-                val elapsed = (platform.Foundation.NSDate().timeIntervalSince1970 - startEpoch).toInt()
+                val elapsed = ((getEpochMs() / 1000L) - startEpoch).toInt()
                 val pt = IosDualChartPoint(
                     elapsedSec = elapsed,
                     activeSessions = 0,
@@ -266,7 +266,7 @@ fun IosApp() {
                 textSecondary = textSecondary,
                 onSelectMode = { newMode ->
                     appMode = newMode
-                    engine.triggerHapticFeedback(1L)
+                    engine.triggerHapticFeedback(false)
                 }
             )
 
