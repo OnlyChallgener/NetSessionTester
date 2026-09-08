@@ -1904,3 +1904,95 @@ internal fun DesktopLogItem(line: LogLine) {
 }
 
 private fun formatLatency(value: Int?): String = value?.let { "${it} ms" } ?: "—"
+
+/**
+ * 版本检查与更新日志弹窗
+ */
+@Composable
+private fun DesktopUpdateDialog(
+    onDismiss: () -> Unit
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        Box(
+            modifier = Modifier
+                .width(480.dp)
+                .clip(RoundedCornerShape(14.dp))
+                .background(CardBg)
+                .border(0.5.dp, CardBorder, RoundedCornerShape(14.dp))
+                .padding(20.dp)
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .size(28.dp)
+                            .background(AppleBlue.copy(alpha = 0.12f), RoundedCornerShape(7.dp)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text("🚀", fontSize = 14.sp)
+                    }
+                    Spacer(Modifier.width(10.dp))
+                    Column {
+                        Text("NetSessionTester 版本更新", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
+                        Text("当前版本: $CURRENT_APP_VERSION · 状态: 已是最新预发行版", fontSize = 11.sp, color = TextSecondary)
+                    }
+                }
+
+                HorizontalDivider(color = CardBorder)
+
+                Text("✨ 本次核心升级与更新日志：", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AppleBlue)
+
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(InputBg)
+                        .padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    ChangelogItem("⚡", "顶栏 4-Tab 全景融合导航", "在并发压测、独立 Ping、联动诊断与测试历史间秒级平滑直达，保持上下文数据。")
+                    ChangelogItem("📈", "紧凑动态自适应量程图表", "自动适应小数值与大幅波动，告别死板直线，微小网络抖动清晰呈现。")
+                    ChangelogItem("🔍", "交互滚轮缩放与平移总览", "支持鼠标滚轮局部放大 (1x~10x)、按住拖拽平移、双击全景复位。")
+                    ChangelogItem("🎯", "鼠标悬浮跟随卡片", "数据探针直接在鼠标位置跟随吸附气泡，不再局限于右上角。")
+                    ChangelogItem("🛡", "独立 Ping 通道与 DNS 预热", "专职调度通道隔离高并发挤占，网络 RTT 与 DNS 冷解析彻底剥离。")
+                    ChangelogItem("🎛", "8 核心指标大盘 & 快速预设", "扩充 8 项性能瓷片与百度/腾讯/Cloudflare/网关一键点选。")
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    TextButton(onClick = onDismiss) {
+                        Text("稍后提醒", fontSize = 12.sp, color = TextSecondary)
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    Button(
+                        onClick = {
+                            runCatching {
+                                Desktop.getDesktop().browse(URI(GITHUB_REPO_URL))
+                            }
+                            onDismiss()
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = AppleBlue),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Text("前往 GitHub Releases 下载", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ChangelogItem(icon: String, title: String, desc: String) {
+    Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(icon, fontSize = 11.sp)
+        Column {
+            Text(title, fontSize = 11.5.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
+            Text(desc, fontSize = 10.5.sp, lineHeight = 15.sp, color = TextSecondary)
+        }
+    }
+}
+
