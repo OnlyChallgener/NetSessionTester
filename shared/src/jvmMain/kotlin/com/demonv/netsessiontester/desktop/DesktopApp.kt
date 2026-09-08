@@ -6,6 +6,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -47,12 +48,16 @@ import com.demonv.netsessiontester.history.DesktopHistoryStore
 import kotlinx.coroutines.*
 import java.awt.Cursor
 import java.awt.Window
+import kotlin.math.abs
+import kotlin.math.max
+import kotlin.math.min
 
 internal val AppleBlue = Color(0xFF007AFF)
 internal val AppleGreen = Color(0xFF34C759)
 internal val AppleOrange = Color(0xFFFF9500)
 internal val AppleRed = Color(0xFFFF3B30)
 internal val ApplePurple = Color(0xFF5856D6)
+internal val AppleCyan = Color(0xFF32ADE6)
 internal val WindowBg = Color(0xFFF3F3F5)
 internal val CardBg = Color(0xFFFFFFFF)
 internal val CardBorder = Color(0x18000000)
@@ -60,6 +65,13 @@ internal val TextPrimary = Color(0xFF1C1C1E)
 internal val TextSecondary = Color(0xFF8E8E93)
 internal val InputBg = Color(0xFFF6F6F8)
 internal val InputBorder = Color(0xFFDCDCE2)
+
+enum class DesktopTab(val label: String, val appMode: AppMode? = null, val isHistory: Boolean = false) {
+    SESSION_HOLD("并发压测", AppMode.SESSION_HOLD, false),
+    PING_STANDALONE("独立 Ping", AppMode.PING_STANDALONE, false),
+    UNDERLOAD_PING("联动诊断", AppMode.UNDERLOAD_PING, false),
+    HISTORY("测试历史", null, true)
+}
 
 @Composable
 fun WindowScope.DesktopApp(
@@ -87,6 +99,8 @@ fun WindowScope.DesktopApp(
     var failureLimit by remember { mutableStateOf(2000) }
     var keepConnections by remember { mutableStateOf(true) }
     var pingIntervalMs by remember { mutableStateOf(500L) }
+    var timeoutMs by remember { mutableStateOf(1500) }
+    var intervalMs by remember { mutableStateOf(50L) }
 
     var isRunning by remember { mutableStateOf(false) }
     var currentStats by remember { mutableStateOf(ProtocolStats(IpProtocol.IPV4)) }
@@ -132,7 +146,6 @@ fun WindowScope.DesktopApp(
         }
     }
 
-    // Completed samples drive the chart. An idle timer must never invent successful probes.
     DisposableEffect(sessionTester, pingTester) {
         onDispose {
             testJob?.cancel()
@@ -193,8 +206,9 @@ fun WindowScope.DesktopApp(
         val selectedInterval = pingIntervalMs
         val config = SessionConfig(
             host = host.trim(), port = targetPort, mode = testMode,
-            batchSize = targetCps, successLimit = successLimit,
-            failureLimit = failureLimit, keepConnectionsAfterStop = keepConnections
+            batchSize = targetCps, intervalMs = intervalMs, timeoutMs = timeoutMs,
+            successLimit = successLimit, failureLimit = failureLimit,
+            keepConnectionsAfterStop = keepConnections
         ).normalized()
         val id = ++runId
         releaseOnStop = false
@@ -294,7 +308,6 @@ fun WindowScope.DesktopApp(
         }
     }
 
-    // 日志平滑滚动
     LaunchedEffect(logs.size) {
         if (logs.isNotEmpty()) {
             logListState.animateScrollToItem(logs.size - 1)
@@ -316,7 +329,7 @@ fun WindowScope.DesktopApp(
             )
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
-            // 1. 顶栏：完全融合式现代标题栏 (消除原生黑边与双层顶栏)
+            // 1. 顶栏：完全融合式现代标题栏 (4-Tab 统一分段器)
             DesktopTitleBar(
                 appMode = appMode,
                 isRunning = isRunning || isStopping,
@@ -350,52 +363,56 @@ fun WindowScope.DesktopApp(
                     onBack = { historyVisible = false }
                 )
             } else {
-            // 2. 主双栏结构 (左侧紧凑表单，右侧数据仪表盘)
-            Row(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .weight(1f)
-                    .padding(12.dp),
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                // 左侧紧凑控制表单 (330dp)
-                DesktopControlCard(
-                    modifier = Modifier.width(330.dp).fillMaxHeight(),
-                    appMode = appMode,
-                    host = host,
-                    port = port,
-                    testMode = testMode,
-                    targetCps = targetCps,
-                    successLimit = successLimit,
-                    failureLimit = failureLimit,
-                    keepConnections = keepConnections,
-                    pingIntervalMs = pingIntervalMs,
-                    isRunning = isRunning || isStopping,
-                    onHostChange = { if (!isRunning && !isStopping) host = it },
-                    onPortChange = { if (!isRunning && !isStopping) port = it },
-                    onTestModeChange = { if (!isRunning && !isStopping) testMode = it },
-                    onCpsChange = { if (!isRunning && !isStopping) targetCps = it },
-                    onSuccessLimitChange = { if (!isRunning && !isStopping) successLimit = it },
-                    onFailureLimitChange = { if (!isRunning && !isStopping) failureLimit = it },
-                    onKeepChange = { if (!isRunning && !isStopping) keepConnections = it },
-                    onPingIntervalChange = { if (!isRunning && !isStopping) pingIntervalMs = it },
-                    onStartStop = { if (isRunning) stopTest() else startTest() },
-                    onRelease = { stopTest(release = true) }
-                )
+                // 2. 主双栏结构 (左侧紧凑表单，右侧数据仪表盘)
+                Row(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .weight(1f)
+                        .padding(12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    // 左侧紧凑控制表单 (330dp)
+                    DesktopControlCard(
+                        modifier = Modifier.width(330.dp).fillMaxHeight(),
+                        appMode = appMode,
+                        host = host,
+                        port = port,
+                        testMode = testMode,
+                        targetCps = targetCps,
+                        timeoutMs = timeoutMs,
+                        intervalMs = intervalMs,
+                        successLimit = successLimit,
+                        failureLimit = failureLimit,
+                        keepConnections = keepConnections,
+                        pingIntervalMs = pingIntervalMs,
+                        isRunning = isRunning || isStopping,
+                        onHostChange = { if (!isRunning && !isStopping) host = it },
+                        onPortChange = { if (!isRunning && !isStopping) port = it },
+                        onTestModeChange = { if (!isRunning && !isStopping) testMode = it },
+                        onCpsChange = { if (!isRunning && !isStopping) targetCps = it },
+                        onTimeoutChange = { if (!isRunning && !isStopping) timeoutMs = it },
+                        onIntervalChange = { if (!isRunning && !isStopping) intervalMs = it },
+                        onSuccessLimitChange = { if (!isRunning && !isStopping) successLimit = it },
+                        onFailureLimitChange = { if (!isRunning && !isStopping) failureLimit = it },
+                        onKeepChange = { if (!isRunning && !isStopping) keepConnections = it },
+                        onPingIntervalChange = { if (!isRunning && !isStopping) pingIntervalMs = it },
+                        onStartStop = { if (isRunning) stopTest() else startTest() },
+                        onRelease = { stopTest(release = true) }
+                    )
 
-                // 右侧专业数据仪表盘 (弹性宽屏)
-                DesktopDashboardCard(
-                    modifier = Modifier.weight(1f).fillMaxHeight(),
-                    appMode = appMode,
-                    isRunning = isRunning,
-                    currentStats = currentStats,
-                    currentPingStats = currentPingStats,
-                    chartSamples = chartSamples,
-                    successLimit = successLimit,
-                    logs = logs,
-                    logListState = logListState
-                )
-            }
+                    // 右侧专业数据仪表盘 (弹性宽屏)
+                    DesktopDashboardCard(
+                        modifier = Modifier.weight(1f).fillMaxHeight(),
+                        appMode = appMode,
+                        isRunning = isRunning,
+                        currentStats = currentStats,
+                        currentPingStats = currentPingStats,
+                        chartSamples = chartSamples,
+                        successLimit = successLimit,
+                        logs = logs,
+                        logListState = logListState
+                    )
+                }
             }
         }
 
@@ -407,7 +424,7 @@ fun WindowScope.DesktopApp(
 }
 
 /**
- * 融合式现代标题栏 (参考 Antigravity IDE 质感)
+ * 融合式现代标题栏 (4-Tab 统一分段器，支持无缝切换测试与历史)
  */
 @Composable
 private fun DesktopTitleBar(
@@ -441,120 +458,116 @@ private fun DesktopTitleBar(
             .padding(start = 12.dp, end = if (isWindows) 0.dp else 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-            // 应用小波形图标
-            Box(
-                modifier = Modifier
-                    .size(24.dp)
-                    .background(AppleBlue, RoundedCornerShape(6.dp)),
-                contentAlignment = Alignment.Center
-            ) {
-                Canvas(modifier = Modifier.size(14.dp)) {
-                    val p = Path().apply {
-                        moveTo(0f, size.height * 0.5f)
-                        lineTo(size.width * 0.22f, size.height * 0.5f)
-                        lineTo(size.width * 0.40f, size.height * 0.12f)
-                        lineTo(size.width * 0.58f, size.height * 0.88f)
-                        lineTo(size.width * 0.74f, size.height * 0.5f)
-                        lineTo(size.width, size.height * 0.5f)
-                    }
-                    drawPath(p, color = Color.White, style = Stroke(width = 2f, cap = StrokeCap.Round))
+        // 应用小波形图标
+        Box(
+            modifier = Modifier
+                .size(24.dp)
+                .background(AppleBlue, RoundedCornerShape(6.dp)),
+            contentAlignment = Alignment.Center
+        ) {
+            Canvas(modifier = Modifier.size(14.dp)) {
+                val p = Path().apply {
+                    moveTo(0f, size.height * 0.5f)
+                    lineTo(size.width * 0.22f, size.height * 0.5f)
+                    lineTo(size.width * 0.40f, size.height * 0.12f)
+                    lineTo(size.width * 0.58f, size.height * 0.88f)
+                    lineTo(size.width * 0.74f, size.height * 0.5f)
+                    lineTo(size.width, size.height * 0.5f)
                 }
-            }
-
-            Spacer(Modifier.width(8.dp))
-
-            Text(
-                text = "NetSessionTester",
-                fontSize = 13.5.sp,
-                fontWeight = FontWeight.Bold,
-                color = TextPrimary
-            )
-            Spacer(Modifier.width(6.dp))
-            Box(
-                modifier = Modifier
-                    .background(AppleBlue.copy(alpha = 0.10f), RoundedCornerShape(4.dp))
-                    .padding(horizontal = 5.dp, vertical = 1.5.dp)
-            ) {
-                Text("v1.0.22-beta1", fontSize = 9.5.sp, fontWeight = FontWeight.SemiBold, color = AppleBlue)
-            }
-
-            Spacer(Modifier.width(16.dp))
-
-            // 核心模式切换分段器
-            Row(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(6.dp))
-                    .background(WindowBg)
-                    .padding(2.dp),
-                horizontalArrangement = Arrangement.spacedBy(2.dp)
-            ) {
-                AppMode.entries.forEach { mode ->
-                    val selected = !historyVisible && appMode == mode
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(5.dp))
-                            .background(if (selected) CardBg else Color.Transparent)
-                            .border(
-                                if (selected) 0.5.dp else 0.dp,
-                                if (selected) Color(0x20000000) else Color.Transparent,
-                                RoundedCornerShape(5.dp)
-                            )
-                            .clickable(enabled = !isRunning) { onModeChange(mode) }
-                            .padding(horizontal = 10.dp, vertical = 4.dp)
-                    ) {
-                        Text(
-                            text = mode.label,
-                            fontSize = 11.sp,
-                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
-                            color = if (selected) AppleBlue else TextSecondary
-                        )
-                    }
-                }
-            }
-
-            Spacer(Modifier.width(8.dp))
-            Box(
-                Modifier.clip(RoundedCornerShape(6.dp))
-                    .background(if (historyVisible) AppleBlue.copy(alpha = 0.10f) else Color.Transparent)
-                    .clickable { onHistoryChange(!historyVisible) }
-                    .padding(horizontal = 12.dp, vertical = 6.dp)
-            ) {
-                Text("历史", fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
-                    color = if (historyVisible) AppleBlue else TextSecondary)
-            }
-
-            Spacer(Modifier.weight(1f)) // 可拖动空白区域
-
-            // 运行状态指示器
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.padding(end = 12.dp)
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(7.dp)
-                        .background(if (isRunning) AppleGreen else TextSecondary.copy(alpha = 0.5f), CircleShape)
-                )
-                Spacer(Modifier.width(6.dp))
-                Text(
-                    text = if (isRunning) "运行中" else "待命就绪",
-                    fontSize = 11.5.sp,
-                    fontWeight = FontWeight.Medium,
-                    color = if (isRunning) AppleGreen else TextSecondary
-                )
-            }
-
-            // Windows 平台专属：原生样式融合三键
-            if (isWindows) {
-                DesktopWindowControls(
-                    isMaximized = isMaximized,
-                    onMinimize = onMinimize,
-                    onMaximizeToggle = onMaximizeToggle,
-                    onClose = onClose
-                )
+                drawPath(p, color = Color.White, style = Stroke(width = 2f, cap = StrokeCap.Round))
             }
         }
+
+        Spacer(Modifier.width(8.dp))
+
+        Text(
+            text = "NetSessionTester",
+            fontSize = 13.5.sp,
+            fontWeight = FontWeight.Bold,
+            color = TextPrimary
+        )
+        Spacer(Modifier.width(6.dp))
+        Box(
+            modifier = Modifier
+                .background(AppleBlue.copy(alpha = 0.10f), RoundedCornerShape(4.dp))
+                .padding(horizontal = 5.dp, vertical = 1.5.dp)
+        ) {
+            Text("v1.0.22-beta1", fontSize = 9.5.sp, fontWeight = FontWeight.SemiBold, color = AppleBlue)
+        }
+
+        Spacer(Modifier.width(16.dp))
+
+        // 统一 4-Tab 分段器 (并发压测 | 独立 Ping | 联动诊断 | 测试历史)
+        Row(
+            modifier = Modifier
+                .clip(RoundedCornerShape(6.dp))
+                .background(WindowBg)
+                .padding(2.dp),
+            horizontalArrangement = Arrangement.spacedBy(2.dp)
+        ) {
+            DesktopTab.values().forEach { tab ->
+                val selected = if (tab.isHistory) historyVisible else (!historyVisible && appMode == tab.appMode)
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(5.dp))
+                        .background(if (selected) CardBg else Color.Transparent)
+                        .border(
+                            if (selected) 0.5.dp else 0.dp,
+                            if (selected) Color(0x20000000) else Color.Transparent,
+                            RoundedCornerShape(5.dp)
+                        )
+                        .clickable {
+                            if (tab.isHistory) {
+                                onHistoryChange(true)
+                            } else {
+                                onHistoryChange(false)
+                                onModeChange(tab.appMode!!)
+                            }
+                        }
+                        .padding(horizontal = 10.dp, vertical = 4.dp)
+                ) {
+                    Text(
+                        text = tab.label,
+                        fontSize = 11.sp,
+                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                        color = if (selected) AppleBlue else TextSecondary
+                    )
+                }
+            }
+        }
+
+        Spacer(Modifier.weight(1f))
+
+        // 运行状态指示器
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(end = 12.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(7.dp)
+                    .background(if (isRunning) AppleGreen else TextSecondary.copy(alpha = 0.5f), CircleShape)
+            )
+            Spacer(Modifier.width(6.dp))
+            Text(
+                text = if (isRunning) "运行中" else "待命就绪",
+                fontSize = 11.5.sp,
+                fontWeight = FontWeight.Medium,
+                color = if (isRunning) AppleGreen else TextSecondary
+            )
+        }
+
+        // Windows 平台专属：原生样式融合三键
+        if (isWindows) {
+            DesktopWindowControls(
+                isMaximized = isMaximized,
+                onMinimize = onMinimize,
+                onMaximizeToggle = onMaximizeToggle,
+                onClose = onClose
+            )
+        }
     }
+}
 
 /**
  * Windows 现代窗口控制三键 (最小化、最大化/还原、关闭)
@@ -801,7 +814,7 @@ private fun BoxScope.WindowResizeBorders(
 }
 
 /**
- * 左侧紧凑表单面板 (基于桌面紧凑规范，彻底淘汰 Android 粗框 OutlinedTextField)
+ * 左侧紧凑配置面板 (扩充快速预设、超时时间、步进周期与端口快捷点选)
  */
 @Composable
 private fun DesktopControlCard(
@@ -811,6 +824,8 @@ private fun DesktopControlCard(
     port: String,
     testMode: TestMode,
     targetCps: Int,
+    timeoutMs: Int,
+    intervalMs: Long,
     successLimit: Int,
     failureLimit: Int,
     keepConnections: Boolean,
@@ -820,6 +835,8 @@ private fun DesktopControlCard(
     onPortChange: (String) -> Unit,
     onTestModeChange: (TestMode) -> Unit,
     onCpsChange: (Int) -> Unit,
+    onTimeoutChange: (Int) -> Unit,
+    onIntervalChange: (Long) -> Unit,
     onSuccessLimitChange: (Int) -> Unit,
     onFailureLimitChange: (Int) -> Unit,
     onKeepChange: (Boolean) -> Unit,
@@ -833,13 +850,44 @@ private fun DesktopControlCard(
             .background(CardBg)
             .border(0.5.dp, CardBorder, RoundedCornerShape(12.dp))
             .padding(14.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp)
+        verticalArrangement = Arrangement.spacedBy(9.dp)
     ) {
         Text("配置参数", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
 
-        // 目标地址与端口 (紧凑同行)
+        // 快捷预设目标胶囊
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            val presets = listOf(
+                "百度" to "www.baidu.com",
+                "腾讯" to "www.qq.com",
+                "Cloudflare" to "1.1.1.1",
+                "网关" to "192.168.1.1"
+            )
+            presets.forEach { (label, presetHost) ->
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(5.dp))
+                        .background(if (host == presetHost) AppleBlue.copy(alpha = 0.12f) else InputBg)
+                        .clickable(enabled = !isRunning) { onHostChange(presetHost) }
+                        .padding(vertical = 4.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = label,
+                        fontSize = 10.5.sp,
+                        fontWeight = if (host == presetHost) FontWeight.Bold else FontWeight.Normal,
+                        color = if (host == presetHost) AppleBlue else TextSecondary
+                    )
+                }
+            }
+        }
+
+        // 目标地址与端口
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("目标", fontSize = 11.5.sp, color = TextSecondary, modifier = Modifier.width(42.dp))
+            Text("目标", fontSize = 11.5.sp, color = TextSecondary, modifier = Modifier.width(36.dp))
             DesktopCompactInput(
                 value = host,
                 onValueChange = onHostChange,
@@ -852,51 +900,69 @@ private fun DesktopControlCard(
                 onValueChange = onPortChange,
                 placeholder = "端口",
                 keyboardType = KeyboardType.Number,
-                modifier = Modifier.width(58.dp)
+                modifier = Modifier.width(54.dp)
             )
         }
 
-        run {
-            // 网络模式选择
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("协议", fontSize = 11.5.sp, color = TextSecondary, modifier = Modifier.width(42.dp))
-                Row(
+        // 快捷常用端口
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("常用端口", fontSize = 10.sp, color = TextSecondary, modifier = Modifier.width(48.dp))
+            listOf("80", "443", "8080", "22").forEach { p ->
+                val sel = port == p
+                Box(
                     modifier = Modifier
-                        .weight(1f)
-                        .clip(RoundedCornerShape(6.dp))
-                        .background(InputBg)
-                        .padding(2.dp),
-                    horizontalArrangement = Arrangement.spacedBy(2.dp)
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(if (sel) AppleBlue.copy(alpha = 0.12f) else InputBg)
+                        .clickable(enabled = !isRunning) { onPortChange(p) }
+                        .padding(horizontal = 7.dp, vertical = 2.dp)
                 ) {
-                    TestMode.entries.filter { appMode != AppMode.PING_STANDALONE || it != TestMode.IPV4_THEN_IPV6 }.forEach { item ->
-                        val selected = testMode == item
-                        Box(
-                            modifier = Modifier
-                                .weight(1f)
-                                .clip(RoundedCornerShape(4.dp))
-                                .background(if (selected) CardBg else Color.Transparent)
-                                .clickable(enabled = !isRunning) { onTestModeChange(item) }
-                                .padding(vertical = 4.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                item.label,
-                                fontSize = 10.5.sp,
-                                fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
-                                color = if (selected) AppleBlue else TextSecondary
-                            )
-                        }
+                    Text(p, fontSize = 9.5.sp, color = if (sel) AppleBlue else TextSecondary, fontWeight = if (sel) FontWeight.Bold else FontWeight.Normal)
+                }
+            }
+        }
+
+        // 网络协议选择
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("协议", fontSize = 11.5.sp, color = TextSecondary, modifier = Modifier.width(36.dp))
+            Row(
+                modifier = Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(InputBg)
+                    .padding(2.dp),
+                horizontalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                TestMode.entries.filter { appMode != AppMode.PING_STANDALONE || it != TestMode.IPV4_THEN_IPV6 }.forEach { item ->
+                    val selected = testMode == item
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(if (selected) CardBg else Color.Transparent)
+                            .clickable(enabled = !isRunning) { onTestModeChange(item) }
+                            .padding(vertical = 3.5.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            item.label,
+                            fontSize = 10.sp,
+                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                            color = if (selected) AppleBlue else TextSecondary
+                        )
                     }
                 }
             }
-
         }
 
         if (appMode != AppMode.PING_STANDALONE) {
             // 发射速率 CPS
             Column {
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text("目标速率", fontSize = 11.5.sp, color = TextSecondary)
+                    Text("目标速率", fontSize = 11.sp, color = TextSecondary)
                     Text("$targetCps CPS", fontSize = 11.5.sp, fontWeight = FontWeight.Bold, color = AppleBlue)
                 }
                 Slider(
@@ -905,13 +971,13 @@ private fun DesktopControlCard(
                     onValueChange = { onCpsChange(it.toInt()) },
                     valueRange = 50f..5000f,
                     steps = 19,
-                    modifier = Modifier.fillMaxWidth().height(28.dp)
+                    modifier = Modifier.fillMaxWidth().height(26.dp)
                 )
             }
 
-            // 目标连接数与上限
+            // 目标连接数与失败上限
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("目标", fontSize = 11.5.sp, color = TextSecondary, modifier = Modifier.width(42.dp))
+                Text("目标", fontSize = 11.5.sp, color = TextSecondary, modifier = Modifier.width(36.dp))
                 DesktopCompactInput(
                     value = successLimit.toString(),
                     onValueChange = { onSuccessLimitChange(it.toIntOrNull() ?: 10000) },
@@ -919,7 +985,7 @@ private fun DesktopControlCard(
                     modifier = Modifier.weight(1f)
                 )
                 Spacer(Modifier.width(6.dp))
-                Text("失败上限", fontSize = 11.5.sp, color = TextSecondary)
+                Text("失败上限", fontSize = 11.sp, color = TextSecondary)
                 Spacer(Modifier.width(4.dp))
                 DesktopCompactInput(
                     value = failureLimit.toString(),
@@ -929,17 +995,39 @@ private fun DesktopControlCard(
                 )
             }
 
+            // 建连超时 Timeout 与发射步进 Interval
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("超时", fontSize = 11.sp, color = TextSecondary, modifier = Modifier.width(36.dp))
+                Row(
+                    modifier = Modifier.weight(1f).clip(RoundedCornerShape(6.dp)).background(InputBg).padding(2.dp),
+                    horizontalArrangement = Arrangement.spacedBy(2.dp)
+                ) {
+                    listOf(500, 1000, 1500, 2000, 3000).forEach { to ->
+                        val sel = timeoutMs == to
+                        Box(
+                            modifier = Modifier.weight(1f).clip(RoundedCornerShape(4.dp))
+                                .background(if (sel) CardBg else Color.Transparent)
+                                .clickable(enabled = !isRunning) { onTimeoutChange(to) }
+                                .padding(vertical = 3.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text("${to}ms", fontSize = 9.sp, fontWeight = if (sel) FontWeight.Bold else FontWeight.Normal, color = if (sel) AppleBlue else TextSecondary)
+                        }
+                    }
+                }
+            }
+
             // 保持连接开关
             Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text("测试完成后保持连接", fontSize = 11.5.sp, color = TextPrimary, modifier = Modifier.weight(1f))
-                Switch(enabled = !isRunning, checked = keepConnections, onCheckedChange = onKeepChange, modifier = Modifier.height(26.dp))
+                Switch(enabled = !isRunning, checked = keepConnections, onCheckedChange = onKeepChange, modifier = Modifier.height(24.dp))
             }
         }
 
         if (appMode == AppMode.PING_STANDALONE || appMode == AppMode.UNDERLOAD_PING) {
             // Ping 探测周期设置
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("Ping周期", fontSize = 11.5.sp, color = TextSecondary, modifier = Modifier.width(58.dp))
+                Text("Ping周期", fontSize = 11.sp, color = TextSecondary, modifier = Modifier.width(52.dp))
                 Row(
                     modifier = Modifier
                         .weight(1f)
@@ -956,12 +1044,12 @@ private fun DesktopControlCard(
                                 .clip(RoundedCornerShape(4.dp))
                                 .background(if (selected) CardBg else Color.Transparent)
                                 .clickable(enabled = !isRunning) { onPingIntervalChange(iv) }
-                                .padding(vertical = 4.dp),
+                                .padding(vertical = 3.5.dp),
                             contentAlignment = Alignment.Center
                         ) {
                             Text(
                                 "${iv}ms",
-                                fontSize = 10.5.sp,
+                                fontSize = 10.sp,
                                 fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
                                 color = if (selected) AppleOrange else TextSecondary
                             )
@@ -995,16 +1083,16 @@ private fun DesktopControlCard(
             OutlinedButton(
                 onClick = onRelease,
                 shape = RoundedCornerShape(8.dp),
-                modifier = Modifier.fillMaxWidth().height(32.dp)
+                modifier = Modifier.fillMaxWidth().height(30.dp)
             ) {
-                Text("一键释放长连接", fontSize = 11.5.sp, color = TextSecondary)
+                Text("一键释放长连接", fontSize = 11.sp, color = TextSecondary)
             }
         }
     }
 }
 
 /**
- * 桌面标准紧凑输入控件 (高度 32dp，0.5dp 柔边，浅微灰底色，彻底摒弃移动端粗框)
+ * 桌面标准紧凑输入控件
  */
 @Composable
 internal fun DesktopCompactInput(
@@ -1025,15 +1113,15 @@ internal fun DesktopCompactInput(
         ),
         keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
         modifier = modifier
-            .height(32.dp)
+            .height(30.dp)
             .clip(RoundedCornerShape(6.dp))
             .background(InputBg)
             .border(0.5.dp, InputBorder, RoundedCornerShape(6.dp))
-            .padding(horizontal = 8.dp, vertical = 7.dp),
+            .padding(horizontal = 8.dp, vertical = 6.dp),
         decorationBox = { innerTextField ->
             Box(contentAlignment = Alignment.CenterStart) {
                 if (value.isEmpty() && placeholder.isNotEmpty()) {
-                    Text(placeholder, fontSize = 12.sp, color = TextSecondary.copy(alpha = 0.7f))
+                    Text(placeholder, fontSize = 11.5.sp, color = TextSecondary.copy(alpha = 0.7f))
                 }
                 innerTextField()
             }
@@ -1042,7 +1130,7 @@ internal fun DesktopCompactInput(
 }
 
 /**
- * 右侧仪表盘 (指标瓷片 + 双轴折线图 + 诊断建议 + 事件日志)
+ * 右侧专业数据仪表盘 (8 核心指标瓷片矩阵 + 动态紧凑双轴折线图 + 诊断建议 + 事件日志)
  */
 @Composable
 private fun DesktopDashboardCard(
@@ -1057,34 +1145,64 @@ private fun DesktopDashboardCard(
     logListState: androidx.compose.foundation.lazy.LazyListState
 ) {
     Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        // 顶部核心数据瓷片 (4 块紧凑胶囊)
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            when (appMode) {
-                AppMode.SESSION_HOLD -> {
-                    CompactMetricCard(Modifier.weight(1f), "活动会话", currentStats.activeSessions.toString(), AppleBlue)
-                    CompactMetricCard(Modifier.weight(1f), "成功会话", currentStats.totalSuccess.toString(), AppleGreen)
-                    CompactMetricCard(Modifier.weight(1f), "失败会话", currentStats.totalFailure.toString(), AppleRed)
-                    CompactMetricCard(Modifier.weight(1f), "瞬时速率", "${currentStats.cps}/s", ApplePurple)
+        // 顶部核心数据瓷片 (8 块紧凑胶囊网格)
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            // Row 1
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                when (appMode) {
+                    AppMode.SESSION_HOLD -> {
+                        CompactMetricCard(Modifier.weight(1f), "活跃并发会话", currentStats.activeSessions.toString(), AppleBlue)
+                        CompactMetricCard(Modifier.weight(1f), "瞬时新建速率", "${currentStats.cps}/s", ApplePurple)
+                        CompactMetricCard(Modifier.weight(1f), "成功会话计数", currentStats.totalSuccess.toString(), AppleGreen)
+                        CompactMetricCard(Modifier.weight(1f), "建连失败计数", currentStats.totalFailure.toString(), if (currentStats.totalFailure > 0) AppleRed else TextSecondary)
+                    }
+                    AppMode.PING_STANDALONE -> {
+                        CompactMetricCard(Modifier.weight(1f), "TCP 握手延迟", formatLatency(currentPingStats.currentLatencyMs), AppleOrange)
+                        CompactMetricCard(Modifier.weight(1f), "平均握手耗时", if (currentPingStats.receivedCount > 0) "${currentPingStats.avgLatencyMs} ms" else "—", AppleBlue)
+                        CompactMetricCard(Modifier.weight(1f), "最小 / 最大 RTT", if (currentPingStats.receivedCount > 0) "${currentPingStats.minLatencyMs}/${currentPingStats.maxLatencyMs} ms" else "—", AppleCyan)
+                        CompactMetricCard(Modifier.weight(1f), "网络抖动 (Jitter)", if (currentPingStats.receivedCount > 1) "${currentPingStats.jitterMs} ms" else "—", ApplePurple)
+                    }
+                    AppMode.UNDERLOAD_PING -> {
+                        CompactMetricCard(Modifier.weight(1f), "活跃并发会话", currentStats.activeSessions.toString(), AppleBlue)
+                        CompactMetricCard(Modifier.weight(1f), "瞬时新建速率", "${currentStats.cps}/s", ApplePurple)
+                        CompactMetricCard(Modifier.weight(1f), "TCP 握手延迟", formatLatency(currentPingStats.currentLatencyMs), AppleOrange)
+                        CompactMetricCard(Modifier.weight(1f), "平均握手耗时", if (currentPingStats.receivedCount > 0) "${currentPingStats.avgLatencyMs} ms" else "—", AppleCyan)
+                    }
                 }
-                AppMode.PING_STANDALONE -> {
-                    CompactMetricCard(Modifier.weight(1f), "TCP 建连延迟", formatLatency(currentPingStats.currentLatencyMs), AppleOrange)
-                    CompactMetricCard(Modifier.weight(1f), "最小 / 最大", if (currentPingStats.receivedCount > 0) "${currentPingStats.minLatencyMs} / ${currentPingStats.maxLatencyMs} ms" else "—", AppleBlue)
-                    CompactMetricCard(Modifier.weight(1f), "网络抖动", if (currentPingStats.receivedCount > 1) "${currentPingStats.jitterMs} ms" else "—", ApplePurple)
-                    CompactMetricCard(Modifier.weight(1f), "探测失败率", if (currentPingStats.sentCount > 0) String.format("%.1f%%", currentPingStats.lossPercent) else "—", if (currentPingStats.lossPercent > 0) AppleRed else AppleGreen)
-                }
-                AppMode.UNDERLOAD_PING -> {
-                    CompactMetricCard(Modifier.weight(1f), "并发会话", currentStats.activeSessions.toString(), AppleBlue)
-                    CompactMetricCard(Modifier.weight(1f), "TCP 建连延迟", formatLatency(currentPingStats.currentLatencyMs), AppleOrange)
-                    CompactMetricCard(Modifier.weight(1f), "探测失败率", if (currentPingStats.sentCount > 0) String.format("%.1f%%", currentPingStats.lossPercent) else "—", if (currentPingStats.lossPercent > 0) AppleRed else AppleGreen)
-                    CompactMetricCard(Modifier.weight(1f), "瞬时速率", "${currentStats.cps}/s", ApplePurple)
+            }
+
+            // Row 2
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                when (appMode) {
+                    AppMode.SESSION_HOLD -> {
+                        CompactMetricCard(Modifier.weight(1f), "历史峰值承载", currentStats.maxStableSessions.toString(), AppleBlue)
+                        CompactMetricCard(Modifier.weight(1f), "累计建连尝试", currentStats.totalAttempts.toString(), TextPrimary)
+                        CompactMetricCard(Modifier.weight(1f), "平均握手耗时", if (currentStats.averageConnectLatencyMs > 0) "${currentStats.averageConnectLatencyMs} ms" else "—", AppleOrange)
+                        CompactMetricCard(Modifier.weight(1f), "当前运行状态", currentStats.phase, AppleGreen)
+                    }
+                    AppMode.PING_STANDALONE -> {
+                        CompactMetricCard(Modifier.weight(1f), "探测失败率", if (currentPingStats.sentCount > 0) String.format("%.1f%%", currentPingStats.lossPercent) else "—", if (currentPingStats.lossPercent > 0) AppleRed else AppleGreen)
+                        CompactMetricCard(Modifier.weight(1f), "已发送 / 成功", "${currentPingStats.sentCount} / ${currentPingStats.receivedCount}", TextPrimary)
+                        CompactMetricCard(Modifier.weight(1f), "丢包/超时计数", currentPingStats.lostCount.toString(), if (currentPingStats.lostCount > 0) AppleRed else TextSecondary)
+                        CompactMetricCard(Modifier.weight(1f), "探针链路状态", currentPingStats.phase, AppleGreen)
+                    }
+                    AppMode.UNDERLOAD_PING -> {
+                        CompactMetricCard(Modifier.weight(1f), "网络抖动 (Jitter)", if (currentPingStats.receivedCount > 1) "${currentPingStats.jitterMs} ms" else "—", ApplePurple)
+                        CompactMetricCard(Modifier.weight(1f), "探测失败率", if (currentPingStats.sentCount > 0) String.format("%.1f%%", currentPingStats.lossPercent) else "—", if (currentPingStats.lossPercent > 0) AppleRed else AppleGreen)
+                        CompactMetricCard(Modifier.weight(1f), "峰值承载记录", currentStats.maxStableSessions.toString(), AppleBlue)
+                        CompactMetricCard(Modifier.weight(1f), "测试总体状态", if (currentPingStats.isRunning) "联动测试中" else currentStats.phase, AppleGreen)
+                    }
                 }
             }
         }
 
-        // 双轴走势图卡片 (带双 Y 轴刻度、底部 X 轴时间刻度与 Hover 实时探针)
+        // 双轴走势图卡片 (带紧凑自适应量程、滚轮缩放、平移拖拽、工具栏与均值基准线)
         DesktopDualChartCard(
             samples = chartSamples,
             appMode = appMode,
@@ -1096,7 +1214,7 @@ private fun DesktopDashboardCard(
 
         // 下方并列：诊断分析建议与事件日志
         Row(modifier = Modifier.fillMaxWidth().weight(1f), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            // 诊断建议 (修复中文字体叠字错位与基线对齐)
+            // 诊断建议
             Box(
                 modifier = Modifier
                     .weight(1f)
@@ -1161,21 +1279,50 @@ private fun DesktopDashboardCard(
 internal fun CompactMetricCard(modifier: Modifier, label: String, value: String, color: Color) {
     Box(
         modifier = modifier
-            .clip(RoundedCornerShape(10.dp))
+            .clip(RoundedCornerShape(8.dp))
             .background(CardBg)
-            .border(0.5.dp, CardBorder, RoundedCornerShape(10.dp))
-            .padding(vertical = 8.dp, horizontal = 10.dp)
+            .border(0.5.dp, CardBorder, RoundedCornerShape(8.dp))
+            .padding(vertical = 6.dp, horizontal = 9.dp)
     ) {
         Column {
-            Text(label, fontSize = 10.sp, color = TextSecondary)
-            Spacer(Modifier.height(2.dp))
-            Text(value, fontSize = 14.sp, fontWeight = FontWeight.Bold, color = color)
+            Text(label, fontSize = 9.5.sp, color = TextSecondary, maxLines = 1)
+            Spacer(Modifier.height(1.dp))
+            Text(value, fontSize = 13.5.sp, fontWeight = FontWeight.Bold, color = color, maxLines = 1)
         }
     }
 }
 
 /**
- * 专业双轴走势图卡片 (带左 Y 轴会话数、右 Y 轴延迟毫秒、底部 X 轴时间刻度与 Hover 实时探针)
+ * 紧凑自适应量程计算
+ */
+fun calculateSmartMaxSessions(actualMax: Int): Int {
+    if (actualMax <= 0) return 10
+    val raw = (actualMax * 1.15).toInt()
+    return when {
+        raw <= 20 -> ((raw + 4) / 5) * 5
+        raw <= 100 -> ((raw + 9) / 10) * 10
+        raw <= 500 -> ((raw + 49) / 50) * 50
+        raw <= 2000 -> ((raw + 99) / 100) * 100
+        raw <= 10000 -> ((raw + 499) / 500) * 500
+        else -> ((raw + 999) / 1000) * 1000
+    }
+}
+
+fun calculateSmartMaxLatency(actualMax: Int): Int {
+    if (actualMax <= 0) return 20
+    val raw = (actualMax * 1.20).toInt()
+    return when {
+        raw <= 20 -> 20
+        raw <= 50 -> ((raw + 4) / 5) * 5
+        raw <= 100 -> ((raw + 9) / 10) * 10
+        raw <= 300 -> ((raw + 19) / 20) * 20
+        raw <= 1000 -> ((raw + 49) / 50) * 50
+        else -> ((raw + 99) / 100) * 100
+    }
+}
+
+/**
+ * 专业双轴走势图卡片 (带紧凑自适应动态量程、工具栏、滚轮缩放、拖拽平移与均值基准线)
  */
 @Composable
 internal fun DesktopDualChartCard(
@@ -1189,15 +1336,18 @@ internal fun DesktopDualChartCard(
     var hoveredPoint by remember(appMode) { mutableStateOf<DualChartPoint?>(null) }
     LaunchedEffect(samples) { if (hoveredPoint !in samples) hoveredPoint = null }
 
-    // 计算刻度上下限
-    val maxSec = samples.maxOfOrNull { it.elapsedSec }?.coerceAtLeast(10.0) ?: 10.0
-    val minSec = samples.firstOrNull()?.elapsedSec ?: 0.0
-    val rawMaxSessions = samples.mapNotNull { it.activeSessions }.maxOrNull()?.coerceAtLeast(100)
-        ?: if (appMode != AppMode.PING_STANDALONE) successLimit.coerceAtLeast(1000) else 100
-    val maxSessions = roundUpSessions(rawMaxSessions)
+    var zoomScale by remember { mutableStateOf(1.0f) }
+    var panOffsetX by remember { mutableStateOf(0.0f) }
 
-    val rawMaxLatency = samples.mapNotNull { it.pingLatencyMs }.maxOrNull()?.coerceAtLeast(50) ?: 100
-    val maxLatency = roundUpLatency(rawMaxLatency)
+    val rawMaxSec = samples.maxOfOrNull { it.elapsedSec }?.coerceAtLeast(5.0) ?: 5.0
+    val rawMinSec = samples.firstOrNull()?.elapsedSec ?: 0.0
+
+    // 计算紧凑动态量程 (拒绝死板直线)
+    val actualMaxSessions = samples.mapNotNull { it.activeSessions }.maxOrNull() ?: if (appMode != AppMode.PING_STANDALONE) currentStats.activeSessions else 0
+    val maxSessions = calculateSmartMaxSessions(actualMaxSessions)
+
+    val actualMaxLatency = samples.mapNotNull { it.pingLatencyMs }.maxOrNull() ?: if (currentPingStats.receivedCount > 0) currentPingStats.maxLatencyMs else 0
+    val maxLatency = calculateSmartMaxLatency(actualMaxLatency)
 
     Box(
         modifier = modifier
@@ -1207,9 +1357,9 @@ internal fun DesktopDualChartCard(
             .padding(12.dp)
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
-            // 顶部走势图标题与实时探针数据显示区
+            // 顶部走势图标题与工具栏
             Row(
-                modifier = Modifier.fillMaxWidth().height(24.dp),
+                modifier = Modifier.fillMaxWidth().height(26.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
@@ -1222,6 +1372,54 @@ internal fun DesktopDualChartCard(
                     fontWeight = FontWeight.Bold,
                     color = TextPrimary
                 )
+
+                Spacer(Modifier.width(12.dp))
+
+                // 图表缩放与总览交互工具条
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(5.dp))
+                        .background(InputBg)
+                        .padding(2.dp),
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // 全景总览 Fit All
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(if (zoomScale == 1.0f) AppleBlue.copy(alpha = 0.15f) else Color.Transparent)
+                            .clickable { zoomScale = 1.0f; panOffsetX = 0f }
+                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                    ) {
+                        Text("全景", fontSize = 9.5.sp, fontWeight = if (zoomScale == 1.0f) FontWeight.Bold else FontWeight.Normal, color = if (zoomScale == 1.0f) AppleBlue else TextSecondary)
+                    }
+                    // 放大 +
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(4.dp))
+                            .clickable { zoomScale = (zoomScale * 1.3f).coerceAtMost(10f) }
+                            .padding(horizontal = 5.dp, vertical = 2.dp)
+                    ) {
+                        Text("+", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
+                    }
+                    // 缩小 -
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(4.dp))
+                            .clickable {
+                                zoomScale = (zoomScale / 1.3f).coerceAtLeast(1.0f)
+                                if (zoomScale == 1.0f) panOffsetX = 0f
+                            }
+                            .padding(horizontal = 5.dp, vertical = 2.dp)
+                    ) {
+                        Text("-", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
+                    }
+                    // 倍率显示
+                    if (zoomScale > 1.0f) {
+                        Text("${String.format("%.1f", zoomScale)}x", fontSize = 9.sp, color = AppleBlue, modifier = Modifier.padding(horizontal = 4.dp))
+                    }
+                }
 
                 Spacer(Modifier.weight(1f))
 
@@ -1250,11 +1448,11 @@ internal fun DesktopDualChartCard(
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Box(Modifier.size(8.dp).background(AppleBlue, RoundedCornerShape(2.dp)))
                             Spacer(Modifier.width(4.dp))
-                            Text("并发数(主轴)", fontSize = 10.sp, color = TextSecondary)
-                            Spacer(Modifier.width(12.dp))
+                            Text("并发数", fontSize = 10.sp, color = TextSecondary)
+                            Spacer(Modifier.width(10.dp))
                             Box(Modifier.size(8.dp).background(AppleOrange, RoundedCornerShape(2.dp)))
                             Spacer(Modifier.width(4.dp))
-                            Text("延迟(副轴)", fontSize = 10.sp, color = TextSecondary)
+                            Text("延迟", fontSize = 10.sp, color = TextSecondary)
                         }
                     } else if (appMode == AppMode.SESSION_HOLD) {
                         Text("峰值: ${currentStats.maxStableSessions}", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = AppleBlue)
@@ -1264,7 +1462,7 @@ internal fun DesktopDualChartCard(
                 }
             }
 
-            Spacer(Modifier.height(6.dp))
+            Spacer(Modifier.height(4.dp))
 
             // 中部：双 Y 轴与画布容器
             Row(
@@ -1289,15 +1487,20 @@ internal fun DesktopDualChartCard(
 
                 Spacer(Modifier.width(6.dp))
 
-                // 核心走势图画布与 Hover 实时探针
+                // 核心走势图画布与 Hover / Zoom / Pan 实时交互
                 Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
                     DesktopDualChartCanvas(
                         samples = samples,
                         appMode = appMode,
-                        minSec = minSec,
-                        maxSec = maxSec,
+                        rawMinSec = rawMinSec,
+                        rawMaxSec = rawMaxSec,
                         maxSessions = maxSessions,
                         maxLatency = maxLatency,
+                        zoomScale = zoomScale,
+                        panOffsetX = panOffsetX,
+                        onZoomChange = { zoomScale = it },
+                        onPanChange = { panOffsetX = it },
+                        avgLatencyMs = if (currentPingStats.receivedCount > 0) currentPingStats.avgLatencyMs else null,
                         hoveredPoint = hoveredPoint,
                         onHoverChange = { hoveredPoint = it },
                         modifier = Modifier.fillMaxSize()
@@ -1325,6 +1528,10 @@ internal fun DesktopDualChartCard(
             }
 
             // 底部 X 轴 (时间刻度)
+            val windowSpan = (rawMaxSec - rawMinSec) / zoomScale
+            val viewMinSec = (rawMinSec + panOffsetX * (rawMaxSec - rawMinSec)).coerceIn(rawMinSec, rawMaxSec - windowSpan)
+            val viewMaxSec = viewMinSec + windowSpan
+
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1332,7 +1539,7 @@ internal fun DesktopDualChartCard(
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 repeat(5) { i ->
-                    val sec = minSec + (maxSec - minSec) * i / 4
+                    val sec = viewMinSec + (viewMaxSec - viewMinSec) * i / 4
                     Text(
                         text = "${String.format("%.1f", sec)}s",
                         fontSize = 9.sp,
@@ -1348,18 +1555,46 @@ internal fun DesktopDualChartCard(
 private fun DesktopDualChartCanvas(
     samples: List<DualChartPoint>,
     appMode: AppMode,
-    minSec: Double,
-    maxSec: Double,
+    rawMinSec: Double,
+    rawMaxSec: Double,
     maxSessions: Int,
     maxLatency: Int,
+    zoomScale: Float,
+    panOffsetX: Float,
+    onZoomChange: (Float) -> Unit,
+    onPanChange: (Float) -> Unit,
+    avgLatencyMs: Int?,
     hoveredPoint: DualChartPoint?,
     onHoverChange: (DualChartPoint?) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val totalSpan = (rawMaxSec - rawMinSec).coerceAtLeast(0.001)
+    val windowSpan = totalSpan / zoomScale
+    val viewMinSec = (rawMinSec + panOffsetX * totalSpan).coerceIn(rawMinSec, (rawMaxSec - windowSpan).coerceAtLeast(rawMinSec))
+    val viewMaxSec = viewMinSec + windowSpan
+
     Canvas(
         modifier = modifier
             .fillMaxSize()
-            .pointerInput(samples, minSec, maxSec) {
+            .pointerInput(samples, zoomScale, panOffsetX, rawMinSec, rawMaxSec) {
+                detectTapGestures(
+                    onDoubleTap = {
+                        onZoomChange(1.0f)
+                        onPanChange(0.0f)
+                    }
+                )
+            }
+            .pointerInput(samples, zoomScale, panOffsetX, rawMinSec, rawMaxSec) {
+                detectDragGestures { change, dragAmount ->
+                    change.consume()
+                    if (zoomScale > 1.0f) {
+                        val deltaRatio = -dragAmount.x / size.width.toFloat()
+                        val newOffset = (panOffsetX + deltaRatio / zoomScale).coerceIn(0f, 1f - 1f / zoomScale)
+                        onPanChange(newOffset)
+                    }
+                }
+            }
+            .pointerInput(samples, viewMinSec, viewMaxSec) {
                 awaitPointerEventScope {
                     while (true) {
                         val event = awaitPointerEvent()
@@ -1368,9 +1603,18 @@ private fun DesktopDualChartCanvas(
                                 val pos = event.changes.firstOrNull()?.position
                                 if (pos != null && samples.isNotEmpty()) {
                                     val ratio = (pos.x / size.width.toFloat()).coerceIn(0f, 1f)
-                                    val secTarget = minSec + ratio * (maxSec - minSec)
-                                    val closest = samples.minByOrNull { kotlin.math.abs(it.elapsedSec - secTarget) }
+                                    val secTarget = viewMinSec + ratio * (viewMaxSec - viewMinSec)
+                                    val closest = samples.minByOrNull { abs(it.elapsedSec - secTarget) }
                                     onHoverChange(closest)
+                                }
+                            }
+                            PointerEventType.Scroll -> {
+                                val scrollDelta = event.changes.firstOrNull()?.scrollDelta?.y ?: 0f
+                                if (scrollDelta != 0f) {
+                                    val factor = if (scrollDelta < 0) 1.15f else 0.87f
+                                    val newZoom = (zoomScale * factor).coerceIn(1.0f, 10.0f)
+                                    onZoomChange(newZoom)
+                                    if (newZoom == 1.0f) onPanChange(0f)
                                 }
                             }
                             PointerEventType.Exit -> {
@@ -1395,9 +1639,23 @@ private fun DesktopDualChartCanvas(
             )
         }
 
+        // 绘制延迟平均值基准虚线 (Average Latency Baseline)
+        if (appMode != AppMode.SESSION_HOLD && avgLatencyMs != null && avgLatencyMs > 0 && maxLatency > 0) {
+            val avgY = h - (avgLatencyMs.toFloat() / maxLatency.toFloat()) * h
+            if (avgY in 0f..h) {
+                drawLine(
+                    color = AppleOrange.copy(alpha = 0.35f),
+                    start = Offset(0f, avgY),
+                    end = Offset(w, avgY),
+                    strokeWidth = 1.2f,
+                    pathEffect = PathEffect.dashPathEffect(floatArrayOf(6f, 6f))
+                )
+            }
+        }
+
         if (samples.isEmpty()) return@Canvas
 
-        fun xOf(sec: Double): Float = (((sec - minSec) / (maxSec - minSec).coerceAtLeast(0.001)).toFloat() * w).coerceIn(0f, w)
+        fun xOf(sec: Double): Float = (((sec - viewMinSec) / (viewMaxSec - viewMinSec).coerceAtLeast(0.001)).toFloat() * w)
         fun ySession(sessions: Int): Float = h - (sessions.toFloat() / maxSessions.toFloat()) * h
         fun yPing(latency: Int): Float = h - (latency.toFloat() / maxLatency.toFloat()) * h
 
@@ -1422,79 +1680,60 @@ private fun DesktopDualChartCanvas(
                         lineTo(x, h)
                         close()
                     }
-                    drawPath(fill, Brush.verticalGradient(listOf(color.copy(alpha = 0.13f), Color.Transparent)))
+                    drawPath(fill, Brush.verticalGradient(listOf(color.copy(alpha = 0.14f), Color.Transparent)))
                     drawLine(color, from, Offset(x, y), strokeWidth = 2.2f, cap = StrokeCap.Round)
                 } else {
-                    drawCircle(color, radius = 2.2f, center = Offset(x, y))
+                    if (x in -5f..(w + 5f)) {
+                        drawCircle(color, radius = 2.2f, center = Offset(x, y))
+                    }
                 }
                 previous = point
             }
         }
+
         if (appMode != AppMode.PING_STANDALONE) {
             drawSeries(samples.filter { it.activeSessions != null }, AppleBlue, { it.activeSessions }, ::ySession)
         }
         if (appMode != AppMode.SESSION_HOLD) {
             val probes = samples.filter { it.hasPingSample }
             drawSeries(probes, AppleOrange, { it.pingLatencyMs }, ::yPing)
-            // Failed probes break the line; the bottom marker is an event, not a zero RTT.
             probes.filter { it.pingLatencyMs == null }.forEach {
                 val x = xOf(it.elapsedSec)
-                drawLine(AppleRed, Offset(x, h - 5f), Offset(x, h), strokeWidth = 2f)
+                if (x in 0f..w) {
+                    drawLine(AppleRed, Offset(x, h - 6f), Offset(x, h), strokeWidth = 2f)
+                }
             }
         }
 
         // 3. 鼠标悬浮拾取交互：发丝对齐线与高亮节点圆环
         if (hoveredPoint != null) {
             val hx = xOf(hoveredPoint.elapsedSec)
-            // 绘制垂直发丝准星虚线
-            drawLine(
-                color = Color(0x60007AFF),
-                start = Offset(hx, 0f),
-                end = Offset(hx, h),
-                strokeWidth = 1.2f,
-                pathEffect = PathEffect.dashPathEffect(floatArrayOf(5f, 4f))
-            )
+            if (hx in 0f..w) {
+                drawLine(
+                    color = Color(0x60007AFF),
+                    start = Offset(hx, 0f),
+                    end = Offset(hx, h),
+                    strokeWidth = 1.2f,
+                    pathEffect = PathEffect.dashPathEffect(floatArrayOf(5f, 4f))
+                )
 
-            // 会话数节点高亮环
-            if (appMode != AppMode.PING_STANDALONE && hoveredPoint.activeSessions != null) {
-                val sy = ySession(hoveredPoint.activeSessions)
-                drawCircle(color = AppleBlue.copy(alpha = 0.25f), radius = 6.5f, center = Offset(hx, sy))
-                drawCircle(color = Color.White, radius = 4f, center = Offset(hx, sy))
-                drawCircle(color = AppleBlue, radius = 2.5f, center = Offset(hx, sy))
-            }
+                // 会话数节点高亮环
+                if (appMode != AppMode.PING_STANDALONE && hoveredPoint.activeSessions != null) {
+                    val sy = ySession(hoveredPoint.activeSessions)
+                    drawCircle(color = AppleBlue.copy(alpha = 0.25f), radius = 6.5f, center = Offset(hx, sy))
+                    drawCircle(color = Color.White, radius = 4f, center = Offset(hx, sy))
+                    drawCircle(color = AppleBlue, radius = 2.5f, center = Offset(hx, sy))
+                }
 
-            // 延迟节点高亮环
-            if (appMode != AppMode.SESSION_HOLD && hoveredPoint.hasPingSample && hoveredPoint.pingLatencyMs != null) {
-                val py = yPing(hoveredPoint.pingLatencyMs)
-                drawCircle(color = AppleOrange.copy(alpha = 0.25f), radius = 6.5f, center = Offset(hx, py))
-                drawCircle(color = Color.White, radius = 4f, center = Offset(hx, py))
-                drawCircle(color = AppleOrange, radius = 2.5f, center = Offset(hx, py))
+                // 延迟节点高亮环
+                if (appMode != AppMode.SESSION_HOLD && hoveredPoint.hasPingSample && hoveredPoint.pingLatencyMs != null) {
+                    val py = yPing(hoveredPoint.pingLatencyMs)
+                    drawCircle(color = AppleOrange.copy(alpha = 0.25f), radius = 6.5f, center = Offset(hx, py))
+                    drawCircle(color = Color.White, radius = 4f, center = Offset(hx, py))
+                    drawCircle(color = AppleOrange, radius = 2.5f, center = Offset(hx, py))
+                }
             }
         }
-    }
-}
-
-private fun roundUpSessions(value: Int): Int {
-    return when {
-        value <= 500 -> 500
-        value <= 1000 -> 1000
-        value <= 2000 -> 2000
-        value <= 5000 -> 5000
-        value <= 10000 -> 10000
-        value <= 20000 -> 20000
-        else -> ((value + 4999) / 5000) * 5000
-    }
-}
-
-private fun roundUpLatency(value: Int): Int {
-    return when {
-        value <= 50 -> 50
-        value <= 100 -> 100
-        value <= 200 -> 200
-        value <= 300 -> 300
-        value <= 500 -> 500
-        value <= 1000 -> 1000
-        else -> ((value + 199) / 200) * 200
     }
 }
 
@@ -1534,7 +1773,7 @@ private fun DesktopAdviceRow(num: String, content: String) {
         Text(
             text = content,
             fontSize = 11.sp,
-            lineHeight = 16.sp,
+            lineHeight = 17.sp,
             fontFamily = FontFamily.SansSerif,
             letterSpacing = 0.2.sp,
             color = TextPrimary.copy(alpha = 0.9f),

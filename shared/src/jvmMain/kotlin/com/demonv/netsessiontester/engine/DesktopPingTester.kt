@@ -34,12 +34,14 @@ class DesktopPingTester : AutoCloseable {
     private val activeChannels = mutableSetOf<SocketChannel>()
     private val activeSelectors = mutableSetOf<Selector>()
 
+    private val pingDispatcher = Dispatchers.IO.limitedParallelism(4)
+
     suspend fun pingOnce(
         host: String,
         port: Int = 80,
         timeoutMs: Int = 1000,
         protocol: IpProtocol? = null
-    ): Int? = withContext(Dispatchers.IO) {
+    ): Int? = withContext(pingDispatcher) {
         check(!closed.get()) { "DesktopPingTester is closed" }
         val address = resolveAddresses(cleanHost(host), protocol).firstOrNull() ?: return@withContext null
         probe(address, port.coerceIn(1, 65535), timeoutMs.coerceAtLeast(1), generation.get())
@@ -53,7 +55,7 @@ class DesktopPingTester : AutoCloseable {
         protocol: IpProtocol? = null,
         onStats: suspend (PingStats) -> Unit,
         onLog: suspend (LogLine) -> Unit
-    ) = withContext(Dispatchers.IO) {
+    ) = withContext(pingDispatcher) {
         check(!closed.get()) { "DesktopPingTester is closed" }
         val job = currentCoroutineContext()[Job]
         val runGeneration: Long
@@ -69,17 +71,20 @@ class DesktopPingTester : AutoCloseable {
         try {
             val periodNanos = intervalMs.coerceAtLeast(1L) * 1_000_000L
             val timeout = timeoutMs.coerceAtLeast(1)
+            val dnsStartNanos = System.nanoTime()
             val addresses = resolveAddresses(cleanHost, protocol)
+            val dnsElapsedMs = ((System.nanoTime() - dnsStartNanos) / 1_000_000L).coerceAtLeast(0L)
             if (addresses.isEmpty()) {
                 onLog(LogLine(level = LogLevel.ERROR, text = "${protocol?.label ?: "IP"} 未解析到有效地址: $cleanHost"))
                 onStats(toStats(cleanHost, cleanPort, protocol, accumulator, false, "解析失败", System.nanoTime()))
                 return@withContext
             }
 
+            val addrListStr = addresses.joinToString(", ") { it.hostAddress ?: "" }
             onLog(
                 LogLine(
                     level = LogLevel.INFO,
-                    text = "启动独立 Ping 诊断: $cleanHost:$cleanPort, ${protocol?.label ?: "自动协议"}, 探测周期 ${intervalMs.coerceAtLeast(1L)}ms"
+                    text = "启动独立 Ping 诊断: $cleanHost:$cleanPort (DNS耗时 ${dnsElapsedMs}ms, 目标 $addrListStr), 探测周期 ${intervalMs.coerceAtLeast(1L)}ms"
                 )
             )
 

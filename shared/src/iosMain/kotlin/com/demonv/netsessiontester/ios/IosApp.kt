@@ -712,8 +712,10 @@ private fun IosDualAxisChartCard(
     var touchFraction by remember(appMode) { mutableStateOf<Float?>(null) }
     val minTime = samples.firstOrNull()?.elapsedMs ?: 0L
     val maxTime = maxOf(minTime + 1000L, samples.lastOrNull()?.elapsedMs ?: 1000L)
-    val maxSessions = max(100, samples.mapNotNull { it.activeSessions }.maxOrNull() ?: successLimit)
-    val maxLatency = max(50, samples.mapNotNull { it.pingLatencyMs }.maxOrNull() ?: 50)
+    val actualMaxSessions = samples.mapNotNull { it.activeSessions }.maxOrNull() ?: 10
+    val maxSessions = calculateIosSmartMaxSessions(actualMaxSessions)
+    val actualMaxLatency = samples.mapNotNull { it.pingLatencyMs }.maxOrNull() ?: 10
+    val maxLatency = calculateIosSmartMaxLatency(actualMaxLatency)
     fun closest(fraction: Float): IosDualChartPoint? {
         val target = minTime + (maxTime - minTime) * fraction
         return samples.minByOrNull { kotlin.math.abs(it.elapsedMs - target) }
@@ -1423,4 +1425,30 @@ private fun generateDiagnosticAdvice(
         if (protocolStats.totalSuccess > 0) "连接状态" else "等待开始测试", IosLogLevel.INFO,
         "累计成功与当前活动连接分别统计；对端关闭会降低活动数。CPS 设置表示每秒尝试建连数。"
     )
+}
+
+private fun calculateIosSmartMaxSessions(actualMax: Int): Int {
+    if (actualMax <= 0) return 10
+    val raw = (actualMax * 1.15).toInt()
+    return when {
+        raw <= 20 -> ((raw + 4) / 5) * 5
+        raw <= 100 -> ((raw + 9) / 10) * 10
+        raw <= 500 -> ((raw + 49) / 50) * 50
+        raw <= 2000 -> ((raw + 99) / 100) * 100
+        raw <= 10000 -> ((raw + 499) / 500) * 500
+        else -> ((raw + 999) / 1000) * 1000
+    }
+}
+
+private fun calculateIosSmartMaxLatency(actualMax: Int): Int {
+    if (actualMax <= 0) return 20
+    val raw = (actualMax * 1.20).toInt()
+    return when {
+        raw <= 20 -> 20
+        raw <= 50 -> ((raw + 4) / 5) * 5
+        raw <= 100 -> ((raw + 9) / 10) * 10
+        raw <= 300 -> ((raw + 19) / 20) * 20
+        raw <= 1000 -> ((raw + 49) / 50) * 50
+        else -> ((raw + 99) / 100) * 100
+    }
 }
