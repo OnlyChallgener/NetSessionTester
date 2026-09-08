@@ -54,9 +54,13 @@ import kotlin.math.roundToInt
 /**
  * iOS 导出入口：提供原生 UIViewController 挂载 Compose Multiplatform
  */
-fun MainViewController(): UIViewController = ComposeUIViewController {
+@OptIn(kotlin.experimental.ExperimentalNativeApi::class)
+@kotlin.native.CName("createMainViewController")
+fun createMainViewController(): UIViewController = ComposeUIViewController {
     IosApp()
 }
+
+fun MainViewController(): UIViewController = createMainViewController()
 
 // ==========================================
 // Apple HIG 语义色彩 Token
