@@ -465,6 +465,9 @@ class DesktopTcpTester : AutoCloseable {
         onStats(finalStats)
         val logLevel = if (totalFailure >= config.failureLimit) LogLevel.ERROR else LogLevel.SUCCESS
         onLog(LogLine(level = logLevel, text = "${protocol.label} $finalPhase：峰值活动 $maxStable | 当前活动 $active | 成功 $totalSuccess | 失败 $totalFailure | 平均速率 $avgCps/s"))
+        if (totalFailure >= config.failureLimit) {
+            onLog(LogLine(level = LogLevel.WARN, text = "提示：若压测目标为公网站点 (如百度/腾讯)，持续高并发会触发对端防火墙防 SYN 洪水/CC 策略从而拦截丢包。压测建议对准局域网网关或具备授权的压测服务器。"))
+        }
 
         if (!config.keepConnectionsAfterStop) {
             val released = releaseHeld(protocol)
