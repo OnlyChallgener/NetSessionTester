@@ -124,6 +124,8 @@ class SourceContracts(unittest.TestCase):
         common = read(ROOT / 'shared/build.gradle.kts').split('commonMain.dependencies {')[1].split('}', 1)[0]
         # The desktop/iOS Compose upgrade must not replace Android's existing UI dependencies.
         self.assertNotIn('implementation(compose.', common)
+        android = read(ROOT / 'shared/build.gradle.kts').split('androidMain.dependencies {')[1].split('}', 1)[0]
+        self.assertIn('implementation(compose.runtime)', android)
 
     def test_tools_are_wired_to_real_implementations(self):
         text = read(IOS / 'IosExtraScreens.kt')

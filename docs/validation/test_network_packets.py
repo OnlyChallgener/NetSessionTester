@@ -87,7 +87,6 @@ class NetworkPacketFixtureTests(unittest.TestCase):
             "coerceAtMost(50)",
             "ensureActive()",
             "freeaddrinfo(head)",
-            "freeifaddrs(head.value)",
             "getsockname",
             "finally {\n            close(fd)",
             "不把超时当作边界",

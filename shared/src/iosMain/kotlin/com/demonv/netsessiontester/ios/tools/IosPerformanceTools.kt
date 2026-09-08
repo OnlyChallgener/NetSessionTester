@@ -681,12 +681,12 @@ object IosPerformanceTools {
     private fun cleanHost(host: String) = host.trim().removePrefix("[").removeSuffix("]").ifBlank { "localhost" }
     private fun deadlineAfter(timeoutMs: Int) = monotonicNanos() + timeoutMs.toLong() * 1_000_000L
     private fun errnoText(operation: String, code: Int = errno) =
-        "$operation失败 (errno=$code: ${strerror(code)?.toKString() ?: "unknown"})"
+        "${operation}失败 (errno=$code: ${strerror(code)?.toKString() ?: "unknown"})"
     private fun failErrno(operation: String, code: Int = errno): Nothing = throw ToolFailure(errnoText(operation, code))
 
     private fun monotonicNanos(): Long = memScoped {
         val time = alloc<timespec>()
-        if (clock_gettime(CLOCK_MONOTONIC, time.ptr) == 0) {
+        if (clock_gettime(CLOCK_MONOTONIC.convert(), time.ptr) == 0) {
             time.tv_sec * 1_000_000_000L + time.tv_nsec
         } else {
             com.demonv.netsessiontester.ios.getMonotonicMs() * 1_000_000L

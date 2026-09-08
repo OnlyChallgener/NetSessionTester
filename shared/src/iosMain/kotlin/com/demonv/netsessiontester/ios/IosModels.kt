@@ -24,7 +24,7 @@ fun getEpochMs(): Long = memScoped {
 @OptIn(ExperimentalForeignApi::class)
 fun getMonotonicMs(): Long = memScoped {
     val ts = alloc<timespec>()
-    if (clock_gettime(CLOCK_MONOTONIC, ts.ptr) == 0) {
+    if (clock_gettime(CLOCK_MONOTONIC.convert(), ts.ptr) == 0) {
         (ts.tv_sec * 1000L) + (ts.tv_nsec / 1_000_000L)
     } else {
         getEpochMs()

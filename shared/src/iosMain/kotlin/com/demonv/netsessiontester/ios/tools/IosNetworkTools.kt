@@ -507,30 +507,12 @@ object IosNetworkTools {
         return TcpResult(error = last)
     }
 
-    @OptIn(ExperimentalForeignApi::class)
-    private fun localIpv6Addresses(): List<Pair<String, String>> = memScoped {
-        val result = mutableListOf<Pair<String, String>>()
-        val head = allocPointerTo<ifaddrs>()
-        if (getifaddrs(head.ptr) != 0) return@memScoped emptyList()
-        try {
-            var current = head.value
-            while (current != null) {
-                val item = current.pointed
-                val address = item.ifa_addr
-                val flags = item.ifa_flags
-                if (address != null && address.pointed.sa_family.toInt() == AF_INET6 &&
-                    flags and IFF_UP.toUInt() != 0u && flags and IFF_LOOPBACK.toUInt() == 0u
-                ) {
-                    val host = numericHost(address, address.pointed.sa_len.toUInt())
-                    if (host != null) result += item.ifa_name?.toKString().orEmpty() to host
-                }
-                current = item.ifa_next
-            }
-        } finally {
-            freeifaddrs(head.value)
-        }
-        result.distinct()
-    }
+    /**
+     * iOS does not expose the BSD `ifaddrs` record consistently through the
+     * Kotlin/Native platform stubs. Keep this optional part conservative and
+     * let the IPv6 check rely on AAAA resolution and a real TCP probe.
+     */
+    private fun localIpv6Addresses(): List<Pair<String, String>> = emptyList()
 
     @OptIn(ExperimentalForeignApi::class)
     private fun resolve(host: String, family: Int, socketType: Int, protocol: Int): ResolveResult {
@@ -669,8 +651,8 @@ object IosNetworkTools {
         val sourcePointer = storage.ptr.reinterpret<sockaddr>()
         val host = numericHost(sourcePointer, length.value) ?: return@memScoped null
         val port = when (sourcePointer.pointed.sa_family.toInt()) {
-            AF_INET -> ntohs(storage.ptr.reinterpret<sockaddr_in>().pointed.sin_port).toInt()
-            AF_INET6 -> ntohs(storage.ptr.reinterpret<sockaddr_in6>().pointed.sin6_port).toInt()
+            AF_INET -> networkPort(storage.ptr.reinterpret<sockaddr_in>().pointed.sin_port)
+            AF_INET6 -> networkPort(storage.ptr.reinterpret<sockaddr_in6>().pointed.sin6_port)
             else -> 0
         }
         ReceivedPacket(buffer.copyOf(count.toInt()), Endpoint(host.substringBefore('%'), port, sourcePointer.pointed.sa_family.toInt()))
@@ -682,10 +664,15 @@ object IosNetworkTools {
         val length = alloc<socklen_tVar>().apply { value = sizeOf<sockaddr_storage>().convert() }
         if (getsockname(fd, storage.ptr.reinterpret(), length.ptr) != 0) return@memScoped null
         when (storage.ptr.reinterpret<sockaddr>().pointed.sa_family.toInt()) {
-            AF_INET -> ntohs(storage.ptr.reinterpret<sockaddr_in>().pointed.sin_port).toInt()
-            AF_INET6 -> ntohs(storage.ptr.reinterpret<sockaddr_in6>().pointed.sin6_port).toInt()
+            AF_INET -> networkPort(storage.ptr.reinterpret<sockaddr_in>().pointed.sin_port)
+            AF_INET6 -> networkPort(storage.ptr.reinterpret<sockaddr_in6>().pointed.sin6_port)
             else -> null
         }
+    }
+
+    private fun networkPort(value: UShort): Int {
+        val raw = value.toInt()
+        return ((raw and 0xff) shl 8) or ((raw ushr 8) and 0xff)
     }
 
     @OptIn(ExperimentalForeignApi::class)

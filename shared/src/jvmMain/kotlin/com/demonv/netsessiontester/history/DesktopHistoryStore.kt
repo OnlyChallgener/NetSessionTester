@@ -506,5 +506,5 @@ object DesktopHistoryStore {
         enumValues<T>().firstOrNull { it.name == name } ?: default
 
     private fun failureMessage(action: String, failure: Throwable): String =
-        "$action失败：${failure.message ?: failure.javaClass.simpleName}"
+        "${action}失败：${failure.message ?: failure.javaClass.simpleName}"
 }

@@ -38,6 +38,10 @@ kotlin {
         }
         androidMain.dependencies {
             implementation("androidx.core:core-ktx:1.13.1")
+            // The Compose compiler is applied to this multiplatform module. Keep
+            // its runtime on the Android source-set classpath even though the
+            // Android UI lives in :app.
+            implementation(compose.runtime)
             implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
         }
         jvmMain.dependencies {
