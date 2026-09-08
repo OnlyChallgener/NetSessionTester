@@ -31,8 +31,14 @@ jobs:
         run: |
           gradle :shared:assemble :app:assembleDebug --no-daemon
 
+      - name: Upload Android APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: NetSessionTester-Android.apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+
   build-ios:
-    name: Build iOS Multiplatform Framework
+    name: Build iOS Multiplatform Package
     runs-on: macos-latest
     steps:
       - name: Checkout
@@ -52,6 +58,46 @@ jobs:
       - name: Compile iOS Framework
         run: |
           gradle :shared:linkReleaseFrameworkIosArm64 --no-daemon
+
+      - name: Package Unsigned iOS IPA
+        run: |
+          mkdir -p build/Payload/NetSessionTester.app/Frameworks
+          cp -R shared/build/bin/iosArm64/releaseFramework/shared.framework build/Payload/NetSessionTester.app/Frameworks/
+          cat << 'EOF' > build/Payload/NetSessionTester.app/Info.plist
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleExecutable</key>
+              <string>NetSessionTester</string>
+              <key>CFBundleIdentifier</key>
+              <string>com.demonv.netsessiontester</string>
+              <key>CFBundleName</key>
+              <string>NetSessionTester</string>
+              <key>CFBundlePackageType</key>
+              <string>APPL</string>
+              <key>CFBundleShortVersionString</key>
+              <string>1.0.22</string>
+              <key>CFBundleVersion</key>
+              <string>1</string>
+              <key>LSRequiresIPhoneOS</key>
+              <true/>
+              <key>UIRequiredDeviceCapabilities</key>
+              <array>
+                  <string>arm64</string>
+              </array>
+          </dict>
+          </plist>
+          EOF
+          cp shared/build/bin/iosArm64/releaseFramework/shared.framework/shared build/Payload/NetSessionTester.app/NetSessionTester
+          chmod +x build/Payload/NetSessionTester.app/NetSessionTester
+          cd build && zip -r ../NetSessionTester-iOS-unsigned.ipa Payload
+
+      - name: Upload iOS IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: NetSessionTester-iOS-unsigned.ipa
+          path: NetSessionTester-iOS-unsigned.ipa
 
   build-macos:
     name: Build macOS Desktop
@@ -75,6 +121,25 @@ jobs:
         run: |
           gradle :shared:jvmJar --no-daemon
 
+      - name: Package macOS Desktop Bundle
+        run: |
+          mkdir -p package-macos
+          cp shared/build/libs/*.jar package-macos/NetSessionTester.jar
+          cat << 'EOF' > package-macos/run.command
+          #!/bin/bash
+          DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
+          cd "$DIR"
+          java -jar NetSessionTester.jar
+          EOF
+          chmod +x package-macos/run.command
+          zip -r NetSessionTester-macOS-desktop.zip package-macos
+
+      - name: Upload macOS Desktop Package
+        uses: actions/upload-artifact@v4
+        with:
+          name: NetSessionTester-macOS-desktop.zip
+          path: NetSessionTester-macOS-desktop.zip
+
   build-windows:
     name: Build Windows Desktop
     runs-on: windows-latest
@@ -96,3 +161,22 @@ jobs:
       - name: Compile Desktop Jar on Windows
         run: |
           gradle :shared:jvmJar --no-daemon
+
+      - name: Package Windows Desktop Bundle
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path package-windows
+          Copy-Item shared/build/libs/*.jar package-windows/NetSessionTester.jar
+          @'
+          @echo off
+          cd /d "%~dp0"
+          start javaw -jar NetSessionTester.jar
+          if errorlevel 1 java -jar NetSessionTester.jar
+          '@ | Set-Content -Path package-windows/Run.bat -Encoding Ascii
+          Compress-Archive -Path package-windows/* -DestinationPath NetSessionTester-Windows-x64.zip
+
+      - name: Upload Windows Desktop Package
+        uses: actions/upload-artifact@v4
+        with:
+          name: NetSessionTester-Windows-x64.zip
+          path: NetSessionTester-Windows-x64.zip

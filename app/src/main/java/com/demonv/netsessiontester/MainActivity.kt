@@ -5405,15 +5405,7 @@ private fun ReorderableCardItem(
                 )
             },
             contentAlignment = Alignment.TopCenter
-        ) {
-            Box(
-                Modifier
-                    .padding(top = 4.dp)
-                    .width(24.dp)
-                    .height(3.dp)
-                    .background(Border.copy(alpha = 0.62f), CircleShape)
-            )
-        }
+        )
     }
 }
 
@@ -6064,13 +6056,13 @@ private fun ToolsPage(
 
     LazyColumn(
         modifier = Modifier.fillMaxSize().padding(horizontal = 14.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
+        verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         item { Spacer(Modifier.height(4.dp)) }
         item {
             Text(
                 "工具中心",
-                fontSize = 22.sp,
+                fontSize = 24.sp,
                 fontWeight = FontWeight.ExtraBold,
                 color = TextDark,
                 modifier = Modifier.padding(start = 2.dp)
@@ -6078,61 +6070,90 @@ private fun ToolsPage(
         }
         item {
             Text(
-                "网络诊断、性能测试、运营商工参",
+                "网络诊断 · 性能测试 · 运营商工参",
                 fontSize = 13.sp,
                 color = Muted,
-                modifier = Modifier.padding(start = 2.dp, bottom = 4.dp)
+                modifier = Modifier.padding(start = 2.dp, bottom = 2.dp)
             )
         }
 
         item {
-            SoftCard {
-                SectionTitle("network", "网络诊断", Blue)
-                Spacer(Modifier.height(8.dp))
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    networkDiagTools.forEach { tool ->
-                        ToolEntryRow(tool.title, tool.subtitle, tool.mark, tool.markBg, tool.markFg) {
-                            if (tool.page == AppToolPage.NONE) onOpenNatDiagnostics() else onOpenTool(tool.page)
-                        }
-                    }
-                }
+            AppleToolGroup(
+                title = "网络诊断",
+                mark = "network",
+                color = Blue,
+                tools = networkDiagTools
+            ) { tool ->
+                if (tool.page == AppToolPage.NONE) onOpenNatDiagnostics() else onOpenTool(tool.page)
             }
         }
 
         item {
-            SoftCard {
-                SectionTitle("performance", "性能测试", Purple)
-                Spacer(Modifier.height(8.dp))
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    performanceTools.forEach { tool ->
-                        ToolEntryRow(tool.title, tool.subtitle, tool.mark, tool.markBg, tool.markFg) {
-                            onOpenTool(tool.page)
-                        }
-                    }
-                }
+            AppleToolGroup(
+                title = "性能测试",
+                mark = "performance",
+                color = Purple,
+                tools = performanceTools
+            ) { tool ->
+                onOpenTool(tool.page)
             }
         }
 
         item {
-            SoftCard {
-                SectionTitle("telecom", "运营商工参", Color(0xFFF97316))
-                Spacer(Modifier.height(8.dp))
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    telecomTools.forEach { tool ->
-                        ToolEntryRow(tool.title, tool.subtitle, tool.mark, tool.markBg, tool.markFg) {
-                            onOpenTool(tool.page)
-                        }
-                    }
-                }
+            AppleToolGroup(
+                title = "运营商工参",
+                mark = "telecom",
+                color = Color(0xFFF97316),
+                tools = telecomTools
+            ) { tool ->
+                onOpenTool(tool.page)
             }
         }
 
-        item { Spacer(Modifier.height(18.dp)) }
+        item { Spacer(Modifier.height(24.dp)) }
     }
 }
 
 @Composable
-private fun ToolEntryRow(
+private fun AppleToolGroup(
+    title: String,
+    mark: String,
+    color: Color,
+    tools: List<ToolEntryItem>,
+    onToolClick: (ToolEntryItem) -> Unit
+) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(start = 4.dp, bottom = 6.dp)
+        ) {
+            SectionTitle(mark, title, color)
+        }
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(ShapeL)
+                .background(GlassCardBrush)
+                .border(0.5.dp, GlassBorderBrush, ShapeL)
+        ) {
+            tools.forEachIndexed { index, tool ->
+                ToolListRow(tool.title, tool.subtitle, tool.mark, tool.markBg, tool.markFg) {
+                    onToolClick(tool)
+                }
+                if (index < tools.lastIndex) {
+                    HorizontalDivider(
+                        modifier = Modifier.padding(start = 54.dp),
+                        thickness = 0.5.dp,
+                        color = Color(0x0F000000)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ToolListRow(
     title: String,
     subtitle: String,
     mark: String,
@@ -6140,29 +6161,25 @@ private fun ToolEntryRow(
     markFg: Color,
     onClick: () -> Unit
 ) {
-    Surface(
-        shape = ShapeM,
-        color = Color(0xFFF8FAFC),
-        border = BorderStroke(1.dp, Border.copy(alpha = 0.6f)),
-        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick)
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 11.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            MarkBox(mark, markBg, markFg)
-            Spacer(Modifier.width(10.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(title, fontSize = 14.sp, fontWeight = FontWeight.Bold, color = TextDark)
-                Text(subtitle, fontSize = 11.sp, color = Muted, lineHeight = 14.sp)
-            }
-            Icon(
-                Icons.Filled.ChevronRight,
-                contentDescription = null,
-                tint = Muted,
-                modifier = Modifier.width(18.dp).height(18.dp)
-            )
+        MarkBox(mark, markBg, markFg)
+        Spacer(Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(title, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = TextDark)
+            Text(subtitle, fontSize = 11.5.sp, color = Muted, lineHeight = 15.sp)
         }
+        Icon(
+            Icons.Filled.ChevronRight,
+            contentDescription = null,
+            tint = Muted.copy(alpha = 0.7f),
+            modifier = Modifier.width(16.dp).height(16.dp)
+        )
     }
 }
 
@@ -6819,7 +6836,7 @@ private fun AlertDialog(
         tonalElevation = 0.dp,
         modifier = modifier
             .fillMaxWidth(0.92f)
-            .border(1.dp, GlassPopupBorder, shape),
+            .border(0.5.dp, GlassPopupBorder, shape),
         properties = properties
     )
 }
@@ -6885,8 +6902,8 @@ private fun SoftCard(content: @Composable ColumnScope.() -> Unit) {
             .fillMaxWidth()
             .clip(ShapeL)
             .background(GlassCardBrush)
-            .border(1.dp, GlassBorderBrush, ShapeL)
-            .padding(9.dp),
+            .border(0.5.dp, GlassBorderBrush, ShapeL)
+            .padding(11.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
         content = content
     )
@@ -7157,11 +7174,10 @@ private fun NetGlyph(mark: String, color: Color, modifier: Modifier = Modifier) 
                 dot(0.50f,0.75f,0.043f)
             }
             "ping", "∿" -> {
-                // 独立Ping/Ping测试：仪表盘/速度表风格。
+                // 独立Ping/Ping测试：干净的 Apple SF Symbols 速度计弧线与指针
                 drawArc(color, 205f, 130f, false, topLeft=Offset(0.18f*w,0.20f*h), size=androidx.compose.ui.geometry.Size(0.64f*w,0.64f*h), style=stroke)
                 line(0.50f,0.58f,0.66f,0.38f,1f,stroke)
                 dot(0.50f,0.58f,0.04f)
-                line(0.28f,0.72f,0.72f,0.72f,0.75f,thin)
             }
             "connection_tree" -> {
                 // 连接数测试：短横向闪电 + 电弧 + 小端点，紧凑且不糊。
@@ -7927,7 +7943,7 @@ private fun SessionMetricTileCompact(
         modifier = modifier
             .height(SessionMetricCompactHeight)
             .background(Color(0xFFF8FAFC), ShapeM)
-            .border(1.dp, Border.copy(alpha = 0.72f), ShapeM)
+            .border(0.5.dp, Color.White.copy(alpha = 0.85f), ShapeM)
             .padding(horizontal = 4.dp, vertical = 5.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
@@ -7968,7 +7984,7 @@ private fun SessionCompareMetricTileCompact(
         modifier = modifier
             .height(SessionCompareMetricCompactHeight)
             .background(Color(0xFFF8FAFC), ShapeM)
-            .border(1.dp, Border.copy(alpha = 0.72f), ShapeM)
+            .border(0.5.dp, Color.White.copy(alpha = 0.85f), ShapeM)
             .padding(horizontal = 3.dp, vertical = 3.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
@@ -8015,7 +8031,7 @@ private fun SessionAddressRow(
         modifier = Modifier
             .fillMaxWidth()
             .background(Color(0xFFF8FAFC), ShapeM)
-            .border(1.dp, Border.copy(alpha = 0.65f), ShapeM)
+            .border(0.5.dp, Color.White.copy(alpha = 0.85f), ShapeM)
             .padding(start = 9.dp, end = 3.dp, top = 3.dp, bottom = 3.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -8065,7 +8081,7 @@ private fun SessionResultSummaryCard(
             .fillMaxWidth()
             .height(SessionMetricCompactHeight)
             .background(Color(0xFFF8FAFC), ShapeM)
-            .border(1.dp, Border.copy(alpha = 0.75f), ShapeM)
+            .border(0.5.dp, Color.White.copy(alpha = 0.85f), ShapeM)
             .padding(horizontal = 3.dp, vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -8101,7 +8117,7 @@ private fun SessionCompareResultSummaryCard(
             .fillMaxWidth()
             .height(SessionCompareMetricCompactHeight)
             .background(Color(0xFFF8FAFC), ShapeM)
-            .border(1.dp, Border.copy(alpha = 0.75f), ShapeM)
+            .border(0.5.dp, Color.White.copy(alpha = 0.85f), ShapeM)
             .padding(horizontal = 3.dp, vertical = 3.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -8156,9 +8172,9 @@ private fun FloatingSummaryValue(label: String, value: String, color: Color, mod
 private fun FloatingSummaryDivider() {
     Box(
         modifier = Modifier
-            .width(1.dp)
-            .height(22.dp)
-            .background(Border.copy(alpha = 0.9f))
+            .width(0.5.dp)
+            .height(18.dp)
+            .background(Color(0x12000000))
     )
 }
 
@@ -8274,20 +8290,9 @@ private fun CombinedSessionGrowthChart(series: List<SessionChartSeries>) {
                 fun xOfSec(sec: Int): Float = w * ((sec - minX).toFloat() / (maxX - minX).toFloat()).coerceIn(0f, 1f)
                 fun ySession(value: Int): Float = h - h * (value.coerceIn(0, maxSessionY).toFloat() / maxSessionY.toFloat())
 
-                stageRanges.forEach { range ->
-                    val color = when (range.stage) {
-                        SessionChartStage.GROWTH -> Blue.copy(alpha = 0.055f)
-                        SessionChartStage.CONFIRM -> Orange.copy(alpha = 0.09f)
-                        SessionChartStage.RESULT -> Green.copy(alpha = 0.075f)
-                    }
-                    val left = xOfSec(range.startSec)
-                    val right = xOfSec(range.endSec).coerceAtLeast(left + 1f)
-                    drawRect(color = color, topLeft = Offset(left, 0f), size = androidx.compose.ui.geometry.Size(right - left, h))
-                }
-
                 repeat(4) { idx ->
                     val y = h * (idx + 1) / 5f
-                    drawLine(Border.copy(alpha = 0.55f), Offset(0f, y), Offset(w, y), strokeWidth = 1f)
+                    drawLine(Border.copy(alpha = 0.35f), Offset(0f, y), Offset(w, y), strokeWidth = 1f)
                 }
 
                 visibleSeries.forEach { item ->
@@ -8347,7 +8352,7 @@ private fun CombinedSessionGrowthChart(series: List<SessionChartSeries>) {
             Text(failSummary, color = ErrorRed, fontSize = 10.sp, lineHeight = 13.sp, fontWeight = FontWeight.Bold)
         }
         Text(
-            "说明：折线为活动会话；阶段背景来自实际运行状态；红条表示相邻采样间新增失败。",
+            "说明：折线为活动会话；红条表示相邻采样间新增失败。",
             color = Muted,
             fontSize = 10.sp,
             lineHeight = 13.sp
@@ -9610,7 +9615,7 @@ private fun <T> ToolHistorySection(
                         },
                         color = Color(0xFFF8FAFC),
                         shape = ShapeM,
-                        border = BorderStroke(1.dp, Border.copy(alpha = 0.6f))
+                        border = BorderStroke(0.5.dp, Color.White.copy(alpha = 0.85f))
                     ) {
                         Row(
                             modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
@@ -13877,7 +13882,7 @@ private fun BufferbloatToolPage(onBack: () -> Unit) {
                 Surface(
                     shape = ShapeM,
                     color = Color.White,
-                    border = BorderStroke(1.dp, Border.copy(alpha = 0.6f)),
+                    border = BorderStroke(0.5.dp, Color.White.copy(alpha = 0.85f)),
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Column(Modifier.padding(10.dp)) {
@@ -14724,7 +14729,7 @@ private fun DualNetworkToolPage(onBack: () -> Unit) {
                 Surface(
                     shape = ShapeM,
                     color = Color.White,
-                    border = BorderStroke(1.dp, Border.copy(alpha = 0.6f)),
+                    border = BorderStroke(0.5.dp, Color.White.copy(alpha = 0.85f)),
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Column(Modifier.padding(10.dp)) {
@@ -15251,7 +15256,7 @@ private fun IperfToolPage(onBack: () -> Unit) {
                 Surface(
                     shape = ShapeM,
                     color = Color.White,
-                    border = BorderStroke(1.dp, Border.copy(alpha = 0.6f)),
+                    border = BorderStroke(0.5.dp, Color.White.copy(alpha = 0.85f)),
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Column(Modifier.padding(10.dp)) {
@@ -15618,7 +15623,7 @@ private fun SoftCompactToolCard(modifier: Modifier = Modifier, content: @Composa
             .fillMaxWidth()
             .clip(shape)
             .background(GlassCompactBrush)
-            .border(1.dp, GlassBorderBrush, shape)
+            .border(0.5.dp, GlassBorderBrush, shape)
             .then(modifier)
             .padding(horizontal = 10.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp),
@@ -16391,9 +16396,26 @@ private fun DiagnosisAdviceInlineCard(mode: TestMode, ipv4Stats: ProtocolStats, 
             MetricTile("IPv6峰值", if (hasV6) v6Peak.toString() else "—", if (v6Peak >= 5000) Green else Blue, Modifier.weight(1f))
         }
         advice.take(3).forEachIndexed { index, line ->
-            Row(verticalAlignment = Alignment.Top) {
-                Text("${index + 1}.", color = Blue, fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(18.dp))
-                Text(line, color = Muted, fontSize = 11.sp, lineHeight = 15.sp, modifier = Modifier.weight(1f))
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                verticalAlignment = Alignment.Top
+            ) {
+                Text(
+                    text = "${index + 1}.",
+                    color = Blue,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace,
+                    lineHeight = 17.sp,
+                    modifier = Modifier.width(22.dp)
+                )
+                Text(
+                    text = line,
+                    color = Muted,
+                    fontSize = 12.sp,
+                    lineHeight = 17.sp,
+                    modifier = Modifier.weight(1f)
+                )
             }
         }
     }
@@ -16458,10 +16480,9 @@ private fun RecentLogCard(logs: List<LogLine>, maskPrivacy: Boolean, onMore: () 
             Text("暂无日志", color = Muted, fontSize = 12.sp)
         } else {
             val visibleLogs = logs.takeLast(4).asReversed()
-            visibleLogs.forEachIndexed { index, line ->
-                CompactLogLine(line, maskPrivacy)
-                if (index != visibleLogs.lastIndex) {
-                    HorizontalDivider(color = Border.copy(alpha = 0.65f), thickness = 0.6.dp)
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                visibleLogs.forEach { line ->
+                    CompactLogLine(line, maskPrivacy)
                 }
             }
         }
@@ -16967,18 +16988,18 @@ private val GlassBackgroundBottom = Color(0xFFF2F2F7)
 private val GlassBlueGlow = Color(0x1F007AFF)   // 极低色散冷调微光 (<0.02)
 private val GlassPurpleGlow = Color(0x145856D6) // 极低色散微光，杜绝彩虹眩光与塑料感
 private val GlassCardBrush = Brush.verticalGradient(
-    listOf(Color.White.copy(alpha = 0.82f), Color.White.copy(alpha = 0.70f))
+    listOf(Color.White.copy(alpha = 0.92f), Color.White.copy(alpha = 0.82f))
 )
 private val GlassCompactBrush = Brush.verticalGradient(
-    listOf(Color.White.copy(alpha = 0.88f), Color.White.copy(alpha = 0.78f))
+    listOf(Color.White.copy(alpha = 0.94f), Color.White.copy(alpha = 0.86f))
 )
 private val GlassBorderBrush = Brush.verticalGradient(
-    listOf(Color.White.copy(alpha = 0.55f), Color.White.copy(alpha = 0.15f), Color(0x0A000000))
+    listOf(Color.White.copy(alpha = 0.85f), Color.White.copy(alpha = 0.40f))
 )
 private val GlassSwipeSurface = Color(0xFFF8F8FA)
 private val DeleteActionSurface = Color(0xFFFF3B30)
 private val GlassNavSurface = Color(0xE6FFFFFF)
 private val GlassNavSelectionSurface = Color(0x1F007AFF)
 private val GlassPopupSurface = Color(0xF5FFFFFF)
-private val GlassPopupBorder = Color(0x2E007AFF)
+private val GlassPopupBorder = Color.White.copy(alpha = 0.70f)
 private val GlassPopupShape = RoundedCornerShape(28.dp) // Apple RadiusModal
