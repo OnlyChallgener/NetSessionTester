@@ -6,14 +6,13 @@ AppPublisherURL=https://github.com/OnlyChallgener/NetSessionTester
 DefaultDirName={autopf}\NetSessionTester
 DefaultGroupName=NetSessionTester
 UninstallDisplayIcon={app}\NetSessionTester.exe
-SetupIconFile=..\assets\icon.ico
+SetupIconFile=package-windows\icon.ico
 Compression=lzma2
 SolidCompression=yes
 OutputDir=.
 OutputBaseFilename=NetSessionTester-Windows-x64-Setup
 ArchitecturesInstallIn64BitMode=x64
 WizardStyle=modern
-SourceDir=..\..\
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"
@@ -22,7 +21,7 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 Source: "package-windows\NetSessionTester.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "package-windows\NetSessionTester.jar"; DestDir: "{app}"; Flags: ignoreversion
 Source: "package-windows\README.txt"; DestDir: "{app}"; Flags: ignoreversion
-Source: "desktop\assets\icon.ico"; DestDir: "{app}"; Flags: ignoreversion
+Source: "package-windows\icon.ico"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\NetSessionTester"; Filename: "{app}\NetSessionTester.exe"; IconFilename: "{app}\icon.ico"

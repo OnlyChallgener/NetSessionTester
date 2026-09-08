@@ -243,7 +243,7 @@ jobs:
               }
           }
           Write-Host "Compiling installer using: $iscc"
-          & "$iscc" desktop\installer\installer.iss
+          & "$iscc" installer.iss
 
       - name: Upload Windows Portable Edition
         uses: actions/upload-artifact@v4
@@ -255,4 +255,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: NetSessionTester-Windows-x64-Setup.exe
-          path: desktop/installer/NetSessionTester-Windows-x64-Setup.exe
+          path: NetSessionTester-Windows-x64-Setup.exe
