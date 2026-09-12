@@ -14,28 +14,42 @@ class LogStore(private val context: Context) {
     suspend fun append(line: LogLine) = withContext(Dispatchers.IO) {
         synchronized(fileLock) {
             file.appendText(line.toJson().toString() + "\n")
-            trimIfNeeded()
+            trimIfNeeded(force = false)
         }
     }
 
     suspend fun load(limit: Int = 500): List<LogLine> = withContext(Dispatchers.IO) {
         synchronized(fileLock) {
             if (!file.exists()) return@synchronized emptyList()
-            file.readLines().takeLast(limit).mapNotNull { raw ->
-                runCatching { JSONObject(raw).toLogLine() }.getOrNull()
+            val now = System.currentTimeMillis()
+            file.readLines().takeLast(limit.coerceAtLeast(1)).mapNotNull { raw ->
+                runCatching {
+                    val obj = JSONObject(raw)
+                    val time = obj.optLong("timeEpochMs", now)
+                    if (now - time <= RETENTION_MILLIS) obj.toLogLine() else null
+                }.getOrNull()
             }
         }
     }
 
     suspend fun clear() = withContext(Dispatchers.IO) {
-        synchronized(fileLock) { if (file.exists()) file.delete() }
+        synchronized(fileLock) {
+            writesSinceLastTrim = 0
+            if (file.exists()) file.delete()
+        }
     }
 
     suspend fun clearAndReturn(): List<LogLine> = withContext(Dispatchers.IO) {
         synchronized(fileLock) {
+            writesSinceLastTrim = 0
             val snapshot = if (file.exists()) {
+                val now = System.currentTimeMillis()
                 file.readLines().takeLast(500).mapNotNull { raw ->
-                    runCatching { JSONObject(raw).toLogLine() }.getOrNull()
+                    runCatching {
+                        val obj = JSONObject(raw)
+                        val time = obj.optLong("timeEpochMs", now)
+                        if (now - time <= RETENTION_MILLIS) obj.toLogLine() else null
+                    }.getOrNull()
                 }
             } else {
                 emptyList()
@@ -47,6 +61,7 @@ class LogStore(private val context: Context) {
 
     suspend fun replaceAll(lines: List<LogLine>) = withContext(Dispatchers.IO) {
         synchronized(fileLock) {
+            writesSinceLastTrim = 0
             val kept = lines.takeLast(500)
             if (kept.isEmpty()) {
                 if (file.exists()) file.delete()
@@ -57,7 +72,10 @@ class LogStore(private val context: Context) {
     }
 
     fun clearNow() {
-        synchronized(fileLock) { if (file.exists()) file.delete() }
+        synchronized(fileLock) {
+            writesSinceLastTrim = 0
+            if (file.exists()) file.delete()
+        }
     }
 
     fun sizeKb(): Int = synchronized(fileLock) {
@@ -66,11 +84,28 @@ class LogStore(private val context: Context) {
         kb.coerceAtLeast(0L).toInt()
     }
 
-    private fun trimIfNeeded(maxLines: Int = 500) {
+    /**
+     * Amortized trim: instead of reading and rewriting the whole file on every single append,
+     * we batch the compaction every 50 writes or when forced. Also prunes records older than 7 days.
+     */
+    private fun trimIfNeeded(force: Boolean = false) {
         if (!file.exists()) return
+        writesSinceLastTrim++
+        if (!force && writesSinceLastTrim < BATCH_TRIM_INTERVAL) return
+        writesSinceLastTrim = 0
+
         val lines = file.readLines()
-        if (lines.size > maxLines) {
-            file.writeText(lines.takeLast(maxLines).joinToString("\n") + "\n")
+        if (lines.size > MAX_LINES || force) {
+            val now = System.currentTimeMillis()
+            val valid = lines.takeLast(MAX_LINES).filter { raw ->
+                val time = runCatching { JSONObject(raw).optLong("timeEpochMs", now) }.getOrDefault(now)
+                (now - time) <= RETENTION_MILLIS
+            }
+            if (valid.isEmpty()) {
+                file.delete()
+            } else {
+                file.writeText(valid.joinToString("\n") + "\n")
+            }
         }
     }
 
@@ -87,5 +122,9 @@ class LogStore(private val context: Context) {
 
     private companion object {
         val fileLock = Any()
+        const val MAX_LINES = 500
+        const val BATCH_TRIM_INTERVAL = 50
+        const val RETENTION_MILLIS = 7L * 24 * 60 * 60 * 1000L // 7 days retention
+        @Volatile var writesSinceLastTrim = 0
     }
 }

@@ -1,0 +1,33 @@
+# Gradle & Build Artifacts
+.gradle/
+build/
+*/build/
+package-windows/
+*.apk
+*.aab
+*.dmg
+*.msi
+*.ipa
+*.zip
+*.exe
+!installer.iss
+
+# Android / Local Properties
+local.properties
+.cxx/
+captures/
+*.jks
+*.keystore
+
+# IDE / Editor
+.idea/
+*.iml
+*.iws
+*.ipr
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Log files & diagnostics
+*.log
+scratch/
