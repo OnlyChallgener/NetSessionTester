@@ -8286,20 +8286,34 @@ private fun CombinedSessionGrowthChart(series: List<SessionChartSeries>) {
                 fun xOfSec(sec: Int): Float = w * ((sec - minX).toFloat() / (maxX - minX).toFloat()).coerceIn(0f, 1f)
                 fun ySession(value: Int): Float = h - h * (value.coerceIn(0, maxSessionY).toFloat() / maxSessionY.toFloat())
 
-                repeat(4) { idx ->
-                    val y = h * (idx + 1) / 5f
-                    drawLine(Border.copy(alpha = 0.35f), Offset(0f, y), Offset(w, y), strokeWidth = 1f)
-                }
-
                 visibleSeries.forEach { item ->
                     val ordered = item.points
                     if (ordered.size > 1) {
                         val path = Path()
+                        val fillPath = Path()
                         ordered.forEachIndexed { index, point ->
                             val x = xOfSec(point.elapsedSec)
                             val y = ySession(point.active)
-                            if (index == 0) path.moveTo(x, y) else path.lineTo(x, y)
+                            if (index == 0) {
+                                path.moveTo(x, y)
+                                fillPath.moveTo(x, h)
+                                fillPath.lineTo(x, y)
+                            } else {
+                                path.lineTo(x, y)
+                                fillPath.lineTo(x, y)
+                            }
                         }
+                        fillPath.lineTo(xOfSec(ordered.last().elapsedSec), h)
+                        fillPath.close()
+
+                        drawPath(
+                            path = fillPath,
+                            brush = Brush.verticalGradient(
+                                colors = listOf(item.color.copy(alpha = 0.14f), Color.Transparent),
+                                startY = 0f,
+                                endY = h
+                            )
+                        )
                         drawPath(path, color = item.color, style = Stroke(width = 3.5f, cap = StrokeCap.Round))
                     }
                     ordered.forEach { point ->
@@ -8560,10 +8574,6 @@ private fun FailureMiniChart(points: List<ChartPoint>) {
         Canvas(modifier = Modifier.fillMaxWidth().height(48.dp).background(Color(0xFFF8FAFC), ShapeS).padding(6.dp)) {
             val w = size.width
             val h = size.height
-            repeat(2) { idx ->
-                val y = h * (idx + 1) / 3f
-                drawLine(Border.copy(alpha = 0.45f), Offset(0f, y), Offset(w, y), strokeWidth = 1f)
-            }
             fun xOf(p: ChartPoint) = w * ((p.elapsedSec - minX).toFloat() / (maxX - minX).toFloat())
             fun yFail(v: Int) = h - h * (v.coerceIn(0, maxFailure).toFloat() / maxFailure.toFloat())
             if (sorted.size > 1) {
@@ -8614,19 +8624,34 @@ private fun SessionGrowthChart(points: List<ChartPoint>) {
             Canvas(modifier = Modifier.weight(1f).height(145.dp).background(Color(0xFFF8FAFC), ShapeS).padding(6.dp)) {
                 val w = size.width
                 val h = size.height
-                repeat(4) { idx ->
-                    val y = h * (idx + 1) / 5f
-                    drawLine(Border.copy(alpha = 0.55f), Offset(0f, y), Offset(w, y), strokeWidth = 1f)
-                }
                 fun xOf(p: ChartPoint) = w * ((p.elapsedSec - minX).toFloat() / (maxX - minX).toFloat())
                 fun ySession(v: Int) = h - h * (v.coerceIn(0, maxSessionY).toFloat() / maxSessionY.toFloat())
                 if (sorted.size > 1) {
                     val path = Path()
+                    val fillPath = Path()
                     sorted.forEachIndexed { index, p ->
                         val x = xOf(p)
                         val y = ySession(p.active)
-                        if (index == 0) path.moveTo(x, y) else path.lineTo(x, y)
+                        if (index == 0) {
+                            path.moveTo(x, y)
+                            fillPath.moveTo(x, h)
+                            fillPath.lineTo(x, y)
+                        } else {
+                            path.lineTo(x, y)
+                            fillPath.lineTo(x, y)
+                        }
                     }
+                    fillPath.lineTo(xOf(sorted.last()), h)
+                    fillPath.close()
+
+                    drawPath(
+                        path = fillPath,
+                        brush = Brush.verticalGradient(
+                            colors = listOf(Blue.copy(alpha = 0.14f), Color.Transparent),
+                            startY = 0f,
+                            endY = h
+                        )
+                    )
                     drawPath(path, color = Blue, style = Stroke(width = 4f, cap = StrokeCap.Round))
                 }
                 sorted.forEach { p ->
@@ -13101,7 +13126,6 @@ private fun RoamingPingCanvas(
         val yTicks = listOf(0, axisMax / 4, axisMax / 2, axisMax * 3 / 4, axisMax).distinct()
         yTicks.forEach { tick ->
             val yy = bottom - (tick / axisMax.toFloat()) * h
-            drawLine(Border.copy(alpha = 0.72f), Offset(left, yy), Offset(right, yy), strokeWidth = 1f)
             textPaint.textAlign = Paint.Align.RIGHT
             drawContext.canvas.nativeCanvas.drawText(tick.toString(), left - 10f, yy + 9f, textPaint)
             textPaint.textAlign = Paint.Align.LEFT
@@ -13111,7 +13135,6 @@ private fun RoamingPingCanvas(
         (0..4).forEach { idx ->
             val tickMs = viewStartMs + spanMs * idx / 4L
             val xx = x(tickMs)
-            drawLine(Border.copy(alpha = 0.45f), Offset(xx, top), Offset(xx, bottom), strokeWidth = 1f)
             val label = roamingTimeLabel((tickMs / 1000L).toInt())
             val labelWidth = textPaint.measureText(label)
             val tx = (xx - labelWidth / 2f).coerceIn(left, right - labelWidth)
@@ -13193,7 +13216,6 @@ private fun RoamingSignalCanvas(
         val yTicks = (0..4).map { idx -> (axisBottom + (axisTop - axisBottom) * idx / 4f).roundToInt() }.distinct()
         yTicks.forEach { tick ->
             val yy = yRssi(tick)
-            drawLine(Border.copy(alpha = 0.72f), Offset(left, yy), Offset(right, yy), strokeWidth = 1f)
             textPaint.textAlign = Paint.Align.RIGHT
             drawContext.canvas.nativeCanvas.drawText(tick.toString(), left - 10f, yy + 9f, textPaint)
             textPaint.textAlign = Paint.Align.LEFT
@@ -13203,7 +13225,6 @@ private fun RoamingSignalCanvas(
         (0..4).forEach { idx ->
             val tickMs = viewStartMs + spanMs * idx / 4L
             val xx = x(tickMs)
-            drawLine(Border.copy(alpha = 0.45f), Offset(xx, top), Offset(xx, bottom), strokeWidth = 1f)
             val label = roamingTimeLabel((tickMs / 1000L).toInt())
             val labelWidth = textPaint.measureText(label)
             val tx = (xx - labelWidth / 2f).coerceIn(left, right - labelWidth)
@@ -15590,7 +15611,6 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
 
                 axisLabels.forEach { tick ->
                     val y = yOf(tick)
-                    drawLine(Border.copy(alpha = 0.45f), Offset(left, y), Offset(right, y), strokeWidth = 1f)
                     val label = tick.toString()
                     val tw = axisPaint.measureText(label)
                     drawContext.canvas.nativeCanvas.drawText(label, (left - 12f - tw).coerceAtLeast(12f), (y + 7f).coerceIn(top + 10f, bottom - 3f), axisPaint)
@@ -15598,7 +15618,6 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
 
                 axisTicks.forEach { tickMs ->
                     val x = xOf(tickMs)
-                    drawLine(Border.copy(alpha = 0.25f), Offset(x, top), Offset(x, bottom), strokeWidth = 1f)
                     val label = formatPingAxisTime(tickMs)
                     val tw = axisPaint.measureText(label)
                     val tx = (x - tw / 2f).coerceIn(left + 2f, right - tw - 2f)
@@ -15615,6 +15634,49 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
                     // 高延迟是一次成功响应，不是断点；聚合点里如果有峰值，用峰值参与主折线，避免橙点悬空。
                     return if (highPoint && peak > latency) peak else latency
                 }
+
+                // 连续成功线段区域添加半透明微光渐变，消除网格后的空洞感
+                val solidGroups = mutableListOf<MutableList<PingPoint>>()
+                var currentGroup = mutableListOf<PingPoint>()
+                successSegments.forEach { seg ->
+                    if (!seg.dashed) {
+                        if (currentGroup.isEmpty()) currentGroup.add(seg.from)
+                        currentGroup.add(seg.to)
+                    } else {
+                        if (currentGroup.isNotEmpty()) {
+                            solidGroups.add(currentGroup)
+                            currentGroup = mutableListOf()
+                        }
+                    }
+                }
+                if (currentGroup.isNotEmpty()) solidGroups.add(currentGroup)
+
+                solidGroups.forEach { group ->
+                    if (group.size > 1) {
+                        val fillPath = Path()
+                        group.forEachIndexed { idx, p ->
+                            val x = xOf(p.elapsedMs)
+                            val y = yOf(chartLatencyOf(p) ?: p.latencyMs!!)
+                            if (idx == 0) {
+                                fillPath.moveTo(x, bottom)
+                                fillPath.lineTo(x, y)
+                            } else {
+                                fillPath.lineTo(x, y)
+                            }
+                        }
+                        fillPath.lineTo(xOf(group.last().elapsedMs), bottom)
+                        fillPath.close()
+                        drawPath(
+                            path = fillPath,
+                            brush = Brush.verticalGradient(
+                                colors = listOf(Blue.copy(alpha = 0.12f), Color.Transparent),
+                                startY = top,
+                                endY = bottom
+                            )
+                        )
+                    }
+                }
+
                 fun drawSegment(a: PingPoint, b: PingPoint, dashed: Boolean) {
                     val la = chartLatencyOf(a) ?: return
                     val lb = chartLatencyOf(b) ?: return
