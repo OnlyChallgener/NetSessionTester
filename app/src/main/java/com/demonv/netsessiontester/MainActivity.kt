@@ -8207,11 +8207,13 @@ private fun CombinedSessionGrowthChart(series: List<SessionChartSeries>) {
     val stageRanges = remember(visiblePoints, minX, maxX) { buildSessionStageRanges(visiblePoints, minX, maxX) }
     val failSummary = remember(visiblePoints) { failureIntervalSummary(visiblePoints) }
     val latest = allPoints.lastOrNull()
+    var selectedSec by remember { mutableStateOf<Int?>(null) }
 
     LaunchedEffect(allPoints.firstOrNull()?.elapsedSec, allPoints.firstOrNull()?.protocol) {
         zoomSpanX = null
         viewEndX = fullMaxX
         horizontalPanRemainderX[0] = 0f
+        selectedSec = null
     }
     LaunchedEffect(fullMaxX, spanX) {
         if (zoomSpanX == null) viewEndX = fullMaxX
@@ -8226,12 +8228,29 @@ private fun CombinedSessionGrowthChart(series: List<SessionChartSeries>) {
                 Text("● ${item.label}", color = item.color, fontSize = 10.sp, fontWeight = FontWeight.Bold)
             }
             Spacer(Modifier.weight(1f))
-            Text(
-                latest?.let { "${it.elapsedSec}s 活动 ${it.active}｜失败 ${it.failure}" } ?: "",
-                color = Muted,
-                fontSize = 10.sp,
-                maxLines = 1
-            )
+            val selectedPoints = selectedSec?.let { sec ->
+                visibleSeries.mapNotNull { s -> s.points.minByOrNull { kotlin.math.abs(it.elapsedSec - sec) }?.takeIf { kotlin.math.abs(it.elapsedSec - sec) <= 2 } }
+            }
+            if (selectedPoints != null && selectedPoints.isNotEmpty()) {
+                val secStr = "${selectedSec}s"
+                val statsStr = selectedPoints.joinToString(" · ") { "${it.protocol.label} 活动${it.active} CPS${it.cps}" }
+                val failCount = selectedPoints.firstOrNull()?.failure ?: 0
+                val failStr = if (failCount > 0) " 失败$failCount" else ""
+                Text(
+                    "$secStr · $statsStr$failStr",
+                    color = Blue,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 10.sp,
+                    maxLines = 1
+                )
+            } else {
+                Text(
+                    latest?.let { "${it.elapsedSec}s 活动 ${it.active}｜失败 ${it.failure}" } ?: "",
+                    color = Muted,
+                    fontSize = 10.sp,
+                    maxLines = 1
+                )
+            }
         }
 
         Row(horizontalArrangement = Arrangement.spacedBy(9.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -8254,16 +8273,6 @@ private fun CombinedSessionGrowthChart(series: List<SessionChartSeries>) {
                     .padding(6.dp)
                     .onSizeChanged { chartWidthPx = it.width.toFloat().coerceAtLeast(1f) }
                     .chartGestureModifier(
-                        onHorizontalPan = { dragAmount ->
-                            val preciseDeltaX = dragAmount / chartWidthPx.coerceAtLeast(1f) * spanX + horizontalPanRemainderX[0]
-                            val deltaX = preciseDeltaX.toInt()
-                            horizontalPanRemainderX[0] = preciseDeltaX - deltaX
-                            if (deltaX != 0) {
-                                val nextEndX = (effectiveViewEndX - deltaX).coerceIn(minViewEndX, maxViewEndX)
-                                if (nextEndX == effectiveViewEndX) horizontalPanRemainderX[0] = 0f
-                                viewEndX = nextEndX
-                            }
-                        },
                         onPinchTransform = { centroidX, panX, zoom ->
                             horizontalPanRemainderX[0] = 0f
                             val width = chartWidthPx.coerceAtLeast(1f)
@@ -8273,6 +8282,14 @@ private fun CombinedSessionGrowthChart(series: List<SessionChartSeries>) {
                             zoomSpanX = newSpan
                             val newEnd = focalX + (newSpan * (1f - focalRatio)).toInt() - (panX / width * newSpan).toInt()
                             viewEndX = newEnd.coerceIn(fullMinX + newSpan, fullMaxX.coerceAtLeast(fullMinX + newSpan))
+                        },
+                        onScrub = { offset ->
+                            val ratio = (offset.x / chartWidthPx.coerceAtLeast(1f)).coerceIn(0f, 1f)
+                            selectedSec = (minX + ratio * (maxX - minX)).roundToInt()
+                        },
+                        onTap = { offset ->
+                            val ratio = (offset.x / chartWidthPx.coerceAtLeast(1f)).coerceIn(0f, 1f)
+                            selectedSec = (minX + ratio * (maxX - minX)).roundToInt()
                         },
                         onDoubleTap = {
                             zoomSpanX = null
@@ -8352,6 +8369,26 @@ private fun CombinedSessionGrowthChart(series: List<SessionChartSeries>) {
                         previousFailure = point.failure
                     }
                 }
+
+                selectedSec?.takeIf { it in minX..maxX }?.let { sec ->
+                    val x = xOfSec(sec)
+                    drawLine(
+                        color = Color(0xFF64748B).copy(alpha = 0.40f),
+                        start = Offset(x, 0f),
+                        end = Offset(x, h),
+                        strokeWidth = 1.2f,
+                        pathEffect = PathEffect.dashPathEffect(floatArrayOf(6f, 6f), 0f)
+                    )
+                    visibleSeries.forEach { item ->
+                        val pt = item.points.minByOrNull { kotlin.math.abs(it.elapsedSec - sec) }
+                        if (pt != null && kotlin.math.abs(pt.elapsedSec - sec) <= 2) {
+                            val y = ySession(pt.active)
+                            drawCircle(item.color.copy(alpha = 0.22f), radius = 8f, center = Offset(x, y))
+                            drawCircle(Color.White, radius = 5f, center = Offset(x, y))
+                            drawCircle(item.color, radius = 3.2f, center = Offset(x, y))
+                        }
+                    }
+                }
             }
         }
 
@@ -8362,7 +8399,7 @@ private fun CombinedSessionGrowthChart(series: List<SessionChartSeries>) {
             Text(failSummary, color = ErrorRed, fontSize = 10.sp, lineHeight = 13.sp, fontWeight = FontWeight.Bold)
         }
         Text(
-            "说明：折线为活动会话；红条表示相邻采样间新增失败。",
+            "说明：折线为活动会话；红条表示相邻采样间新增失败；滑动可查看对应秒数数值。",
             color = Muted,
             fontSize = 10.sp,
             lineHeight = 13.sp
@@ -8605,6 +8642,8 @@ private fun SessionGrowthChart(points: List<ChartPoint>) {
     val yLabels = remember(maxSessionY) { axisLabels(maxSessionY) }
     val xLabels = remember(minX, maxX, step) { timeLabels(minX, maxX, step) }
     val failSummary = remember(sorted) { failureIntervalSummary(sorted) }
+    var chartWidthPx by remember { mutableStateOf(1f) }
+    var selectedPoint by remember { mutableStateOf<ChartPoint?>(null) }
     Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("会话数", color = Muted, fontSize = 10.sp)
@@ -8615,13 +8654,34 @@ private fun SessionGrowthChart(points: List<ChartPoint>) {
                 Text("● 失败", color = ErrorRed, fontSize = 10.sp, fontWeight = FontWeight.Bold)
             }
             Spacer(Modifier.weight(1f))
-            Text(last?.let { "${it.elapsedSec}s 活动 ${it.active}｜失败 ${it.failure}" } ?: "", color = Muted, fontSize = 10.sp, maxLines = 1)
+            selectedPoint?.let {
+                Text("${it.elapsedSec}s 活动 ${it.active} · CPS ${it.cps} · 失败 ${it.failure}", color = Blue, fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+            } ?: Text(last?.let { "${it.elapsedSec}s 活动 ${it.active}｜失败 ${it.failure}" } ?: "", color = Muted, fontSize = 10.sp, maxLines = 1)
         }
         Row(modifier = Modifier.fillMaxWidth().height(158.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(modifier = Modifier.width(34.dp).height(145.dp), verticalArrangement = Arrangement.SpaceBetween) {
                 yLabels.forEach { Text(it.toString(), color = Muted, fontSize = 9.sp, maxLines = 1) }
             }
-            Canvas(modifier = Modifier.weight(1f).height(145.dp).background(Color(0xFFF8FAFC), ShapeS).padding(6.dp)) {
+            Canvas(
+                modifier = Modifier
+                    .weight(1f)
+                    .height(145.dp)
+                    .background(Color(0xFFF8FAFC), ShapeS)
+                    .padding(6.dp)
+                    .onSizeChanged { chartWidthPx = it.width.toFloat().coerceAtLeast(1f) }
+                    .chartGestureModifier(
+                        onScrub = { offset ->
+                            val ratio = (offset.x / chartWidthPx.coerceAtLeast(1f)).coerceIn(0f, 1f)
+                            val sec = minX + ratio * (maxX - minX)
+                            selectedPoint = sorted.minByOrNull { kotlin.math.abs(it.elapsedSec - sec) }
+                        },
+                        onTap = { offset ->
+                            val ratio = (offset.x / chartWidthPx.coerceAtLeast(1f)).coerceIn(0f, 1f)
+                            val sec = minX + ratio * (maxX - minX)
+                            selectedPoint = sorted.minByOrNull { kotlin.math.abs(it.elapsedSec - sec) }
+                        }
+                    )
+            ) {
                 val w = size.width
                 val h = size.height
                 fun xOf(p: ChartPoint) = w * ((p.elapsedSec - minX).toFloat() / (maxX - minX).toFloat())
@@ -8657,6 +8717,21 @@ private fun SessionGrowthChart(points: List<ChartPoint>) {
                 sorted.forEach { p ->
                     drawCircle(Blue, radius = 2.6f, center = Offset(xOf(p), ySession(p.active)))
                 }
+
+                selectedPoint?.takeIf { it.elapsedSec in minX..maxX }?.let { p ->
+                    val x = xOf(p)
+                    val y = ySession(p.active)
+                    drawLine(
+                        color = Color(0xFF64748B).copy(alpha = 0.40f),
+                        start = Offset(x, 0f),
+                        end = Offset(x, h),
+                        strokeWidth = 1.2f,
+                        pathEffect = PathEffect.dashPathEffect(floatArrayOf(6f, 6f), 0f)
+                    )
+                    drawCircle(Blue.copy(alpha = 0.22f), radius = 8f, center = Offset(x, y))
+                    drawCircle(Color.White, radius = 5f, center = Offset(x, y))
+                    drawCircle(Blue, radius = 3.2f, center = Offset(x, y))
+                }
             }
         }
         Row(modifier = Modifier.fillMaxWidth().padding(start = 34.dp), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -8665,7 +8740,7 @@ private fun SessionGrowthChart(points: List<ChartPoint>) {
         if (failSummary.isNotBlank()) {
             Text(failSummary, color = ErrorRed, fontSize = 10.sp, lineHeight = 13.sp, fontWeight = FontWeight.Bold)
         }
-        Text("说明：连接数测试已使用折线趋势；CPS在上方文字显示，失败仅显示区间文字。", color = Muted, fontSize = 10.sp, lineHeight = 13.sp)
+        Text("说明：连接数测试已使用折线趋势；滑动可查看对应秒数数值。", color = Muted, fontSize = 10.sp, lineHeight = 13.sp)
     }
 }
 
@@ -13033,7 +13108,7 @@ private fun RoamingPingChartCard(samples: List<RoamingPingSample>, durationMs: L
             Text("Ping表", color = TextDark, fontWeight = FontWeight.Bold, fontSize = 13.sp, modifier = Modifier.weight(1f))
             Text("折线=Ping · 红条=丢包", color = Muted, fontSize = 11.sp)
         }
-        RoamingPingCanvas(plot = plot, viewStartMs = viewStartMs, viewEndMs = viewEndMs, onSelect = { selected = it })
+        RoamingPingCanvas(plot = plot, viewStartMs = viewStartMs, viewEndMs = viewEndMs, selected = selected, onSelect = { selected = it })
         selected?.let { RoamingPingSampleDetailLine(it) }
     }
 }
@@ -13084,7 +13159,7 @@ private fun RoamingSignalChartCard(samples: List<RoamingWifiSample>, events: Lis
             Text("信号表", color = TextDark, fontWeight = FontWeight.Bold, fontSize = 13.sp, modifier = Modifier.weight(1f))
             Text("实线=同AP · 虚线=AP切换", color = Muted, fontSize = 11.sp)
         }
-        RoamingSignalCanvas(plot = plot, viewStartMs = viewStartMs, viewEndMs = viewEndMs, onSelect = { selected = it })
+        RoamingSignalCanvas(plot = plot, viewStartMs = viewStartMs, viewEndMs = viewEndMs, selected = selected, onSelect = { selected = it })
         selectedSwitch?.let { RoamingSwitchPopup(it) }
         selected?.let { RoamingWifiSampleDetailLine(it) }
     }
@@ -13095,6 +13170,7 @@ private fun RoamingPingCanvas(
     plot: List<RoamingPingSample>,
     viewStartMs: Long,
     viewEndMs: Long,
+    selected: RoamingPingSample? = null,
     onSelect: (RoamingPingSample) -> Unit
 ) {
     Canvas(
@@ -13104,13 +13180,38 @@ private fun RoamingPingCanvas(
             .clip(ShapeM)
             .background(Color.White, ShapeM)
             .pointerInput(plot, viewStartMs, viewEndMs) {
-                detectTapGestures { pos ->
-                    if (plot.isEmpty()) return@detectTapGestures
-                    val left = 64f
-                    val right = size.width - 24f
-                    val ratio = ((pos.x - left) / (right - left).coerceAtLeast(1f)).coerceIn(0f, 1f)
-                    val selectedMs = viewStartMs + ((viewEndMs - viewStartMs) * ratio).toLong()
-                    plot.minByOrNull { abs(it.startedElapsedMs - selectedMs) }?.let(onSelect)
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    fun selectAt(pos: Offset) {
+                        if (plot.isEmpty()) return
+                        val left = 64f
+                        val right = size.width - 24f
+                        val ratio = ((pos.x - left) / (right - left).coerceAtLeast(1f)).coerceIn(0f, 1f)
+                        val selectedMs = viewStartMs + ((viewEndMs - viewStartMs) * ratio).toLong()
+                        plot.minByOrNull { abs(it.startedElapsedMs - selectedMs) }?.let(onSelect)
+                    }
+                    selectAt(down.position)
+                    var lastPos = down.position
+                    var totalDx = 0f
+                    var totalDy = 0f
+                    var isHorizontal = false
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        val pressed = event.changes.filter { it.pressed }
+                        if (pressed.isEmpty()) break
+                        val change = pressed.first()
+                        val delta = change.position - lastPos
+                        lastPos = change.position
+                        totalDx += delta.x
+                        totalDy += delta.y
+                        if (!isHorizontal && (abs(totalDx) > viewConfiguration.touchSlop * 0.4f || abs(totalDy) > viewConfiguration.touchSlop * 0.4f)) {
+                            isHorizontal = abs(totalDx) > abs(totalDy) * 1.1f
+                        }
+                        if (isHorizontal) {
+                            change.consume()
+                            selectAt(change.position)
+                        }
+                    }
                 }
             }
     ) {
@@ -13160,6 +13261,23 @@ private fun RoamingPingCanvas(
             val xx = x(sample.startedElapsedMs)
             drawLine(ErrorRed, Offset(xx, bottom - 13f), Offset(xx, bottom), strokeWidth = 4f, cap = StrokeCap.Round)
         }
+        selected?.let { s ->
+            val xx = x(s.startedElapsedMs)
+            drawLine(
+                color = Color(0xFF64748B).copy(alpha = 0.40f),
+                start = Offset(xx, top),
+                end = Offset(xx, bottom),
+                strokeWidth = 1.2f,
+                pathEffect = PathEffect.dashPathEffect(floatArrayOf(6f, 6f), 0f)
+            )
+            s.latencyMs?.let { lat ->
+                val yy = y(lat)
+                val dotColor = if (s.target == RoamingPingTarget.GATEWAY) Blue else Purple
+                drawCircle(dotColor.copy(alpha = 0.22f), radius = 8f, center = Offset(xx, yy))
+                drawCircle(Color.White, radius = 5f, center = Offset(xx, yy))
+                drawCircle(dotColor, radius = 3.2f, center = Offset(xx, yy))
+            }
+        }
     }
 }
 
@@ -13168,6 +13286,7 @@ private fun RoamingSignalCanvas(
     plot: List<RoamingWifiSample>,
     viewStartMs: Long,
     viewEndMs: Long,
+    selected: RoamingWifiSample? = null,
     onSelect: (RoamingWifiSample) -> Unit
 ) {
     Canvas(
@@ -13177,13 +13296,38 @@ private fun RoamingSignalCanvas(
             .clip(ShapeM)
             .background(Color.White, ShapeM)
             .pointerInput(plot, viewStartMs, viewEndMs) {
-                detectTapGestures { pos ->
-                    if (plot.isEmpty()) return@detectTapGestures
-                    val left = 64f
-                    val right = size.width - 24f
-                    val ratio = ((pos.x - left) / (right - left).coerceAtLeast(1f)).coerceIn(0f, 1f)
-                    val selectedMs = viewStartMs + ((viewEndMs - viewStartMs) * ratio).toLong()
-                    plot.minByOrNull { abs(it.elapsedMs - selectedMs) }?.let(onSelect)
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    fun selectAt(pos: Offset) {
+                        if (plot.isEmpty()) return
+                        val left = 64f
+                        val right = size.width - 24f
+                        val ratio = ((pos.x - left) / (right - left).coerceAtLeast(1f)).coerceIn(0f, 1f)
+                        val selectedMs = viewStartMs + ((viewEndMs - viewStartMs) * ratio).toLong()
+                        plot.minByOrNull { abs(it.elapsedMs - selectedMs) }?.let(onSelect)
+                    }
+                    selectAt(down.position)
+                    var lastPos = down.position
+                    var totalDx = 0f
+                    var totalDy = 0f
+                    var isHorizontal = false
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        val pressed = event.changes.filter { it.pressed }
+                        if (pressed.isEmpty()) break
+                        val change = pressed.first()
+                        val delta = change.position - lastPos
+                        lastPos = change.position
+                        totalDx += delta.x
+                        totalDy += delta.y
+                        if (!isHorizontal && (abs(totalDx) > viewConfiguration.touchSlop * 0.4f || abs(totalDy) > viewConfiguration.touchSlop * 0.4f)) {
+                            isHorizontal = abs(totalDx) > abs(totalDy) * 1.1f
+                        }
+                        if (isHorizontal) {
+                            change.consume()
+                            selectAt(change.position)
+                        }
+                    }
                 }
             }
     ) {
@@ -13251,6 +13395,22 @@ private fun RoamingSignalCanvas(
                     pathEffect = if (switched) PathEffect.dashPathEffect(floatArrayOf(9f, 7f), 0f) else null
                 )
             )
+        }
+        selected?.let { s ->
+            val xx = x(s.elapsedMs)
+            drawLine(
+                color = Color(0xFF64748B).copy(alpha = 0.40f),
+                start = Offset(xx, top),
+                end = Offset(xx, bottom),
+                strokeWidth = 1.2f,
+                pathEffect = PathEffect.dashPathEffect(floatArrayOf(6f, 6f), 0f)
+            )
+            s.rssi?.let { r ->
+                val yy = yRssi(r)
+                drawCircle(Blue.copy(alpha = 0.22f), radius = 8f, center = Offset(xx, yy))
+                drawCircle(Color.White, radius = 5f, center = Offset(xx, yy))
+                drawCircle(Blue, radius = 3.2f, center = Offset(xx, yy))
+            }
         }
     }
 }
@@ -15230,15 +15390,17 @@ private fun InfoMetricTile(
 private enum class ChartGestureMode { Undecided, VerticalScroll, HorizontalPan, PinchZoom, Finished }
 
 private fun Modifier.chartGestureModifier(
-    onHorizontalPan: (Float) -> Unit,
-    onPinchTransform: (centroidX: Float, panX: Float, zoom: Float) -> Unit,
+    onHorizontalPan: ((Float) -> Unit)? = null,
+    onPinchTransform: ((centroidX: Float, panX: Float, zoom: Float) -> Unit)? = null,
     onTap: ((Offset) -> Unit)? = null,
-    onDoubleTap: (() -> Unit)? = null
+    onDoubleTap: (() -> Unit)? = null,
+    onScrub: ((Offset) -> Unit)? = null
 ): Modifier = composed {
     val currentHorizontalPan by rememberUpdatedState(onHorizontalPan)
     val currentPinchTransform by rememberUpdatedState(onPinchTransform)
     val currentTap by rememberUpdatedState(onTap)
     val currentDoubleTap by rememberUpdatedState(onDoubleTap)
+    val currentScrub by rememberUpdatedState(onScrub)
 
     pointerInput(Unit) {
         var lastTapAt = 0L
@@ -15256,6 +15418,8 @@ private fun Modifier.chartGestureModifier(
             var mode = ChartGestureMode.Undecided
             var hadMultiplePointers = false
 
+            currentScrub?.invoke(downPosition)
+
             while (event.changes.any { it.pressed }) {
                 val pressed = event.changes.filter { it.pressed }
                 if (pressed.size >= 2) {
@@ -15265,7 +15429,7 @@ private fun Modifier.chartGestureModifier(
                     val pan = event.calculatePan()
                     val centroid = event.calculateCentroid(useCurrent = true)
                     if (zoom != 1f || pan.x != 0f) {
-                        currentPinchTransform(centroid.x, pan.x, zoom)
+                        currentPinchTransform?.invoke(centroid.x, pan.x, zoom)
                     }
                     event.changes.forEach { change ->
                         if (change.pressed) change.consume()
@@ -15282,17 +15446,20 @@ private fun Modifier.chartGestureModifier(
                         totalDx += delta.x
                         totalDy += delta.y
                         if (mode == ChartGestureMode.Undecided &&
-                            kotlin.math.hypot(totalDx.toDouble(), totalDy.toDouble()) > viewConfiguration.touchSlop.toDouble()
+                            kotlin.math.hypot(totalDx.toDouble(), totalDy.toDouble()) > (viewConfiguration.touchSlop.toDouble() * 0.4)
                         ) {
-                            mode = if (kotlin.math.abs(totalDx) > kotlin.math.abs(totalDy) * 1.2f) {
+                            mode = if (kotlin.math.abs(totalDx) > kotlin.math.abs(totalDy) * 1.1f) {
                                 ChartGestureMode.HorizontalPan
                             } else {
                                 ChartGestureMode.VerticalScroll
                             }
                         }
                         if (mode == ChartGestureMode.HorizontalPan) {
-                            currentHorizontalPan(delta.x)
+                            currentHorizontalPan?.invoke(delta.x)
+                            currentScrub?.invoke(change.position)
                             change.consume()
+                        } else if (mode == ChartGestureMode.Undecided) {
+                            currentScrub?.invoke(change.position)
                         }
                     }
                 }
@@ -15310,6 +15477,7 @@ private fun Modifier.chartGestureModifier(
                     lastTapPosition = Offset.Unspecified
                 } else {
                     currentTap?.invoke(upPosition)
+                    currentScrub?.invoke(upPosition)
                     lastTapAt = tapAt
                     lastTapPosition = upPosition
                 }
@@ -15545,14 +15713,6 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
                     .fillMaxSize()
                     .onSizeChanged { chartWidthPx = it.width.toFloat().coerceAtLeast(1f) }
                     .chartGestureModifier(
-                        onHorizontalPan = { dragAmount ->
-                            val plotW = (chartWidthPx - 82f - 34f).coerceAtLeast(1f)
-                            val deltaMs = (dragAmount / plotW * windowSpanMs).toLong()
-                            autoFollow = false
-                            val minEnd = (earliestMs + windowSpanMs).coerceAtLeast(windowSpanMs)
-                            val maxEnd = latestMs.coerceAtLeast(minEnd)
-                            viewEndMs = (viewEndMs - deltaMs).coerceIn(minEnd, maxEnd)
-                        },
                         onPinchTransform = { centroidX, panX, zoom ->
                             val plotW = (chartWidthPx - 82f - 34f).coerceAtLeast(1f)
                             val focalRatio = ((centroidX - 82f) / plotW).coerceIn(0f, 1f)
@@ -15564,6 +15724,14 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
                             val maxEnd = latestMs.coerceAtLeast(minEnd)
                             viewEndMs = newEnd.coerceIn(minEnd, maxEnd)
                             autoFollow = false
+                        },
+                        onScrub = { offset ->
+                            val left = 82f
+                            val right = chartWidthPx - 34f
+                            val plotW = (right - left).coerceAtLeast(1f)
+                            val x = offset.x.coerceIn(left, right)
+                            val targetMs = viewStartMs + (((x - left) / plotW) * windowSpanMs).toLong()
+                            selectedPoint = visible.minByOrNull { kotlin.math.abs(it.elapsedMs - targetMs) }
                         },
                         onTap = { offset ->
                             val left = 82f
@@ -15721,11 +15889,59 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
 
                 selected?.takeIf { it.elapsedMs in viewStartMs..effectiveViewEndMs }?.let { p ->
                     val x = xOf(p.elapsedMs)
-                    val anchorY = p.latencyMs?.let { yOf(it) } ?: (bottom - 10f)
-                    val lineTop = (anchorY - 32f).coerceAtLeast(top)
-                    val lineBottom = (anchorY + 32f).coerceAtMost(bottom)
-                    drawLine(Color(0xFF334155).copy(alpha = 0.45f), Offset(x, lineTop), Offset(x, lineBottom), strokeWidth = 1.5f, cap = StrokeCap.Round)
-                    p.latencyMs?.let { drawCircle(Navy, radius = 4.5f, center = Offset(x, yOf(it))) }
+                    val hasLatency = p.latencyMs != null
+                    val anchorY = p.latencyMs?.let { yOf(it) } ?: (bottom - 12f)
+
+                    // 1. 全高度虚线探针定位线
+                    drawLine(
+                        color = Color(0xFF64748B).copy(alpha = 0.40f),
+                        start = Offset(x, top),
+                        end = Offset(x, bottom),
+                        strokeWidth = 1.2f,
+                        pathEffect = PathEffect.dashPathEffect(floatArrayOf(6f, 6f), 0f)
+                    )
+
+                    // 2. 探针锚点发光双层圆圈
+                    if (hasLatency) {
+                        val dotColor = if (p.highLatency) Orange else Blue
+                        drawCircle(dotColor.copy(alpha = 0.22f), radius = 8.5f, center = Offset(x, anchorY))
+                        drawCircle(Color.White, radius = 5f, center = Offset(x, anchorY))
+                        drawCircle(dotColor, radius = 3.2f, center = Offset(x, anchorY))
+                    } else {
+                        drawCircle(ErrorRed.copy(alpha = 0.25f), radius = 8f, center = Offset(x, anchorY))
+                        drawCircle(Color.White, radius = 4.5f, center = Offset(x, anchorY))
+                        drawCircle(ErrorRed, radius = 2.8f, center = Offset(x, anchorY))
+                    }
+
+                    // 3. 画布内悬浮数据气泡 (跟随手指滑动实时显示)
+                    val badgeText = if (hasLatency) {
+                        if (p.sampleCount > 1) "${p.latencyMs}ms (${p.sampleCount}次)" else "${p.latencyMs}ms"
+                    } else {
+                        "丢包/超时"
+                    }
+                    val badgePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                        color = AndroidColor.WHITE
+                        textSize = 24f
+                        typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+                    }
+                    val textW = badgePaint.measureText(badgeText)
+                    val badgeH = 34f
+                    val badgeW = textW + 20f
+                    val badgeX = (x - badgeW / 2f).coerceIn(left + 2f, right - badgeW - 2f)
+                    val badgeY = if (anchorY - badgeH - 12f >= top) anchorY - badgeH - 10f else anchorY + 14f
+
+                    drawRoundRect(
+                        color = Color(0xEE1E293B),
+                        topLeft = Offset(badgeX, badgeY),
+                        size = androidx.compose.ui.geometry.Size(badgeW, badgeH),
+                        cornerRadius = androidx.compose.ui.geometry.CornerRadius(10f, 10f)
+                    )
+                    drawContext.canvas.nativeCanvas.drawText(
+                        badgeText,
+                        badgeX + 10f,
+                        badgeY + badgeH - 10f,
+                        badgePaint
+                    )
                 }
             }
         }
@@ -15738,13 +15954,28 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
             } else {
                 "$time · ${p.latencyMs?.let { "延迟 ${it}ms" } ?: "丢包/超时"} · 丢包${p.lossCount}"
             }
-            Text(text, color = TextDark, fontSize = 11.sp, fontWeight = FontWeight.Bold, lineHeight = 15.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Surface(
+                color = Blue.copy(alpha = 0.08f),
+                shape = ShapeS,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    text,
+                    color = Blue,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    lineHeight = 15.sp,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                )
+            }
         } ?: Text(
             when {
-                running && autoFollow -> "$rangeText · 红色=丢包，橙色=高延迟；拖动查看历史，双击回实时"
-                running -> "$rangeText · 红色=丢包，橙色=高延迟；双击回实时"
-                windowSpanMs < fullSpanMs -> "$rangeText · 双指缩放/左右拖动查看细节，双击回全局"
-                else -> "$rangeText · 双指放大查看细节"
+                running && autoFollow -> "$rangeText · 滑动查看各点数值，双击回实时"
+                running -> "$rangeText · 滑动查看各点数值，双击回实时"
+                windowSpanMs < fullSpanMs -> "$rangeText · 滑动查看数值，双指缩放拖动，双击回全局"
+                else -> "$rangeText · 滑动查看各点数值，双指放大细节"
             },
             color = Muted,
             fontSize = 10.sp,
