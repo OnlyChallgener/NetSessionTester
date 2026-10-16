@@ -74,6 +74,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -16493,11 +16494,23 @@ private fun PublicExitLine(
 
 @Composable
 private fun BottomNav(selectedTab: MainTab, onSelect: (MainTab) -> Unit) {
+    val edgeToEdgeNavigation = Build.VERSION.SDK_INT >= Build.VERSION_CODES.VANILLA_ICE_CREAM
+    val navBarModifier = if (edgeToEdgeNavigation) {
+        // Keep the surface behind the system navigation area while the inset
+        // padding moves the buttons above the gesture/three-button controls.
+        Modifier
+            .background(GlassNavSurface)
+            .navigationBarsPadding()
+            .height(64.dp)
+    } else {
+        Modifier
+            .height(64.dp)
+            .background(GlassNavSurface)
+    }
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .height(64.dp)
-            .background(GlassNavSurface)
+            .then(navBarModifier)
             .border(width = 0.5.dp, brush = GlassBorderBrush, shape = RoundedCornerShape(0.dp))
             .padding(horizontal = 16.dp, vertical = 4.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),

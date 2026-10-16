@@ -180,6 +180,18 @@ class SourceContracts(unittest.TestCase):
         self.assertIn('logs = logs.toList()', final)
         self.assertIn('testJob?.cancelAndJoin()', app)
 
+    def test_android_api35_bottom_nav_insets_are_minimal_and_conditional(self):
+        source = read(ROOT / 'app/src/main/java/com/demonv/netsessiontester/MainActivity.kt')
+        self.assertIn('import androidx.compose.foundation.layout.navigationBarsPadding', source)
+        nav = source.split('private fun BottomNav', 1)[1].split('private fun compactLogText', 1)[0]
+        self.assertIn('Build.VERSION.SDK_INT >= Build.VERSION_CODES.VANILLA_ICE_CREAM', nav)
+        self.assertRegex(
+            nav,
+            r'Modifier\s*\.background\(GlassNavSurface\)\s*\.navigationBarsPadding\(\)\s*\.height\(64\.dp\)'
+        )
+        self.assertIn('.height(64.dp)\n            .background(GlassNavSurface)', nav)
+        self.assertIn('.then(navBarModifier)', nav)
+
     def test_obsolete_desktop_launcher_and_chart_type_are_removed(self):
         self.assertFalse((ROOT / 'desktop/launcher/Launcher.cs').exists())
         self.assertNotIn('desktopJar', read(ROOT / 'shared/build.gradle.kts'))
