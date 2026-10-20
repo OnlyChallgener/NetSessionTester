@@ -205,6 +205,7 @@ import com.demonv.netsessiontester.model.TestMode
 import com.demonv.netsessiontester.network.PublicIpDetector
 import com.demonv.netsessiontester.network.PublicIpResult
 import com.demonv.netsessiontester.network.NetworkDnsResolver
+import com.demonv.netsessiontester.network.Iperf3Client
 import com.demonv.netsessiontester.ui.theme.NetSessionTesterTheme
 import com.demonv.netsessiontester.util.CsvExporter
 import kotlinx.coroutines.CancellationException
@@ -14437,6 +14438,7 @@ private fun IperfToolPage(onBack: () -> Unit) {
         )
     }
     var serverPort by remember { mutableStateOf("5201") }
+    var showPortMenu by remember { mutableStateOf(false) }
     var isReverse by remember { mutableStateOf(true) } // true: 下行 (Download), false: 上行 (Upload)
     var durationSec by remember { mutableStateOf(10) }
 
@@ -14448,14 +14450,18 @@ private fun IperfToolPage(onBack: () -> Unit) {
     var logs by remember { mutableStateOf<List<IperfIntervalLog>>(emptyList()) }
     var summary by remember { mutableStateOf<IperfSummary?>(null) }
     var testJob by remember { mutableStateOf<Job?>(null) }
+    var activeClient by remember { mutableStateOf<Iperf3Client?>(null) }
 
     DisposableEffect(Unit) {
         onDispose {
+            activeClient?.close()
             testJob?.cancel()
         }
     }
 
     fun stopTest() {
+        activeClient?.close()
+        activeClient = null
         testJob?.cancel()
         testJob = null
         running = false
@@ -14463,96 +14469,47 @@ private fun IperfToolPage(onBack: () -> Unit) {
     }
 
     fun startTest() {
-        testJob?.cancel()
+        val host = serverHost.trim()
+        val portNum = serverPort.toIntOrNull()
+        if (host.isBlank() || portNum == null || portNum !in 1..65535) {
+            summary = null
+            progressText = "请输入有效服务器地址和 1–65535 范围内的端口"
+            return
+        }
+        val reverse = isReverse
+        val seconds = durationSec
+        val client = Iperf3Client()
+        activeClient = client
         running = true
         summary = null
         logs = emptyList()
         currentMbps = 0.0
         totalBytesTransferred = 0L
         progressFraction = 0f
-        progressText = "正在连接 iPerf3 服务器 $serverHost:$serverPort..."
+        progressText = "正在连接 iPerf3 服务器 $host:$portNum..."
 
-        testJob = scope.launch(Dispatchers.IO) {
-            val portNum = serverPort.toIntOrNull() ?: 5201
+        testJob = scope.launch {
             val intervalList = mutableListOf<IperfIntervalLog>()
 
             try {
-                val socket = Socket()
-                socket.tcpNoDelay = true
-                socket.soTimeout = (durationSec + 5) * 1000
-                socket.connect(InetSocketAddress(serverHost, portNum), 3500)
-
-                val outStream = socket.getOutputStream()
-                val inStream = socket.getInputStream()
-
-                val cookie = (1..36).map { "abcdefghijklmnopqrstuvwxyz0123456789".random() }.joinToString("") + "\u0000"
-                outStream.write(cookie.toByteArray(Charsets.US_ASCII))
-                outStream.flush()
-
-                val s1 = inStream.read()
-                if (s1 == -1) throw IOException("iPerf3 服务器过早关闭了握手连接")
-
-                val json = """{"tcp":true,"omit":0,"time":$durationSec,"num":0,"blocksize":65536,"parallel":1,"reverse":${if (isReverse) 1 else 0}}"""
-                val jsonBytes = json.toByteArray(Charsets.UTF_8)
-                val len = jsonBytes.size
-                val lenBuf = byteArrayOf(
-                    ((len shr 24) and 0xFF).toByte(),
-                    ((len shr 16) and 0xFF).toByte(),
-                    ((len shr 8) and 0xFF).toByte(),
-                    (len and 0xFF).toByte()
-                )
-                outStream.write(lenBuf)
-                outStream.write(jsonBytes)
-                outStream.flush()
-
-                progressText = if (isReverse) "正在进行下行 (Download) 吞吐测速..." else "正在进行上行 (Upload) 吞吐压测..."
-
-                val buffer = ByteArray(65536)
-                if (!isReverse) {
-                    kotlin.random.Random.nextBytes(buffer)
-                }
-
-                val startMs = SystemClock.elapsedRealtime()
-                var lastSampleMs = startMs
-                var bytesThisSec = 0L
-                var totalBytes = 0L
-                var currentSec = 1
-
-                while (isActive && (SystemClock.elapsedRealtime() - startMs) < durationSec * 1000L) {
-                    if (isReverse) {
-                        val read = inStream.read(buffer)
-                        if (read <= 0) break
-                        bytesThisSec += read
-                        totalBytes += read
-                    } else {
-                        outStream.write(buffer)
-                        bytesThisSec += buffer.size
-                        totalBytes += buffer.size
-                    }
-
-                    val now = SystemClock.elapsedRealtime()
-                    if (now - lastSampleMs >= 1000L) {
-                        val duration = (now - lastSampleMs) / 1000.0
-                        val mbps = (bytesThisSec * 8.0) / (duration * 1_000_000.0)
-                        intervalList.add(IperfIntervalLog(currentSec, mbps, bytesThisSec))
-                        logs = intervalList.toList()
-                        currentMbps = mbps
-                        totalBytesTransferred = totalBytes
-                        progressFraction = (now - startMs).toFloat() / (durationSec * 1000f)
-
-                        bytesThisSec = 0L
-                        lastSampleMs = now
-                        currentSec++
+                val result = withContext(Dispatchers.IO) {
+                    client.run(host, portNum, seconds, reverse) { sample ->
+                        scope.launch {
+                            if (activeClient === client && running) {
+                                intervalList.add(IperfIntervalLog(intervalList.size + 1, sample.mbps, sample.bytes))
+                                logs = intervalList.toList()
+                                currentMbps = sample.mbps
+                                totalBytesTransferred = sample.totalBytes
+                                progressFraction = (sample.elapsedSeconds / seconds).toFloat().coerceIn(0f, 1f)
+                                progressText = if (reverse) "正在进行下行吞吐测速..." else "正在进行上行吞吐压测..."
+                            }
+                        }
                     }
                 }
-
-                runCatching { outStream.flush() }
-                runCatching { socket.close() }
-
-                if (!isActive) return@launch
-
-                val avg = if (intervalList.isNotEmpty()) intervalList.map { it.mbps }.average() else 0.0
-                val peak = intervalList.maxOfOrNull { it.mbps } ?: avg
+                ensureActive()
+                val avg = result.averageMbps
+                val peak = result.peakMbps
+                val totalBytes = result.totalBytes
 
                 val verdict = when {
                     avg >= 500.0 ->
@@ -14589,8 +14546,8 @@ private fun IperfToolPage(onBack: () -> Unit) {
                     avgMbps = avg,
                     peakMbps = peak,
                     totalBytes = totalBytes,
-                    durationSec = durationSec,
-                    isReverse = isReverse,
+                    durationSec = seconds,
+                    isReverse = reverse,
                     gradeTitle = verdict.title,
                     gradeColor = verdict.color,
                     gradeBg = verdict.bg,
@@ -14603,10 +14560,10 @@ private fun IperfToolPage(onBack: () -> Unit) {
                     id = now,
                     timestamp = now,
                     timeText = timeText,
-                    server = serverHost.ifBlank { "192.168.1.100" },
-                    port = serverPort.toIntOrNull() ?: 5201,
-                    isReverse = isReverse,
-                    durationSec = durationSec,
+                    server = host,
+                    port = portNum,
+                    isReverse = reverse,
+                    durationSec = seconds,
                     avgMbps = avg,
                     peakMbps = peak,
                     totalBytes = totalBytes,
@@ -14618,10 +14575,16 @@ private fun IperfToolPage(onBack: () -> Unit) {
 
                 progressText = "测速完成！平均速率：${String.format(java.util.Locale.US, "%.1f", avg)} Mbps"
                 progressFraction = 1f
-                running = false
-            } catch (e: Throwable) {
-                if (isActive) {
-                    progressText = "测速异常：${e.message ?: "连接失败"}"
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (activeClient === client) {
+                    progressText = "测速失败：${e.message ?: "连接失败"}。请确认服务端已运行 iperf3 -s -p $portNum，且防火墙允许该端口。"
+                }
+            } finally {
+                client.close()
+                if (activeClient === client) {
+                    activeClient = null
                     running = false
                 }
             }
@@ -14633,7 +14596,7 @@ private fun IperfToolPage(onBack: () -> Unit) {
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         item {
-            ToolPageHeader("iPerf3测速", "局域网与公网 TCP/UDP 高性能吞吐压测", onBack)
+            ToolPageHeader("iPerf3测速", "局域网与公网 TCP 吞吐测速", onBack)
         }
 
         item {
@@ -14661,15 +14624,22 @@ private fun IperfToolPage(onBack: () -> Unit) {
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        CleanField(serverPort, { if (!running) serverPort = it }, "5201", leadingMark = "port", modifier = Modifier.width(100.dp))
-                        Spacer(Modifier.weight(1f))
-                        listOf("5201", "5202", "5203").forEach { p ->
+                        CleanField(serverPort, { if (!running) serverPort = it }, "5201", leadingMark = "port", modifier = Modifier.weight(1f))
+                        Box {
                             SoftChoicePill(
-                                text = p,
-                                selected = (serverPort == p),
-                                onClick = { if (!running) serverPort = p },
+                                text = "预设 ⌄",
+                                selected = false,
+                                onClick = { if (!running) showPortMenu = true },
                                 compact = true
                             )
+                            DropdownMenu(expanded = showPortMenu, onDismissRequest = { showPortMenu = false }) {
+                                listOf("5201", "5202", "5203").forEach { port ->
+                                    DropdownMenuItem(
+                                        text = { Text(port, color = if (serverPort == port) Blue else TextDark) },
+                                        onClick = { if (!running) serverPort = port; showPortMenu = false }
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -14678,15 +14648,15 @@ private fun IperfToolPage(onBack: () -> Unit) {
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("测试方向", color = TextDark, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(60.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.weight(1f)) {
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.weight(1f)) {
                         SoftChoicePill(
-                            text = "下行测速 (Download)",
+                            text = "下行测速",
                             selected = isReverse,
                             onClick = { if (!running) isReverse = true },
                             compact = true
                         )
                         SoftChoicePill(
-                            text = "上行压测 (Upload)",
+                            text = "上行压测",
                             selected = !isReverse,
                             onClick = { if (!running) isReverse = false },
                             compact = true
@@ -14712,6 +14682,8 @@ private fun IperfToolPage(onBack: () -> Unit) {
 
                 Spacer(Modifier.height(8.dp))
 
+                Text("目标需运行 iPerf3 服务端（iperf3 -s），网关地址不一定提供测速服务。", color = Muted, fontSize = 11.sp)
+
                 Button(
                     onClick = { if (running) stopTest() else startTest() },
                     modifier = Modifier.fillMaxWidth().height(42.dp),
@@ -14719,6 +14691,14 @@ private fun IperfToolPage(onBack: () -> Unit) {
                     colors = ButtonDefaults.buttonColors(containerColor = if (running) ErrorRed else Green)
                 ) {
                     Text(if (running) "停止测速" else "开始 iPerf3 测速", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                }
+            }
+        }
+
+        if (!running && progressText.isNotBlank()) {
+            item {
+                SoftCard {
+                    Text(progressText, color = if (summary == null) Muted else Green, fontSize = 12.sp)
                 }
             }
         }
