@@ -51,7 +51,7 @@ internal class Iperf3Client : Closeable {
     ): Iperf3Result {
         require(host.isNotBlank()) { "请输入 iPerf3 服务器地址" }
         require(port in 1..65535) { "端口必须为 1–65535" }
-        require(durationSeconds in 1..60) { "测试时长必须为 1–60 秒" }
+        require(durationSeconds in 1..120) { "测试时长必须为 1–120 秒" }
         try {
             val control = connect(InetSocketAddress(host, port))
             val input = DataInputStream(control.socket().getInputStream())

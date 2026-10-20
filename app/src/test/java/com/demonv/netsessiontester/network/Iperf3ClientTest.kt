@@ -54,7 +54,7 @@ class Iperf3ClientTest {
         assertEquals(0.toByte(), it.last())
     }
 
-    private fun parameters(socket: Socket, reverse: Boolean): ByteArray {
+    private fun parameters(socket: Socket, reverse: Boolean, durationSeconds: Int = 1): ByteArray {
         socket.soTimeout = 5000
         val input = DataInputStream(socket.getInputStream())
         val output = DataOutputStream(socket.getOutputStream())
@@ -64,7 +64,7 @@ class Iperf3ClientTest {
         assertTrue(parameters.getBoolean("tcp"))
         assertEquals(65536, parameters.getInt("len"))
         assertEquals(1, parameters.getInt("parallel"))
-        assertEquals(1, parameters.getInt("time"))
+        assertEquals(durationSeconds, parameters.getInt("time"))
         assertEquals(reverse, parameters.has("reverse"))
         if (reverse) assertTrue(parameters.getBoolean("reverse"))
         output.writeByte(10)
@@ -195,15 +195,16 @@ class Iperf3ClientTest {
         }
     }
 
-    @Test fun rejectsInvalidPortBeforeConnecting() {
+    @Test fun rejectsInvalidInputBeforeConnecting() {
         assertThrows(IllegalArgumentException::class.java) { Iperf3Client().run("127.0.0.1", 65536, 1, true) }
+        assertThrows(IllegalArgumentException::class.java) { Iperf3Client().run("127.0.0.1", 5201, 121, true) }
     }
 
     @Test fun closeInterruptsUploadWhenReceiverStopsReading() {
         val ready = CountDownLatch(1)
         withServer({ listener ->
             listener.accept().use { control ->
-                val expectedCookie = parameters(control, false)
+                val expectedCookie = parameters(control, false, 120)
                 val input = DataInputStream(control.getInputStream())
                 val output = DataOutputStream(control.getOutputStream())
                 listener.accept().use { data ->
@@ -222,7 +223,7 @@ class Iperf3ClientTest {
             val client = Iperf3Client()
             try {
                 val task = executor.submit(Callable {
-                    assertThrows(IOException::class.java) { client.run("127.0.0.1", port, 1, false) }
+                    assertThrows(IOException::class.java) { client.run("127.0.0.1", port, 120, false) }
                 })
                 assertTrue(ready.await(2, TimeUnit.SECONDS))
                 client.close()

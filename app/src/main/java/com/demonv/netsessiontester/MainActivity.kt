@@ -14344,7 +14344,7 @@ private data class WinnerVerdict(
 )
 
 private data class IperfIntervalLog(
-    val sec: Int,
+    val elapsedSeconds: Double,
     val mbps: Double,
     val bytes: Long
 )
@@ -14364,56 +14364,100 @@ private data class IperfSummary(
 @Composable
 private fun IperfSpeedChart(
     logs: List<IperfIntervalLog>,
+    durationSeconds: Int,
+    averageMbps: Double,
     modifier: Modifier = Modifier
 ) {
-    if (logs.isEmpty()) return
-    Canvas(modifier = modifier) {
-        val w = size.width
-        val h = size.height
-        if (w <= 0 || h <= 0) return@Canvas
-
-        val maxMbps = (logs.maxOfOrNull { it.mbps }?.times(1.15) ?: 100.0).coerceAtLeast(10.0)
-
-        fun yFor(v: Double): Float = h - (v / maxMbps).toFloat() * (h - 20f) - 10f
-        fun xFor(idx: Int): Float {
-            val total = (logs.size - 1).coerceAtLeast(1)
-            return (idx.toFloat() / total.toFloat()) * (w - 20f) + 10f
+    var selectedSeconds by remember { mutableStateOf<Double?>(null) }
+    var chartWidth by remember { mutableStateOf(0) }
+    LaunchedEffect(logs.isEmpty()) { if (logs.isEmpty()) selectedSeconds = null }
+    val density = LocalDensity.current
+    val axisPaint = remember(density) {
+        Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Muted.toArgb()
+            textSize = with(density) { 10.sp.toPx() }
         }
+    }
+    fun speed(value: Double): String = String.format(Locale.US, if (value >= 10) "%.0f" else "%.1f", value)
+    val rawMax = maxOf(logs.maxOfOrNull { it.mbps } ?: 0.0, averageMbps) * 1.15
+    val step = when {
+        rawMax <= 5 -> 1.0
+        rawMax <= 10 -> 2.0
+        rawMax <= 50 -> 10.0
+        rawMax <= 100 -> 20.0
+        rawMax <= 500 -> 100.0
+        rawMax <= 1000 -> 200.0
+        else -> 500.0
+    }
+    val maxMbps = (ceil(rawMax / step) * step).coerceAtLeast(1.0)
+    val endSeconds = durationSeconds.toDouble().coerceAtLeast(1.0)
+    val left = axisPaint.measureText(speed(maxMbps)) + with(density) { 8.dp.toPx() }
+    val rightPadding = with(density) { 12.dp.toPx() }
+    val selected = selectedSeconds?.let { time -> logs.minByOrNull { abs(it.elapsedSeconds - time) } }
 
-        val fillPath = Path()
-        logs.forEachIndexed { idx, l ->
-            val x = xFor(idx)
-            val y = yFor(l.mbps)
-            if (idx == 0) {
-                fillPath.moveTo(x, h)
-                fillPath.lineTo(x, y)
-            } else {
-                fillPath.lineTo(x, y)
-            }
-        }
-        fillPath.lineTo(xFor(logs.lastIndex), h)
-        fillPath.close()
-
-        drawPath(
-            path = fillPath,
-            brush = Brush.verticalGradient(
-                colors = listOf(Blue.copy(alpha = 0.28f), Blue.copy(alpha = 0.02f)),
-                startY = 0f,
-                endY = h
-            )
+    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(
+            selected?.let { String.format(Locale.US, "%.1f 秒 · %.1f Mbps", it.elapsedSeconds, it.mbps) }
+                ?: if (logs.isEmpty()) "等待首个速率采样…" else "点击曲线查看采样值",
+            color = if (selected == null) Muted else Blue,
+            fontSize = 11.sp
         )
+        Canvas(
+            modifier = Modifier.fillMaxWidth().weight(1f)
+                .onSizeChanged { chartWidth = it.width }
+                .pointerInput(logs, endSeconds, left) {
+                    detectTapGestures { position ->
+                        val width = (chartWidth - left - rightPadding).coerceAtLeast(1f)
+                        selectedSeconds = ((position.x - left) / width).coerceIn(0f, 1f) * endSeconds
+                    }
+                }
+        ) {
+            val right = size.width - rightPadding
+            val top = 10.dp.toPx()
+            val bottom = size.height - 24.dp.toPx()
+            if (right <= left || bottom <= top) return@Canvas
+            fun yFor(value: Double) = bottom - (value / maxMbps).toFloat().coerceIn(0f, 1f) * (bottom - top)
+            fun xFor(seconds: Double) = left + (seconds / endSeconds).toFloat().coerceIn(0f, 1f) * (right - left)
+            val baselineOffset = -(axisPaint.fontMetrics.ascent + axisPaint.fontMetrics.descent) / 2
 
-        val strokePath = Path()
-        logs.forEachIndexed { idx, l ->
-            val x = xFor(idx)
-            val y = yFor(l.mbps)
-            if (idx == 0) strokePath.moveTo(x, y) else strokePath.lineTo(x, y)
-        }
-        drawPath(strokePath, Blue, style = Stroke(width = 3.dp.toPx(), cap = StrokeCap.Round))
+            for (index in 0..4) {
+                val value = maxMbps * index / 4
+                val y = yFor(value)
+                drawLine(Border.copy(alpha = 0.55f), Offset(left, y), Offset(right, y), strokeWidth = 1.dp.toPx())
+                val label = speed(value)
+                drawContext.canvas.nativeCanvas.drawText(label, left - 6.dp.toPx() - axisPaint.measureText(label), y + baselineOffset, axisPaint)
+                val seconds = endSeconds * index / 4
+                val time = String.format(Locale.US, if (abs(seconds - seconds.roundToInt()) < 0.01) "%.0fs" else "%.1fs", seconds)
+                val x = (xFor(seconds) - axisPaint.measureText(time) / 2).coerceIn(0f, (size.width - axisPaint.measureText(time)).coerceAtLeast(0f))
+                drawContext.canvas.nativeCanvas.drawText(time, x, size.height - 3.dp.toPx(), axisPaint)
+            }
 
-        logs.forEachIndexed { idx, l ->
-            drawCircle(Blue, radius = 3.5.dp.toPx(), center = Offset(xFor(idx), yFor(l.mbps)))
-            drawCircle(Color.White, radius = 1.5.dp.toPx(), center = Offset(xFor(idx), yFor(l.mbps)))
+            if (logs.isNotEmpty()) {
+                // Start at the first real sample; never invent a zero/startup spike.
+                val line = Path()
+                logs.forEachIndexed { index, sample ->
+                    if (index == 0) line.moveTo(xFor(sample.elapsedSeconds), yFor(sample.mbps))
+                    else line.lineTo(xFor(sample.elapsedSeconds), yFor(sample.mbps))
+                }
+                if (logs.size > 1) {
+                    val fill = Path().apply {
+                        addPath(line)
+                        lineTo(xFor(logs.last().elapsedSeconds), bottom)
+                        lineTo(xFor(logs.first().elapsedSeconds), bottom)
+                        close()
+                    }
+                    drawPath(fill, Brush.verticalGradient(listOf(Blue.copy(alpha = 0.22f), Blue.copy(alpha = 0.02f)), top, bottom))
+                }
+                val averageY = yFor(averageMbps)
+                drawLine(Orange, Offset(left, averageY), Offset(right, averageY), strokeWidth = 1.5.dp.toPx(),
+                    pathEffect = PathEffect.dashPathEffect(floatArrayOf(5.dp.toPx(), 4.dp.toPx())))
+                drawPath(line, Blue, style = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round))
+                val point = selected ?: logs.last()
+                val position = Offset(xFor(point.elapsedSeconds), yFor(point.mbps))
+                if (selected != null) drawLine(Blue.copy(alpha = 0.3f), Offset(position.x, top), Offset(position.x, bottom))
+                drawCircle(Blue, radius = 4.dp.toPx(), center = position)
+                drawCircle(Color.White, radius = 2.dp.toPx(), center = position)
+            }
         }
     }
 }
@@ -14440,7 +14484,9 @@ private fun IperfToolPage(onBack: () -> Unit) {
     var serverPort by remember { mutableStateOf("5201") }
     var showPortMenu by remember { mutableStateOf(false) }
     var isReverse by remember { mutableStateOf(true) } // true: 下行 (Download), false: 上行 (Upload)
-    var durationSec by remember { mutableStateOf(10) }
+    var durationSec by remember { mutableStateOf(30) }
+    var showDurationMenu by remember { mutableStateOf(false) }
+    var testedDurationSec by remember { mutableStateOf(30) }
 
     var running by remember { mutableStateOf(false) }
     var progressFraction by remember { mutableStateOf(0f) }
@@ -14478,6 +14524,7 @@ private fun IperfToolPage(onBack: () -> Unit) {
         }
         val reverse = isReverse
         val seconds = durationSec
+        testedDurationSec = seconds
         val client = Iperf3Client()
         activeClient = client
         running = true
@@ -14496,7 +14543,7 @@ private fun IperfToolPage(onBack: () -> Unit) {
                     client.run(host, portNum, seconds, reverse) { sample ->
                         scope.launch {
                             if (activeClient === client && running) {
-                                intervalList.add(IperfIntervalLog(intervalList.size + 1, sample.mbps, sample.bytes))
+                                intervalList.add(IperfIntervalLog(sample.elapsedSeconds, sample.mbps, sample.bytes))
                                 logs = intervalList.toList()
                                 currentMbps = sample.mbps
                                 totalBytesTransferred = sample.totalBytes
@@ -14648,17 +14695,19 @@ private fun IperfToolPage(onBack: () -> Unit) {
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("测试方向", color = TextDark, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(60.dp))
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.weight(1f)) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.weight(1f)) {
                         SoftChoicePill(
                             text = "下行测速",
                             selected = isReverse,
                             onClick = { if (!running) isReverse = true },
+                            modifier = Modifier.weight(1f),
                             compact = true
                         )
                         SoftChoicePill(
-                            text = "上行压测",
+                            text = "上行测速",
                             selected = !isReverse,
                             onClick = { if (!running) isReverse = false },
+                            modifier = Modifier.weight(1f),
                             compact = true
                         )
                     }
@@ -14668,14 +14717,21 @@ private fun IperfToolPage(onBack: () -> Unit) {
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("持续时长", color = TextDark, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(60.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.weight(1f)) {
-                        listOf(5, 10, 20).forEach { sec ->
-                            SoftChoicePill(
-                                text = "${sec}秒",
-                                selected = (durationSec == sec),
-                                onClick = { if (!running) durationSec = sec },
-                                compact = true
-                            )
+                    Box(Modifier.weight(1f)) {
+                        SoftChoicePill(
+                            text = "${durationSec} 秒 ⌄",
+                            selected = true,
+                            onClick = { if (!running) showDurationMenu = true },
+                            modifier = Modifier.fillMaxWidth(),
+                            compact = true
+                        )
+                        DropdownMenu(expanded = showDurationMenu, onDismissRequest = { showDurationMenu = false }) {
+                            listOf(10, 30, 60, 120).forEach { seconds ->
+                                DropdownMenuItem(
+                                    text = { Text("$seconds 秒${if (seconds == 30) "（推荐）" else ""}", color = if (durationSec == seconds) Blue else TextDark) },
+                                    onClick = { if (!running) durationSec = seconds; showDurationMenu = false }
+                                )
+                            }
                         }
                     }
                 }
@@ -14727,14 +14783,24 @@ private fun IperfToolPage(onBack: () -> Unit) {
             }
         }
 
-        if (logs.isNotEmpty()) {
+        if (running || logs.isNotEmpty()) {
             item {
                 SoftCard {
-                    SectionTitle("chart", "吞吐速率走势 (Mbps)", Blue)
+                    SectionTitle("chart", "吞吐速率走势", Blue)
+                    val elapsed = logs.lastOrNull()?.elapsedSeconds ?: 0.0
+                    val average = summary?.avgMbps ?: if (elapsed > 0) logs.sumOf { it.bytes } * 8.0 / elapsed / 1_000_000 else 0.0
+                    val peak = summary?.peakMbps ?: logs.maxOfOrNull { it.mbps } ?: 0.0
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(String.format(Locale.US, "蓝线：每秒速率 · %.1f Mbps", logs.lastOrNull()?.mbps ?: 0.0), color = Blue, fontSize = 11.sp)
+                        Text(String.format(Locale.US, "橙色虚线：平均 %.1f Mbps", average), color = Orange, fontSize = 11.sp)
+                        Text(String.format(Locale.US, "峰值 %.1f Mbps", peak), color = Muted, fontSize = 11.sp)
+                    }
                     Spacer(Modifier.height(4.dp))
                     IperfSpeedChart(
                         logs = logs,
-                        modifier = Modifier.fillMaxWidth().height(140.dp).background(Color(0xFFF8FAFC), ShapeM).padding(8.dp)
+                        durationSeconds = testedDurationSec,
+                        averageMbps = average,
+                        modifier = Modifier.fillMaxWidth().height(220.dp).background(Color(0xFFF8FAFC), ShapeM).padding(8.dp)
                     )
                 }
             }
