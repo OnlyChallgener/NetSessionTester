@@ -2,12 +2,12 @@
 
 ## build158 验证范围
 
-- 本地仅运行 Python 校验，不再本地编译应用；Android、iOS、macOS、Windows 均使用 GitHub Actions 构建。
+- 本地仅运行 Python 校验，不再本地编译应用；本次仅使用 GitHub Actions 构建 Android Release 签名 APK，多平台工作流保留手动触发。
 - Python 44 项检查通过；Android iPerf3 的 8 项协议回归由 Android 构建工作流执行。
-- 发布工作流只接受同一源码提交且全部成功的 Android 签名构建和多平台矩阵构建，上传完整附件后再公开正式版。
+- 发布工作流只接受同一源码提交且成功的 Android 签名构建，上传 APK 与校验文件后再公开正式版。
 - Issue #9 的代码修复仅作用于 API 35 及以上 BottomNav Insets；未改 Scaffold 或业务逻辑。
 - 待真机确认：Android 16 手势/三键导航及横屏、Android 14 原布局回归；iPerf3 上下行长时间测速和图表交互。
-- iOS IPA 未使用 Apple 分发证书签名，需要自行签名；不代表 App Store 或 TestFlight 发布。
+- 版本信息仅保留最近五条正式 Release，不展示 Beta。
 
 ## build157 验证清单归档
 

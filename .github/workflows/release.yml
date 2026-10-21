@@ -4,15 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       source_sha:
-        description: Full commit SHA built by both workflows
+        description: Full commit SHA of the signed Android build
         required: true
         type: string
       android_run_id:
         description: Successful Android Signed APK run
-        required: true
-        type: string
-      matrix_run_id:
-        description: Successful multiplatform matrix run
         required: true
         type: string
 
@@ -27,7 +23,6 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       SOURCE_SHA: ${{ inputs.source_sha }}
       ANDROID_RUN_ID: ${{ inputs.android_run_id }}
-      MATRIX_RUN_ID: ${{ inputs.matrix_run_id }}
       RELEASE_TAG: v1.0.22
     steps:
       - name: Checkout release source
@@ -35,7 +30,7 @@ jobs:
         with:
           ref: ${{ inputs.source_sha }}
 
-      - name: Verify successful builds use this exact commit
+      - name: Verify signed Android build uses this exact commit
         run: |
           python3 - <<'PY'
           import json, os, re, subprocess
@@ -43,12 +38,11 @@ jobs:
           assert re.fullmatch(r'[0-9a-f]{40}', sha), 'Expected a full commit SHA'
           assert subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip() == sha
           repo = os.environ['GITHUB_REPOSITORY']
-          for key, workflow in [('ANDROID_RUN_ID', 'android.yml'), ('MATRIX_RUN_ID', 'multiplatform.yml')]:
-              run_id = str(int(os.environ[key]))
-              run = json.loads(subprocess.check_output(['gh', 'api', f'repos/{repo}/actions/runs/{run_id}'], text=True))
-              assert run['status'] == 'completed' and run['conclusion'] == 'success', f'{key} did not succeed'
-              assert run['head_sha'] == sha, f'{key} built a different commit'
-              assert run['path'] == f'.github/workflows/{workflow}', f'{key} is the wrong workflow'
+          run_id = str(int(os.environ['ANDROID_RUN_ID']))
+          run = json.loads(subprocess.check_output(['gh', 'api', f'repos/{repo}/actions/runs/{run_id}'], text=True))
+          assert run['status'] == 'completed' and run['conclusion'] == 'success', 'Android build did not succeed'
+          assert run['head_sha'] == sha, 'Android build used a different commit'
+          assert run['path'] == '.github/workflows/android.yml', 'Wrong build workflow'
           PY
 
       - name: Download signed Android build on runner
@@ -59,14 +53,6 @@ jobs:
           github-token: ${{ github.token }}
           run-id: ${{ inputs.android_run_id }}
 
-      - name: Download platform builds on runner
-        uses: actions/download-artifact@v4
-        with:
-          pattern: NetSessionTester-*
-          path: release-files/platforms
-          github-token: ${{ github.token }}
-          run-id: ${{ inputs.matrix_run_id }}
-
       - name: Verify Android metadata and prepare release checksums
         run: |
           python3 - <<'PY'
@@ -76,11 +62,6 @@ jobs:
           assets = {
               'NetSessionTester-v1.0.22-build158-signed.apk': root / 'android/app-release.apk',
           }
-          for name in ['NetSessionTester-Windows-x64-Portable.zip', 'NetSessionTester-Windows-x64-Setup.exe',
-                       'NetSessionTester-macOS.dmg', 'NetSessionTester-iOS-unsigned.ipa']:
-              matches = [path for path in (root / 'platforms').rglob(name) if path.is_file()]
-              assert len(matches) == 1, f'Missing or ambiguous release asset: {name}'
-              assets[name] = matches[0]
           apk = assets['NetSessionTester-v1.0.22-build158-signed.apk']
           tools = sorted((Path(os.environ['ANDROID_HOME']) / 'build-tools').glob('*/aapt'))
           assert tools, 'Android build tools are unavailable'

@@ -4,6 +4,7 @@
 - 修复 Android iPerf3 TCP 客户端：独立控制和数据连接、上下行参数、结果交换、停止释放、错误提示和无效结果处理。
 - iPerf3 端口改为下拉预设并保留手动输入；上下行按钮等宽铺满；时长改为 10 / 30 / 60 / 120 秒，默认 30 秒。
 - iPerf3 图表使用实际采样时间，展示速率曲线、平均线、峰值及点击采样值；停止或完成后保留本次曲线。
+- APP 版本信息仅展示最近五条正式 Release，移除 Beta 条目与过时说明；本次仅发布 Android Release 签名 APK。
 - 汇入 Windows/macOS 连接数、TCP Ping、联动诊断和测试历史，以及 iOS 核心工具与系统标签栏适配。
 - 正式版本号统一为 v1.0.22，Android 构建号和 iOS CFBundleVersion 更新为 158。
 - 验证以 Python 检查、协议回归和 GitHub Actions 编译打包为准；Android 16 手势/三键、横屏、Android 14 回归及其他平台真机表现仍待实测确认。

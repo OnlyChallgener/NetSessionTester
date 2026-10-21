@@ -6360,17 +6360,16 @@ private fun VersionInfoDialog(
                     Text("当前版本", color = Muted, fontSize = 12.sp, modifier = Modifier.weight(1f))
                     StatusChip(displayVersionName(currentAppVersionName(LocalContext.current)), BlueSoft, Blue, compact = true)
                 }
-                VersionLine(displayVersionName(currentAppVersionName(LocalContext.current)), "修复Android 15及以上底栏适配与iPerf3测速，新增实时速率图表及120秒测试；完善桌面与iOS多平台支持。")
-                VersionLine("v1.0.21-beta4", "重构4-Tab底栏与独立「工具」中心，大幅精简设置页，极速公网IPv4抢占，强化手动NAT，新增目标选择器。")
-                VersionLine("v1.0.21-beta3", "新增缓冲评级/双网/iPerf3三大模块7天历史与折叠删除，修复iPerf3排版，深度优化NAT与MTU。")
-                VersionLine("v1.0.21-beta2", "新增双网并发(5G vs WiFi)同屏对测与内置iPerf3吞吐测速客户端，快捷矩阵升级4行2列。")
-                VersionLine("v1.0.21-beta1", "新增Bufferbloat缓冲膨胀评级与5G/4G基站射频工参看板，快捷矩阵升级3行2列。")
-                VersionLine("v1.0.20", "连接测试与Ping调度线程池物理隔离，启用极简Socket缓冲区与Channel异步回收。")
-                VersionLine("v1.0.18", "历史清空增加二次确认与10秒撤销，优化删除按钮，并修复NAT、漫游历史交互。")
-                VersionLine("v1.0.17", "统一各页面滑动删除交互，公网IP改为网络变化驱动刷新。")
-                VersionLine("v1.0.16", "修复弹窗、二级页面与底部栏叠图透图，MTU暂停改为停止。")
-                VersionLine("v1.0.15", "修复后台Ping终止、连接测试页面跳转与运行状态残留。")
-                VersionLine("v1.0.14", "引入蓝白紫毛玻璃界面，优化页面滑动、图层和切换动画。")
+                Text("最近正式版本", color = Muted, fontSize = 12.sp)
+                listOf(
+                    "v1.0.22 build158" to "修复系统导航栏适配、iPerf3测速与图表，优化端口和时长选择。",
+                    "v1.0.21 build156" to "并发目标速率上限提升至20,000 CPS，优化调度与失败保护。",
+                    "v1.0.21 build155" to "上线独立工具中心，修复测试卡死、折线同步与WiFi漫游识别。",
+                    "v1.0.20 build149" to "隔离连接测试与Ping调度，降低Socket开销，平滑并发发包。",
+                    "v1.0.18 build147" to "完善历史清理、删除交互及NAT、漫游工具体验。"
+                ).filterNot { (version, _) -> version.contains("beta", ignoreCase = true) }
+                    .take(5)
+                    .forEach { (version, description) -> VersionLine(version, description) }
                 HorizontalDivider(color = Border)
                 Button(
                     onClick = onCheckUpdate,
