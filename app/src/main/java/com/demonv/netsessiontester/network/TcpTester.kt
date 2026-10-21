@@ -61,7 +61,7 @@ class TcpTester(context: Context) {
     private val releaseEpoch = AtomicLong(0L)
     private val fdReserve = 128
     private val absoluteFdCeiling = 32_640
-    private val testerDispatcher = Dispatchers.IO.limitedParallelism(256)
+    private val testerDispatcher = Dispatchers.IO.limitedParallelism(512)
 
     private fun readProcessFdSoftLimit(): Int {
         return runCatching {
@@ -152,9 +152,9 @@ class TcpTester(context: Context) {
         }
 
         val addressText = addresses.mapNotNull { it.hostAddress }.distinct()
-        val targetCps = config.batchSize.coerceIn(1, 2_000)
+        val targetCps = config.batchSize.coerceIn(1, 20_000)
         val schedulerIntervalMs = config.intervalMs.coerceIn(20L, 1_000L)
-        val maxPending = (targetCps * 4).coerceIn(1_000, 8_000)
+        val maxPending = (targetCps * 4).coerceIn(1_000, 20_000)
         val (fdSafeStop, fdSoftLimit, baselineFd) = calculateSafeSocketTarget()
         val fdClipStart = (fdSafeStop - 1_500).coerceAtLeast(1_000)
         onLog(LogLine(level = LogLevel.SUCCESS, text = "${protocol.label} 解析成功：${addressText.joinToString(" / ")}"))
@@ -297,7 +297,8 @@ class TcpTester(context: Context) {
                     failure = totalFailure,
                     launched = launchedAttempts,
                     peak = maxStable,
-                    userFailureLimit = config.failureLimit
+                    userFailureLimit = config.failureLimit,
+                    targetCps = targetCps
                 )
                 if (stopReason != null) {
                     stats = stats.copy(phase = stopReason, errorSummary = errors.toMap(), maxStableSessions = maxStable)
@@ -321,7 +322,7 @@ class TcpTester(context: Context) {
                     // This keeps a slow batch from overshooting a small success target or
                     // reporting hundreds of failures after the failure guard has been reached.
                     val remainingSuccess = (config.successLimit - totalSuccess - inFlight).coerceAtLeast(0)
-                    val failureLimit = effectiveFailureLimit(maxStable, config.failureLimit)
+                    val failureLimit = effectiveFailureLimit(maxStable, config.failureLimit, targetCps)
                     val remainingFailure = (failureLimit - totalFailure - inFlight).coerceAtLeast(0)
                     val pendingRoom = (maxPending - inFlight).coerceAtLeast(0)
                     val fdRoom = if (maxStable >= fdClipStart || totalSuccess >= fdClipStart) pendingFdBudget() else pendingFdBudget().coerceAtMost(maxPending)
@@ -464,27 +465,31 @@ class TcpTester(context: Context) {
         failure: Int,
         launched: Int,
         peak: Int,
-        userFailureLimit: Int
+        userFailureLimit: Int,
+        targetCps: Int = 200
     ): String? {
-        // 低会话：不用 3s/5s 无增长，改为尝试数 + 失败数 + 成功率。
-        if (peak < 500 && launched >= 500 && failure >= 120) return "低会话失败"
-        if (peak < 1_000 && launched >= 800 && failure >= 120) {
+        val lowSessionMinAttempts = maxOf(500, targetCps / 2)
+        if (peak < 500 && launched >= lowSessionMinAttempts && failure >= 120) return "低会话失败"
+        if (peak < 1_000 && launched >= (lowSessionMinAttempts + 300) && failure >= 120) {
             val rate = success.toFloat() / launched.toFloat()
             if (rate < 0.60f) return "低会话失败"
         }
 
-        val limit = effectiveFailureLimit(peak, userFailureLimit)
+        val limit = effectiveFailureLimit(peak, userFailureLimit, targetCps)
         return if (failure >= limit) "失败上限" else null
     }
 
-    private fun effectiveFailureLimit(peak: Int, userFailureLimit: Int): Int =
-        minOf(userFailureLimit.coerceAtLeast(1), failureLimitFor(peak))
+    private fun effectiveFailureLimit(peak: Int, userFailureLimit: Int, targetCps: Int = 200): Int =
+        minOf(userFailureLimit.coerceAtLeast(1), failureLimitFor(peak, targetCps))
 
-    private fun failureLimitFor(peak: Int): Int = when {
-        peak < 1_000 -> 120
-        peak < 6_000 -> 200
-        peak < 12_000 -> 360
-        else -> 600
+    private fun failureLimitFor(peak: Int, targetCps: Int = 200): Int {
+        val cpsHeadroom = (targetCps / 2).coerceAtLeast(120)
+        return when {
+            peak < 1_000 -> maxOf(120, minOf(cpsHeadroom, 600))
+            peak < 6_000 -> maxOf(200, minOf(cpsHeadroom, 1_000))
+            peak < 12_000 -> maxOf(360, minOf(cpsHeadroom, 1_500))
+            else -> maxOf(600, minOf(cpsHeadroom, 2_000))
+        }
     }
 
     private fun effectiveTimeoutMs(configTimeoutMs: Int, peak: Int): Int {

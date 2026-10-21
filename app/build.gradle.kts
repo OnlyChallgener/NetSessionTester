@@ -12,8 +12,8 @@ android {
         applicationId = "com.demonv.netsessiontester"
         minSdk = 26
         targetSdk = 35
-        versionCode = 150
-        versionName = "v1.0.21-beta1"
+        versionCode = 157
+        versionName = "v1.0.22-beta1"
         vectorDrawables { useSupportLibrary = true }
     }
 
@@ -41,6 +41,13 @@ android {
     }
 
     buildFeatures { compose = true }
+
+    // The current AndroidX lint detector crashes while reading Kotlin 2.2
+    // metadata (the APK compilation itself succeeds). Keep release lint
+    // usable by disabling only the affected detector.
+    lint {
+        disable += "NullSafeMutableLiveData"
+    }
 }
 
 kotlin { jvmToolchain(17) }
@@ -55,5 +62,8 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+    implementation(project(":shared"))
     debugImplementation("androidx.compose.ui:ui-tooling")
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
 }

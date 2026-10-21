@@ -1,17 +1,18 @@
 {
-  "versionCode": 150,
-  "versionName": "v1.0.21-beta1",
-  "build": 150,
-  "status": "testing",
+  "versionCode": 157,
+  "versionName": "v1.0.22-beta1",
+  "build": 157,
+  "status": "beta",
   "minReadyFileSize": 3000000,
-  "title": "发现测试版本 v1.0.21-beta1 build150",
+  "title": "NetSessionTester 测试版 v1.0.22-beta1 build157",
   "content": [
-    "新增 Bufferbloat 缓冲膨胀评级：精确测定网络排队延迟增量与电竞综合评级（A+~F）",
-    "新增 5G/4G 蜂窝基站与射频看板：实时解析 NR 频段（n78/n41/n28）、PCI、RSRP、SINR 工参",
-    "设置页网络信息快捷矩阵升级为 3 行 2 列布局，保持全套 Material 3 毛玻璃风格一致性",
-    "智能分析拥塞根因并提供路由器 SQM 与移动网络针对性调优建议"
+    "修复 Windows/macOS 连接数、独立 TCP Ping 和联动诊断的采样、失败统计与连接释放",
+    "新增桌面历史记录：保存测试参数、真实曲线和运行日志，支持筛选、删除和 CSV 导出",
+    "iOS 接入核心网络工具、历史和设置，并使用系统标签栏承载 Liquid Glass",
+    "清理已移除的双网对测残余和旧版外部 Java 桌面启动器",
+    "本版只完成 Python 源契约与协议样例检查，未完成平台编译和真机验收"
   ],
-  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.0.21-beta1-150/NetSessionTester-v1.0.21-beta1-build150-signed.apk",
-  "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/tag/v1.0.21-beta1-150",
+  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.0.22-beta1/NetSessionTester-v1.0.22-beta1-build157-signed.apk",
+  "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/tag/v1.0.22-beta1",
   "force": false
 }

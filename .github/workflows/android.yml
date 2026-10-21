@@ -5,6 +5,8 @@ on:
   push:
     branches:
       - main
+      - 'feature/**'
+      - 'feat/**'
 
 jobs:
   build:
@@ -23,11 +25,14 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: 9.5.1
+          gradle-version: 8.11.1
 
       - name: Decode keystore
         run: |
           echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 --decode > $RUNNER_TEMP/release.jks
+
+      - name: Test Android network clients
+        run: gradle :app:testDebugUnitTest --no-daemon
 
       - name: Build signed APK
         env:
@@ -41,5 +46,5 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: NetSessionTester-v1.0.21-beta1-build150-signed.apk
+          name: NetSessionTester-v1.0.22-beta1-build157-signed.apk
           path: app/build/outputs/apk/release/app-release.apk

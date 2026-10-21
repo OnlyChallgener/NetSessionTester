@@ -74,8 +74,10 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
@@ -107,7 +109,9 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Article
+import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Assessment
@@ -201,6 +205,7 @@ import com.demonv.netsessiontester.model.TestMode
 import com.demonv.netsessiontester.network.PublicIpDetector
 import com.demonv.netsessiontester.network.PublicIpResult
 import com.demonv.netsessiontester.network.NetworkDnsResolver
+import com.demonv.netsessiontester.network.Iperf3Client
 import com.demonv.netsessiontester.ui.theme.NetSessionTesterTheme
 import com.demonv.netsessiontester.util.CsvExporter
 import kotlinx.coroutines.CancellationException
@@ -218,6 +223,7 @@ import org.json.JSONArray
 import java.io.BufferedInputStream
 import java.io.File
 import java.io.FileOutputStream
+import java.io.IOException
 import java.io.OutputStreamWriter
 import java.net.DatagramPacket
 import java.net.DatagramSocket
@@ -248,9 +254,10 @@ import kotlin.math.max
 import kotlin.math.min
 
 private enum class MainTab(val label: String, val mark: String) {
-    SETTINGS("设置", "settings"),
     TEST("测试", "play"),
-    LOGS("历史", "logs")
+    TOOLS("工具", "tools"),
+    LOGS("历史", "logs"),
+    SETTINGS("设置", "settings")
 }
 
 private enum class AppToolPage {
@@ -262,7 +269,8 @@ private enum class AppToolPage {
     IPV6_DIAGNOSTIC,
     PING_HISTORY,
     BUFFERBLOAT,
-    CELLULAR_INFO
+    CELLULAR_INFO,
+    IPERF
 }
 
 private enum class ChartMode(val label: String) {
@@ -667,8 +675,8 @@ private fun currentAppVersionCode(context: Context): Long = runCatching {
 private fun currentAppVersionName(context: Context): String {
     return runCatching {
         val pkg = context.packageManager.getPackageInfo(context.packageName, 0)
-        pkg.versionName?.takeIf { it.isNotBlank() } ?: "v1.0.21-beta1"
-    }.getOrDefault("v1.0.21-beta1")
+        pkg.versionName?.takeIf { it.isNotBlank() } ?: "v1.0.22-beta1"
+    }.getOrDefault("v1.0.22-beta1")
 }
 
 private fun displayVersionName(raw: String): String {
@@ -1584,9 +1592,9 @@ private fun buildNetworkProbeInfo(
             error = it.message ?: it.javaClass.simpleName
         )
     }
-    val stun = if (full && !env.hasVpn) runCatching { stunBindingProbe() }.getOrNull() else null
-    val publicV4 = publicV4FromHttp ?: stun?.mappedIp?.takeIf { isUsableIpv4(it) }
-    // V1.1.15：延迟从完整 NAT/STUN 诊断中拆出。
+    val stun: StunProbeResult? = null
+    val publicV4 = publicV4FromHttp
+    // 延迟从完整 NAT/STUN 诊断中拆出。
     // 首页网络信息轻量刷新 full=false 时也会跑一次轻量延迟检测，避免长期显示“不可用”。
     val latencyMs = if (full) {
         runCatching { tcpConnectLatencyMs(targetHost, targetPort.coerceIn(1, 65535), 1500) }.getOrNull()
@@ -1612,73 +1620,29 @@ private fun buildNetworkProbeInfo(
     }
 
     val isDirectPublicV4 = publicV4 != null && localIpv4 != null && !isPrivateIpv4(localIpv4) && localIpv4 == publicV4
-    val stunSuccess = stun != null
-    val multiStun = stun?.successCount ?: 0
-    val stunTotal = stun?.totalCount ?: 0
-
-    val strongSymmetric = stunSuccess && !stun!!.portStable && multiStun >= 3
-    val weakPortChange = stunSuccess && !stun!!.portStable && multiStun < 3
-    val strictNat1 = stunSuccess && stun!!.portStable && stun.ipStable && stun.roundStable && stun.successCount == stun.totalCount && stun.totalCount >= 6 && stun.roundCount >= 2
-    val stableMapping = stunSuccess && stun!!.portStable && stun.ipStable && multiStun >= 3
-    val rfc5780Verified = stunSuccess && stun!!.filteringVerified
-    val rfc5780EndpointIndependentMapping = rfc5780Verified && stun.rfc5780MappingBehavior == "端口保持"
-    val rfc5780EndpointIndependentFiltering = rfc5780Verified && stun.rfc5780FilteringBehavior == "开放"
-    val rfc5780AddressFiltering = rfc5780Verified && stun.rfc5780FilteringBehavior == "地址受限"
-    val rfc5780PortFiltering = rfc5780Verified && stun.rfc5780FilteringBehavior == "端口受限"
 
     val natType = when {
         env.hasVpn -> "代理环境"
         isDirectPublicV4 -> "NAT1 / 开放"
-        rfc5780EndpointIndependentMapping && rfc5780EndpointIndependentFiltering -> "NAT1 / 全锥形"
-        rfc5780EndpointIndependentMapping && rfc5780AddressFiltering -> "NAT2 / 地址受限型"
-        rfc5780EndpointIndependentMapping && rfc5780PortFiltering -> "NAT3 / 端口受限型"
-        rfc5780Verified && !rfc5780EndpointIndependentMapping -> "NAT4 / 对称型"
-        strictNat1 -> "NAT1 / 全锥形"
-        strongSymmetric -> "NAT4 / 对称型"
-        stableMapping -> "NAT3 / 端口保持型"
-        stunSuccess -> "NAT3 / 受限型"
-        publicV4 != null && full -> "NAT类型待确认"
-        publicV4 == null && full -> "UDP受限 / 无法判断"
         else -> "待检测"
     }
 
     val mapping = when {
         env.hasVpn -> "可能来自代理出口"
         isDirectPublicV4 -> "公网直连"
-        stun == null && full -> "未知"
-        stun == null -> "待检测"
-        rfc5780Verified && stun.rfc5780MappingBehavior.isNotBlank() -> stun.rfc5780MappingBehavior
-        strongSymmetric -> "端口变化"
-        weakPortChange -> "端口变化待确认"
-        else -> "端口保持"
+        else -> "待检测"
     }
 
     val filtering = when {
         env.hasVpn -> "无法准确判断"
         isDirectPublicV4 -> "开放型"
-        rfc5780Verified && stun.rfc5780FilteringBehavior.isNotBlank() -> stun.rfc5780FilteringBehavior
-        strictNat1 || stableMapping -> "未验证"
-        strongSymmetric -> "未验证"
-        stun != null -> "未完成检测"
-        publicV4 != null && full -> "待确认"
-        stun == null && full -> "UDP回包失败"
         else -> "待检测"
     }
 
     val confidence = when {
         env.hasVpn -> "低"
-        !full -> "低"
-        rfc5780EndpointIndependentMapping && rfc5780EndpointIndependentFiltering -> "高"
-        rfc5780Verified -> "中高"
-        strictNat1 -> "高"
-        strongSymmetric && stun!!.ipStable && stun.roundStable && multiStun >= 5 -> "高"
-        strongSymmetric && stun!!.ipStable && multiStun >= 4 -> "中高"
-        stun != null && stableMapping && multiStun >= 5 && stun.roundStable -> "中高"
-        stun != null && multiStun >= 4 && stun.roundStable -> "中"
-        stun != null && multiStun >= 3 -> "中"
-        stun != null -> "低"
-        publicV4 != null -> "低"
-        else -> "低"
+        isDirectPublicV4 -> "高"
+        else -> "待检测"
     }
 
     val dnsStatus = when {
@@ -1690,24 +1654,25 @@ private fun buildNetworkProbeInfo(
         else -> "无AAAA"
     }
 
-    val stunRoundText = stun?.let { if (it.roundCount >= 2) "复测${it.roundCount}轮${if (it.roundStable) "稳定" else "有波动"}。" else "" } ?: ""
-    val stunBackupText = stun?.let { if (it.usedBackup) "已启用备用节点。" else "" } ?: ""
-    val rfc5780Text = stun?.let { if (it.filteringVerified) "RFC5780节点 ${it.rfc5780Server} 已验证回包限制。" else "" } ?: ""
-    val stunNodeText = if (full && stunTotal > 0) "STUN节点 ${multiStun}/${stunTotal} 成功。${stunRoundText}${stunBackupText}${rfc5780Text}" else ""
+    val isCgnat = (publicV4 != null && isCgnatIpv4(publicV4))
+    val isDoubleNat = isCgnat || (localIpv4 != null && isPrivateIpv4(localIpv4) && publicV4 != null && !isDirectPublicV4)
+    val upnpSupported = if (full && !env.hasVpn && localIpv4 != null && isPrivateIpv4(localIpv4)) probeUpnpAvailable() else false
+    val natDepthTag = when {
+        env.hasVpn -> ""
+        isDirectPublicV4 -> "【公网直连】"
+        isCgnat -> "【运营商CGNAT大内网】"
+        isDoubleNat -> "【双层NAT】"
+        else -> "【单层NAT】"
+    }
+    val upnpTag = if (upnpSupported) " · 局域网网关已开启UPnP自动端口映射" else ""
+
     val diagnosis = when {
         env.hasVpn -> "检测到VPN/代理，NAT、出口和IPv6结果仅供参考。"
         dns.fakeIpDetected -> "检测到Fake-IP，DNS可能被代理工具接管。"
         !dns.systemHasAaaa && dns.domesticHasAaaa -> "系统DNS未返回IPv6，国内备用DNS可解析，可能被AdGuard/代理/路由器策略过滤。"
         !dns.systemHasAaaa && dns.globalHasAaaa -> "系统和国内备用DNS未返回IPv6，国外备用DNS可解析，可能存在地区DNS差异或本地DNS策略影响。"
-        rfc5780Verified -> "${stunNodeText}检测方式：${stun!!.detectionMethod}，出网端口：${stun.rfc5780MappingBehavior}，回包限制：${stun.rfc5780FilteringBehavior}。"
-        natType.startsWith("NAT4 / 对称") -> "${stunNodeText}多个可用STUN目标返回的外部端口不一致，当前按对称型/NAT4理解，P2P/游戏联机可能受影响。"
-        natType.startsWith("NAT3 / 端口保持") -> "${stunNodeText}多节点端口保持，但未满足6/6节点与2轮稳定条件，当前按端口保持型受限网络显示；完整回包限制需RFC5780/自建节点验证。"
-        natType.startsWith("NAT3 / 受限") && weakPortChange -> "${stunNodeText}UDP基础探测可用，但可用节点不足以确认对称型，当前按受限型理解，建议换网络或再次刷新复测。"
-        natType.startsWith("NAT3 / 受限") -> "${stunNodeText}UDP基础探测可用，回包限制未完成RFC5780验证；完整回包限制需RFC5780/自建节点验证。"
-        natType.startsWith("NAT类型待确认") -> "公网IPv4可用，但STUN基础探测未成功，NAT类型暂按待确认处理。"
-        natType.startsWith("UDP") -> "多个STUN基础请求均失败，当前仅能判断为UDP受限/无法判断，可能是UDP被防火墙、代理或运营商限制。"
-        natType.startsWith("NAT2") -> "UDP映射较稳定，普通联机能力中等。"
-        natType.startsWith("NAT1") -> if (rfc5780Verified) "${stunNodeText}RFC5780已完成端口保持和回包验证，当前判定为 NAT1 / 全锥形。" else "${stunNodeText}6/6节点与2轮复测均保持同一公网端口，按兼容口径判定为 NAT1；完整回包限制需 RFC5780 / 自建节点验证。"
+        isDirectPublicV4 -> "公网IPv4直连，无NAT转换。"
+        natType == "待检测" -> "网络就绪。NAT 采用手动深度测试，点击 NAT 指标可自选 STUN 节点进行专项诊断。"
         else -> "网络信息已更新。"
     }
 
@@ -1718,14 +1683,14 @@ private fun buildNetworkProbeInfo(
         carrier = carrierText,
         natType = natType,
         latencyText = latencyMs?.let { "${it}ms" } ?: "不可用",
-        portText = stun?.mappedPort?.toString() ?: tcpPort?.toString() ?: "不可用",
+        portText = tcpPort?.toString() ?: "待检测",
         priority = priority,
         mappingBehavior = mapping,
         filterBehavior = filtering,
         ipv6Status = ipv6Status,
         dnsStatus = dnsStatus,
         confidence = confidence,
-        diagnosis = diagnosis,
+        diagnosis = if (natDepthTag.isNotBlank()) "$natDepthTag$diagnosis$upnpTag" else diagnosis,
         proxyNotice = if (env.hasVpn) "VPN/代理结果仅供参考" else "",
         refreshMode = if (full) "已检测" else "待检测"
     )
@@ -1813,6 +1778,29 @@ private fun isPrivateIpv4(ip: String): Boolean {
         (a == 100 && b in 64..127)
 }
 
+private fun isCgnatIpv4(ip: String): Boolean {
+    val parts = ip.split('.').mapNotNull { it.toIntOrNull() }
+    if (parts.size != 4) return false
+    return parts[0] == 100 && parts[1] in 64..127
+}
+
+private fun probeUpnpAvailable(timeoutMs: Int = 400): Boolean = runCatching {
+    DatagramSocket().use { socket ->
+        socket.soTimeout = timeoutMs
+        val search = "M-SEARCH * HTTP/1.1\r\n" +
+                "HOST: 239.255.255.250:1900\r\n" +
+                "MAN: \"ssdp:discover\"\r\n" +
+                "MX: 1\r\n" +
+                "ST: urn:schemas-upnp-org:device:InternetGatewayDevice:1\r\n\r\n"
+        val data = search.toByteArray(Charsets.US_ASCII)
+        socket.send(DatagramPacket(data, data.size, InetAddress.getByName("239.255.255.250"), 1900))
+        val buf = ByteArray(1024)
+        val resp = DatagramPacket(buf, buf.size)
+        socket.receive(resp)
+        String(resp.data, 0, resp.length, Charsets.US_ASCII).contains("HTTP/1.1 200 OK", ignoreCase = true)
+    }
+}.getOrDefault(false)
+
 private fun tcpConnectLatencyMs(host: String, port: Int, timeoutMs: Int): Int {
     val start = System.currentTimeMillis()
     Socket().use { socket ->
@@ -1866,16 +1854,16 @@ private fun stunBindingProbe(): StunProbeResult {
     // 方案A：公共 STUN 增强版。
     // 关键点：同一个 UDP socket 复用本地端口、主 6 备 2、标准 2 轮复测、够票提前出结果、备用只补票。
     val primary = listOf(
-        StunEndpoint("stun.cloudflare.com", 3478),
+        StunEndpoint("stun.chat.bilibili.com", 3478),
+        StunEndpoint("stun.hitv.com", 3478),
+        StunEndpoint("stun.douyucdn.cn", 3478),
         StunEndpoint("stun.miwifi.com", 3478),
-        StunEndpoint("stun.voipstunt.com", 3478),
-        StunEndpoint("stun.voipbuster.com", 3478),
-        StunEndpoint("stun.internetcalls.com", 3478),
-        StunEndpoint("stun.voip.aebc.com", 3478)
+        StunEndpoint("stun.cloudflare.com", 3478),
+        StunEndpoint("stun.syncthing.net", 3478)
     )
     val backup = listOf(
-        StunEndpoint("stun.fitauto.ru", 3478),
-        StunEndpoint("stun.qq.com", 3478)
+        StunEndpoint("stun.qq.com", 3478),
+        StunEndpoint("stun.voip.aebc.com", 3478)
     )
 
     DatagramSocket().use { socket ->
@@ -3041,14 +3029,13 @@ private fun NetSessionTesterApp() {
     val logStore = remember { LogStore(context.applicationContext) }
     val settingsStore = remember { SettingsStore(context.applicationContext) }
 
-    var selectedTab by rememberSaveable { mutableStateOf(MainTab.SETTINGS) }
+    var selectedTab by rememberSaveable { mutableStateOf(MainTab.TEST) }
     var appToolPage by rememberSaveable { mutableStateOf(AppToolPage.NONE) }
     val settingsListState = rememberSaveable(saver = LazyListState.Saver) { LazyListState() }
     val testListState = rememberSaveable(saver = LazyListState.Saver) { LazyListState() }
     var testPingFocusRequest by remember { mutableStateOf(0) }
     var settingsNetworkFocusRequest by remember { mutableStateOf(0) }
     var sessionCardExpanded by remember { mutableStateOf(false) }
-    var networkInfoExpanded by rememberSaveable { mutableStateOf(false) }
     val restoredReleaseUi = remember {
         val snapshot = AppTestRuntime.releaseUiSnapshot
         val completionStillVisible = !snapshot.finished ||
@@ -3087,7 +3074,7 @@ private fun NetSessionTesterApp() {
     var intervalMs by remember { mutableStateOf("100") }
     var timeoutMs by remember { mutableStateOf("1200") }
     var successLimit by remember { mutableStateOf("65535") }
-    var failureLimit by remember { mutableStateOf("600") }
+    var failureLimit by remember { mutableStateOf("200") }
     var keepConnections by remember { mutableStateOf(true) }
     var maskPrivacy by remember { mutableStateOf(false) }
     var historyLimit by remember { mutableStateOf("30") }
@@ -3171,7 +3158,6 @@ private fun NetSessionTesterApp() {
     fun closeIpv6DiagnosticsToNetworkInfo() {
         appToolPage = AppToolPage.NONE
         selectedTab = MainTab.SETTINGS
-        networkInfoExpanded = true
         settingsNetworkFocusRequest += 1
     }
 
@@ -3329,7 +3315,7 @@ private fun NetSessionTesterApp() {
         }
     }
 
-    fun refreshPublicIp() {
+    fun refreshPublicIp(forced: Boolean = false) {
         networkRefreshGeneration += 1L
         val generation = networkRefreshGeneration
         networkRefreshJob?.cancel()
@@ -3351,7 +3337,7 @@ private fun NetSessionTesterApp() {
             try {
                 val result = withContext(Dispatchers.IO) {
                     try {
-                        PublicIpDetector.detect(network)
+                        PublicIpDetector.detect(network, forceRefresh = forced)
                     } catch (cancelled: CancellationException) {
                         throw cancelled
                     } catch (error: Error) {
@@ -3566,8 +3552,14 @@ private fun NetSessionTesterApp() {
         pingCountSetting = saved.pingCount.ifBlank { "无限" }
         pingTimeoutSetting = saved.pingTimeoutMs
         pingProtocolSetting = runCatching { PingProtocolMode.valueOf(saved.pingProtocol) }.getOrDefault(PingProtocolMode.AUTO)
-        natRfc5780Servers = normalizeNatServerList(saved.natRfc5780Servers, "stunserver2025.stunprotocol.org:3478")
-        natRfc3489Servers = normalizeNatServerList(saved.natRfc3489Servers, "stun.voip.aebc.com:3478")
+        natRfc5780Servers = normalizeNatServerList(
+            if (saved.natRfc5780Servers.trim() == "stun.chat.bilibili.com:3478") "stunserver2025.stunprotocol.org:3478" else saved.natRfc5780Servers,
+            "stunserver2025.stunprotocol.org:3478"
+        )
+        natRfc3489Servers = normalizeNatServerList(
+            if (saved.natRfc3489Servers.trim() == "stun.miwifi.com:3478") "stun.voip.aebc.com:3478" else saved.natRfc3489Servers,
+            "stun.voip.aebc.com:3478"
+        )
         applyHistoryUiSnapshot(loadHistoryUiSnapshot(historyPeriod, historyLimit.toIntOrNull()?.coerceIn(10, 100) ?: 30))
         settingsLoaded = true
         lastNetworkInfoSignature = currentNetworkSignature(context)
@@ -3810,14 +3802,14 @@ private fun NetSessionTesterApp() {
         chartPoints = emptyList()
         displayChartPoints = emptyList()
         lastChartSampleAt = emptyMap()
-        // Ping 独立运行，不随会话曲线清空。
+        // Ping 独立运行，不随会话折线清空。
     }
 
     fun recordChartPoint(stats: ProtocolStats) {
         if (currentStartedAt <= 0L) return
         val now = System.currentTimeMillis()
         val last = lastChartSampleAt[stats.protocol] ?: 0L
-        val terminal = stats.phase.contains("完成") || stats.phase.contains("释放") || stats.phase.contains("中断") || stats.phase.contains("上限")
+        val terminal = stats.phase.contains("完成") || stats.phase.contains("释放") || stats.phase.contains("中断") || stats.phase.contains("上限") || stats.phase.contains("失败")
         if (!terminal && now - last < 1_000L) return
         val elapsed = ((now - currentStartedAt) / 1_000L).toInt().coerceAtLeast(0)
         val previousPeak = chartPoints.filter { it.protocol == stats.protocol }.maxOfOrNull { it.active } ?: 0
@@ -3835,9 +3827,11 @@ private fun NetSessionTesterApp() {
             cps = stats.cps,
             phase = stats.phase
         )
-        chartPoints = (chartPoints.filterNot { it.protocol == point.protocol && it.elapsedSec == point.elapsedSec } + point)
+        val updated = (chartPoints.filterNot { it.protocol == point.protocol && it.elapsedSec == point.elapsedSec } + point)
             .sortedWith(compareBy<ChartPoint> { it.protocol.ordinal }.thenBy { it.elapsedSec })
             .takeLast(180)
+        chartPoints = updated
+        displayChartPoints = compactSessionPointsForRender(updated)
         lastChartSampleAt = lastChartSampleAt + (stats.protocol to now)
     }
 
@@ -3852,11 +3846,19 @@ private fun NetSessionTesterApp() {
             resolveResult = state.resolveResult,
             history = state.history
         )
-        val freezeSessionUi = state.runPhase == RunPhase.Stopping || state.runPhase == RunPhase.Releasing ||
-            state.runPhase == RunPhase.Finished || state.runPhase == RunPhase.Failed
-        if (!freezeSessionUi && previousV4 != state.ipv4Stats) recordChartPoint(state.ipv4Stats)
-        if (!freezeSessionUi && previousV6 != state.ipv6Stats) recordChartPoint(state.ipv6Stats)
-        if (previousPhase != state.runPhase && state.runPhase in listOf(RunPhase.Finished, RunPhase.Failed)) {
+        val isReleasing = state.runPhase == RunPhase.Releasing
+        if (!isReleasing && (previousV4 != state.ipv4Stats || state.runPhase in listOf(RunPhase.Finished, RunPhase.Failed))) {
+            if (state.ipv4Stats.totalAttempts > 0 || state.ipv4Stats.phase.isNotBlank()) {
+                recordChartPoint(state.ipv4Stats)
+            }
+        }
+        if (!isReleasing && (previousV6 != state.ipv6Stats || state.runPhase in listOf(RunPhase.Finished, RunPhase.Failed))) {
+            if (state.ipv6Stats.totalAttempts > 0 || state.ipv6Stats.phase.isNotBlank()) {
+                recordChartPoint(state.ipv6Stats)
+            }
+        }
+        if (previousPhase != state.runPhase && state.runPhase in listOf(RunPhase.Finished, RunPhase.Failed, RunPhase.Idle)) {
+            displayChartPoints = compactSessionPointsForRender(chartPoints)
             refreshHistory()
         }
     }
@@ -4007,7 +4009,7 @@ private fun NetSessionTesterApp() {
                 intervalMs = intervalMs.toLongOrNull() ?: 100L,
                 timeoutMs = timeoutMs.toIntOrNull() ?: 1200,
                 successLimit = successLimit.toIntOrNull() ?: 65535,
-                failureLimit = failureLimit.toIntOrNull() ?: 600,
+                failureLimit = failureLimit.toIntOrNull() ?: 200,
                 keepConnectionsAfterStop = true
             ).normalized()
         }.getOrElse { error ->
@@ -4051,10 +4053,18 @@ private fun NetSessionTesterApp() {
 
     fun stopAdding() {
         AppTestRuntime.stopConnection("手动停止")
+        if (!AppTestRuntime.isConnectionActive && state.isAdding) {
+            state = state.copy(isAdding = false, runPhase = RunPhase.Finished, status = "手动停止 · 已结束")
+            displayChartPoints = compactSessionPointsForRender(chartPoints)
+        }
     }
 
     fun releaseAll() {
         AppTestRuntime.stopConnection("强制释放", force = true)
+        if (!AppTestRuntime.isConnectionActive && (state.isAdding || state.releaseUi.visible)) {
+            state = state.copy(isAdding = false, runPhase = RunPhase.Finished, status = "已释放")
+            displayChartPoints = compactSessionPointsForRender(chartPoints)
+        }
     }
 
     fun exportLogs() {
@@ -4383,12 +4393,11 @@ private fun NetSessionTesterApp() {
                 )
                 AppToolPage.BUFFERBLOAT -> BufferbloatToolPage(onBack = { appToolPage = AppToolPage.NONE })
                 AppToolPage.CELLULAR_INFO -> CellularInfoToolPage(onBack = { appToolPage = AppToolPage.NONE })
+                AppToolPage.IPERF -> IperfToolPage(onBack = { appToolPage = AppToolPage.NONE })
                 AppToolPage.NONE -> when (selectedTab) {
                 MainTab.SETTINGS -> SettingsPage(
                     listState = settingsListState,
                     networkInfoFocusRequest = settingsNetworkFocusRequest,
-                    networkInfoExpanded = networkInfoExpanded,
-                    onNetworkInfoExpandedChange = { networkInfoExpanded = it },
                     host = host,
                     onHostChange = { host = it },
                     hostHistory = hostHistory,
@@ -4405,20 +4414,13 @@ private fun NetSessionTesterApp() {
                     networkEnvironment = detectNetworkEnvironment(context),
                     networkProbeInfo = networkProbeInfo,
                     publicIpLoading = publicIpLoading,
-                    onRefreshPublicIp = { refreshPublicIp() },
+                    onRefreshPublicIp = { refreshPublicIp(true) },
                     onCopyPublicIpv4 = { copyText(publicIpResult.ipv4, "IPv4出口地址") },
                     onCopyPublicIpv6 = { copyText(publicIpResult.ipv6, "IPv6出口地址") },
                     onOpenNatDiagnostics = { showNatDiagnosticDialog = true },
-                    onOpenNsLookup = { appToolPage = AppToolPage.NSLOOKUP },
-                    onOpenTracket = { appToolPage = AppToolPage.TRACKET },
-                    onOpenMtu = { appToolPage = AppToolPage.MTU },
-                    onOpenRoaming = { appToolPage = AppToolPage.ROAMING },
-                    onOpenBufferbloat = { appToolPage = AppToolPage.BUFFERBLOAT },
-                    onOpenCellularInfo = { appToolPage = AppToolPage.CELLULAR_INFO },
                     onOpenIpv6Diagnostics = {
                         // 从网络信息进入时，不切到测试页；专项页退出后强制回到设置页网络信息卡片。
                         selectedTab = MainTab.SETTINGS
-                        networkInfoExpanded = true
                         appToolPage = AppToolPage.IPV6_DIAGNOSTIC
                     },
                     onOpenPingSettings = {
@@ -4477,7 +4479,7 @@ private fun NetSessionTesterApp() {
                     onRestoreDefault = {
                         host = "www.baidu.com"; port = "80"; mode = TestMode.IPV4_THEN_IPV6
                         batchSize = "200"; intervalMs = "100"; timeoutMs = "1200"
-                        successLimit = "65535"; failureLimit = "600"; keepConnections = true; maskPrivacy = false; historyLimit = "30"
+                        successLimit = "65535"; failureLimit = "200"; keepConnections = true; maskPrivacy = false; historyLimit = "30"
                         pingEnabled = true; pingTarget = "223.5.5.5"; pingIntervalSetting = "1000"; pingCountSetting = "无限"; pingTimeoutSetting = recommendedPingTimeoutMsForInterval(1000).toString(); pingProtocolSetting = PingProtocolMode.AUTO
                     }
                 )
@@ -4571,6 +4573,13 @@ private fun NetSessionTesterApp() {
                     onHistoryDetail = { summary ->
                         detailSummary = summary
                     }
+                )
+
+                MainTab.TOOLS -> ToolsPage(
+                    onOpenTool = { tool ->
+                        appToolPage = tool
+                    },
+                    onOpenNatDiagnostics = { showNatDiagnosticDialog = true }
                 )
                 }
             }
@@ -5394,15 +5403,7 @@ private fun ReorderableCardItem(
                 )
             },
             contentAlignment = Alignment.TopCenter
-        ) {
-            Box(
-                Modifier
-                    .padding(top = 4.dp)
-                    .width(24.dp)
-                    .height(3.dp)
-                    .background(Border.copy(alpha = 0.62f), CircleShape)
-            )
-        }
+        ) {}
     }
 }
 
@@ -5410,8 +5411,6 @@ private fun ReorderableCardItem(
 private fun SettingsPage(
     listState: LazyListState,
     networkInfoFocusRequest: Int,
-    networkInfoExpanded: Boolean,
-    onNetworkInfoExpandedChange: (Boolean) -> Unit,
     host: String,
     onHostChange: (String) -> Unit,
     hostHistory: List<String>,
@@ -5428,13 +5427,7 @@ private fun SettingsPage(
     onCopyPublicIpv4: () -> Unit,
     onCopyPublicIpv6: () -> Unit,
     onOpenNatDiagnostics: () -> Unit,
-    onOpenNsLookup: () -> Unit,
-    onOpenTracket: () -> Unit,
-    onOpenMtu: () -> Unit,
-    onOpenRoaming: () -> Unit,
     onOpenIpv6Diagnostics: () -> Unit,
-    onOpenBufferbloat: () -> Unit,
-    onOpenCellularInfo: () -> Unit,
     onOpenPingSettings: () -> Unit,
     maskPrivacy: Boolean,
     onMaskPrivacyChange: (Boolean) -> Unit,
@@ -5532,15 +5525,7 @@ private fun SettingsPage(
                         onCopyPublicIpv4 = onCopyPublicIpv4,
                         onCopyPublicIpv6 = onCopyPublicIpv6,
                         onOpenNatDiagnostics = onOpenNatDiagnostics,
-                        onOpenNsLookup = onOpenNsLookup,
-                        onOpenTracket = onOpenTracket,
-                        onOpenMtu = onOpenMtu,
-                        onOpenRoaming = onOpenRoaming,
-                        onOpenIpv6Diagnostics = onOpenIpv6Diagnostics,
-                        onOpenBufferbloat = onOpenBufferbloat,
-                        onOpenCellularInfo = onOpenCellularInfo,
-                        expanded = networkInfoExpanded,
-                        onExpandedChange = onNetworkInfoExpandedChange
+                        onOpenIpv6Diagnostics = onOpenIpv6Diagnostics
                     )
                     "session" -> SoftCard {
                         SectionTitle("≡", "会话参数", Green)
@@ -5955,7 +5940,7 @@ private fun ReleaseProgressCard(releaseUi: ReleaseUiState) {
             ReleaseStep("清理连接资源", releaseUi.finished)
             ReleaseStep("更新界面状态", releaseUi.finished)
         }
-        Text("释放期间会冻结曲线渲染，只保留进度刷新，避免 UI 卡顿和按钮状态不同步。", color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
+        Text("释放期间会冻结折线渲染，只保留进度刷新，避免 UI 卡顿和按钮状态不同步。", color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
     }
 }
 
@@ -6028,6 +6013,171 @@ private fun FullRunLogPage(
             }
         }
         item { Spacer(Modifier.height(24.dp)) }
+    }
+}
+
+private data class ToolEntry(
+    val title: String,
+    val subtitle: String,
+    val mark: String,
+    val markBg: Color,
+    val markFg: Color,
+    val page: AppToolPage
+)
+
+@Composable
+private fun ToolsPage(
+    onOpenTool: (AppToolPage) -> Unit,
+    onOpenNatDiagnostics: () -> Unit = {}
+) {
+    val networkDiagTools = remember {
+        listOf(
+            ToolEntry("NAT 类型检测", "STUN手动检测 · IPv4 · UDP", "nat", BlueSoft, Blue, AppToolPage.NONE),
+            ToolEntry("NSLookup", "DNS域名解析 · 系统/自定义DNS", "dns", Color(0xFFF3E8FF), Purple, AppToolPage.NSLOOKUP),
+            ToolEntry("Traceroute", "路由追踪 · 逐跳分析", "route", Color(0xFFFFF7ED), Color(0xFFF97316), AppToolPage.TRACKET),
+            ToolEntry("MTU 探测", "最大传输单元路径发现", "mtu", Color(0xFFF0FDF4), Green, AppToolPage.MTU),
+            ToolEntry("IPv6 诊断", "IPv6通达验证 · 双栈检测", "ipv6", Color(0xFFFDF2F8), Color(0xFFEC4899), AppToolPage.IPV6_DIAGNOSTIC)
+        )
+    }
+    val performanceTools = remember {
+        listOf(
+            ToolEntry("缓冲评级", "Bufferbloat膨胀 · 电竞评级", "bufferbloat", BlueSoft, Blue, AppToolPage.BUFFERBLOAT),
+            ToolEntry("WiFi 漫游", "AP无缝漫游 · 切换丢包与时延", "roaming", Color(0xFFFDF2F8), Color(0xFFEC4899), AppToolPage.ROAMING),
+            ToolEntry("iPerf3 测速", "TCP/UDP吞吐量压测", "iperf", Color(0xFFF0FDF4), Green, AppToolPage.IPERF)
+        )
+    }
+    val telecomTools = remember {
+        listOf(
+            ToolEntry("基站工参", "5G/4G射频信号 · 小区参数", "cell", Color(0xFFFFF7ED), Color(0xFFF97316), AppToolPage.CELLULAR_INFO)
+        )
+    }
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize().padding(horizontal = 14.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        item { Spacer(Modifier.height(4.dp)) }
+        item {
+            Text(
+                "工具中心",
+                fontSize = 24.sp,
+                fontWeight = FontWeight.ExtraBold,
+                color = TextDark,
+                modifier = Modifier.padding(start = 2.dp)
+            )
+        }
+        item {
+            Text(
+                "网络诊断 · 性能测试 · 运营商工参",
+                fontSize = 13.sp,
+                color = Muted,
+                modifier = Modifier.padding(start = 2.dp, bottom = 2.dp)
+            )
+        }
+
+        item {
+            AppleToolGroup(
+                title = "网络诊断",
+                mark = "network",
+                color = Blue,
+                tools = networkDiagTools
+            ) { tool ->
+                if (tool.page == AppToolPage.NONE) onOpenNatDiagnostics() else onOpenTool(tool.page)
+            }
+        }
+
+        item {
+            AppleToolGroup(
+                title = "性能测试",
+                mark = "performance",
+                color = Purple,
+                tools = performanceTools
+            ) { tool ->
+                onOpenTool(tool.page)
+            }
+        }
+
+        item {
+            AppleToolGroup(
+                title = "运营商工参",
+                mark = "telecom",
+                color = Color(0xFFF97316),
+                tools = telecomTools
+            ) { tool ->
+                onOpenTool(tool.page)
+            }
+        }
+
+        item { Spacer(Modifier.height(24.dp)) }
+    }
+}
+
+@Composable
+private fun AppleToolGroup(
+    title: String,
+    mark: String,
+    color: Color,
+    tools: List<ToolEntry>,
+    onToolClick: (ToolEntry) -> Unit
+) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(start = 4.dp, bottom = 6.dp)
+        ) {
+            SectionTitle(mark, title, color)
+        }
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(ShapeL)
+                .background(GlassCardBrush)
+                .border(0.5.dp, GlassBorderBrush, ShapeL)
+        ) {
+            tools.forEachIndexed { index, tool ->
+                ToolListRow(tool.title, tool.subtitle, tool.mark, tool.markBg, tool.markFg) {
+                    onToolClick(tool)
+                }
+                if (index < tools.lastIndex) {
+                    HorizontalDivider(
+                        modifier = Modifier.padding(start = 54.dp),
+                        thickness = 0.5.dp,
+                        color = Color(0x0F000000)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ToolListRow(
+    title: String,
+    subtitle: String,
+    mark: String,
+    markBg: Color,
+    markFg: Color,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 11.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        MarkBox(mark, markBg, markFg)
+        Spacer(Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(title, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = TextDark)
+            Text(subtitle, fontSize = 11.5.sp, color = Muted, lineHeight = 15.sp)
+        }
+        Icon(
+            Icons.Filled.ChevronRight,
+            contentDescription = null,
+            tint = Muted.copy(alpha = 0.7f),
+            modifier = Modifier.width(16.dp).height(16.dp)
+        )
     }
 }
 
@@ -6210,7 +6360,11 @@ private fun VersionInfoDialog(
                     Text("当前版本", color = Muted, fontSize = 12.sp, modifier = Modifier.weight(1f))
                     StatusChip(displayVersionName(currentAppVersionName(LocalContext.current)), BlueSoft, Blue, compact = true)
                 }
-                VersionLine(displayVersionName(currentAppVersionName(LocalContext.current)), "新增Bufferbloat缓冲膨胀评级与5G/4G基站射频工参看板，快捷矩阵升级3行2列。")
+                VersionLine(displayVersionName(currentAppVersionName(LocalContext.current)), "正式版发布：全新独立「工具」中心、校准WiFi漫游、修复测试卡死与折线同步、精简网络看板。")
+                VersionLine("v1.0.21-beta4", "重构4-Tab底栏与独立「工具」中心，大幅精简设置页，极速公网IPv4抢占，强化手动NAT，新增目标选择器。")
+                VersionLine("v1.0.21-beta3", "新增缓冲评级/双网/iPerf3三大模块7天历史与折叠删除，修复iPerf3排版，深度优化NAT与MTU。")
+                VersionLine("v1.0.21-beta2", "新增双网并发(5G vs WiFi)同屏对测与内置iPerf3吞吐测速客户端，快捷矩阵升级4行2列。")
+                VersionLine("v1.0.21-beta1", "新增Bufferbloat缓冲膨胀评级与5G/4G基站射频工参看板，快捷矩阵升级3行2列。")
                 VersionLine("v1.0.20", "连接测试与Ping调度线程池物理隔离，启用极简Socket缓冲区与Channel异步回收。")
                 VersionLine("v1.0.18", "历史清空增加二次确认与10秒撤销，优化删除按钮，并修复NAT、漫游历史交互。")
                 VersionLine("v1.0.17", "统一各页面滑动删除交互，公网IP改为网络变化驱动刷新。")
@@ -6662,7 +6816,9 @@ private fun AlertDialog(
     dismissButton: @Composable (() -> Unit)? = null,
     title: @Composable (() -> Unit)? = null,
     text: @Composable (() -> Unit)? = null,
-    shape: androidx.compose.ui.graphics.Shape = GlassPopupShape
+    shape: androidx.compose.ui.graphics.Shape = GlassPopupShape,
+    modifier: Modifier = Modifier,
+    properties: androidx.compose.ui.window.DialogProperties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)
 ) {
     MaterialAlertDialog(
         onDismissRequest = onDismissRequest,
@@ -6675,7 +6831,11 @@ private fun AlertDialog(
         iconContentColor = Blue,
         titleContentColor = TextDark,
         textContentColor = TextDark,
-        tonalElevation = 0.dp
+        tonalElevation = 0.dp,
+        modifier = modifier
+            .fillMaxWidth(0.92f)
+            .border(0.5.dp, GlassPopupBorder, shape),
+        properties = properties
     )
 }
 
@@ -6740,8 +6900,8 @@ private fun SoftCard(content: @Composable ColumnScope.() -> Unit) {
             .fillMaxWidth()
             .clip(ShapeL)
             .background(GlassCardBrush)
-            .border(1.dp, GlassBorderBrush, ShapeL)
-            .padding(9.dp),
+            .border(0.5.dp, GlassBorderBrush, ShapeL)
+            .padding(11.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
         content = content
     )
@@ -6832,7 +6992,7 @@ private fun usesCustomNetGlyph(mark: String): Boolean = mark in setOf(
     "egress", "dns", "nslookup", "tracket", "mtu", "roaming", "ping", "∿",
     "target", "mode", "tune", "≡", "port", "host", "address", "□", "log",
     "latency", "time", "hourglass", "count", "privacy", "privacy_on", "carrier", "wifi", "confidence",
-    "note", "download", "chart", "bufferbloat", "cellular"
+    "note", "download", "chart", "bufferbloat", "cellular", "dual_net", "iperf"
 )
 
 @Composable
@@ -6995,7 +7155,7 @@ private fun NetGlyph(mark: String, color: Color, modifier: Modifier = Modifier) 
             }
             "tracket" -> { line(0.18f,0.68f,0.38f,0.35f); line(0.38f,0.35f,0.62f,0.56f); line(0.62f,0.56f,0.83f,0.28f); dot(0.18f,0.68f); dot(0.38f,0.35f); dot(0.62f,0.56f); drawCircle(color.copy(alpha=0.55f), radius=0.12f*size.minDimension, center=Offset(0.83f*w,0.28f*h), style=thin) }
             "mtu" -> {
-                // MTU检测：三条曲线组成弯曲小路。
+                // MTU检测：三条折线组成弯曲小路。
                 listOf(0.22f, 0.42f, 0.62f).forEachIndexed { idx, sx ->
                     val p = Path().apply {
                         moveTo(sx*w, 0.78f*h)
@@ -7012,11 +7172,10 @@ private fun NetGlyph(mark: String, color: Color, modifier: Modifier = Modifier) 
                 dot(0.50f,0.75f,0.043f)
             }
             "ping", "∿" -> {
-                // 独立Ping/Ping测试：仪表盘/速度表风格。
+                // 独立Ping/Ping测试：干净的 Apple SF Symbols 速度计弧线与指针
                 drawArc(color, 205f, 130f, false, topLeft=Offset(0.18f*w,0.20f*h), size=androidx.compose.ui.geometry.Size(0.64f*w,0.64f*h), style=stroke)
                 line(0.50f,0.58f,0.66f,0.38f,1f,stroke)
                 dot(0.50f,0.58f,0.04f)
-                line(0.28f,0.72f,0.72f,0.72f,0.75f,thin)
             }
             "connection_tree" -> {
                 // 连接数测试：短横向闪电 + 电弧 + 小端点，紧凑且不糊。
@@ -7087,6 +7246,19 @@ private fun NetGlyph(mark: String, color: Color, modifier: Modifier = Modifier) 
                 line(0.36f, 0.58f, 0.64f, 0.58f, 1f, stroke)
                 drawArc(color, 210f, 120f, false, topLeft = Offset(0.32f * w, 0.12f * h), size = androidx.compose.ui.geometry.Size(0.36f * w, 0.36f * h), style = thin)
                 dot(0.50f, 0.22f, 0.045f)
+            }
+            "dual_net" -> {
+                drawArc(color, 210f, 120f, false, topLeft = Offset(0.10f * w, 0.22f * h), size = androidx.compose.ui.geometry.Size(0.38f * w, 0.38f * h), style = thin)
+                dot(0.29f, 0.56f, 0.040f)
+                line(0.60f, 0.68f, 0.60f, 0.46f, 1f, stroke)
+                line(0.78f, 0.68f, 0.78f, 0.24f, 1f, stroke)
+                line(0.46f, 0.25f, 0.46f, 0.72f, 0.4f, thin)
+            }
+            "iperf" -> {
+                arrow(0.20f, 0.65f, 0.78f, 0.28f)
+                line(0.22f, 0.78f, 0.52f, 0.78f, 1f, stroke)
+                line(0.62f, 0.78f, 0.82f, 0.78f, 1f, stroke)
+                dot(0.28f, 0.36f, 0.045f)
             }
             else -> dot(0.50f,0.50f,0.18f)
         }
@@ -7711,7 +7883,7 @@ private fun CombinedSessionStatsCard(
                     .background(Color(0xFFF8FAFC), ShapeM),
                 contentAlignment = Alignment.Center
             ) {
-                Text("开始测试后显示本次曲线", color = Muted, fontSize = 12.sp)
+                Text("开始测试后显示本次折线", color = Muted, fontSize = 12.sp)
             }
         } else if (chartMode == ChartMode.GROWTH) {
             val series = when (selectedView) {
@@ -7769,7 +7941,7 @@ private fun SessionMetricTileCompact(
         modifier = modifier
             .height(SessionMetricCompactHeight)
             .background(Color(0xFFF8FAFC), ShapeM)
-            .border(1.dp, Border.copy(alpha = 0.72f), ShapeM)
+            .border(0.5.dp, Color.White.copy(alpha = 0.85f), ShapeM)
             .padding(horizontal = 4.dp, vertical = 5.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
@@ -7810,7 +7982,7 @@ private fun SessionCompareMetricTileCompact(
         modifier = modifier
             .height(SessionCompareMetricCompactHeight)
             .background(Color(0xFFF8FAFC), ShapeM)
-            .border(1.dp, Border.copy(alpha = 0.72f), ShapeM)
+            .border(0.5.dp, Color.White.copy(alpha = 0.85f), ShapeM)
             .padding(horizontal = 3.dp, vertical = 3.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
@@ -7857,7 +8029,7 @@ private fun SessionAddressRow(
         modifier = Modifier
             .fillMaxWidth()
             .background(Color(0xFFF8FAFC), ShapeM)
-            .border(1.dp, Border.copy(alpha = 0.65f), ShapeM)
+            .border(0.5.dp, Color.White.copy(alpha = 0.85f), ShapeM)
             .padding(start = 9.dp, end = 3.dp, top = 3.dp, bottom = 3.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -7907,7 +8079,7 @@ private fun SessionResultSummaryCard(
             .fillMaxWidth()
             .height(SessionMetricCompactHeight)
             .background(Color(0xFFF8FAFC), ShapeM)
-            .border(1.dp, Border.copy(alpha = 0.75f), ShapeM)
+            .border(0.5.dp, Color.White.copy(alpha = 0.85f), ShapeM)
             .padding(horizontal = 3.dp, vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -7943,7 +8115,7 @@ private fun SessionCompareResultSummaryCard(
             .fillMaxWidth()
             .height(SessionCompareMetricCompactHeight)
             .background(Color(0xFFF8FAFC), ShapeM)
-            .border(1.dp, Border.copy(alpha = 0.75f), ShapeM)
+            .border(0.5.dp, Color.White.copy(alpha = 0.85f), ShapeM)
             .padding(horizontal = 3.dp, vertical = 3.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -7998,9 +8170,9 @@ private fun FloatingSummaryValue(label: String, value: String, color: Color, mod
 private fun FloatingSummaryDivider() {
     Box(
         modifier = Modifier
-            .width(1.dp)
-            .height(22.dp)
-            .background(Border.copy(alpha = 0.9f))
+            .width(0.5.dp)
+            .height(18.dp)
+            .background(Color(0x12000000))
     )
 }
 
@@ -8037,11 +8209,13 @@ private fun CombinedSessionGrowthChart(series: List<SessionChartSeries>) {
     val stageRanges = remember(visiblePoints, minX, maxX) { buildSessionStageRanges(visiblePoints, minX, maxX) }
     val failSummary = remember(visiblePoints) { failureIntervalSummary(visiblePoints) }
     val latest = allPoints.lastOrNull()
+    var selectedSec by remember { mutableStateOf<Int?>(null) }
 
     LaunchedEffect(allPoints.firstOrNull()?.elapsedSec, allPoints.firstOrNull()?.protocol) {
         zoomSpanX = null
         viewEndX = fullMaxX
         horizontalPanRemainderX[0] = 0f
+        selectedSec = null
     }
     LaunchedEffect(fullMaxX, spanX) {
         if (zoomSpanX == null) viewEndX = fullMaxX
@@ -8056,12 +8230,29 @@ private fun CombinedSessionGrowthChart(series: List<SessionChartSeries>) {
                 Text("● ${item.label}", color = item.color, fontSize = 10.sp, fontWeight = FontWeight.Bold)
             }
             Spacer(Modifier.weight(1f))
-            Text(
-                latest?.let { "${it.elapsedSec}s 活动 ${it.active}｜失败 ${it.failure}" } ?: "",
-                color = Muted,
-                fontSize = 10.sp,
-                maxLines = 1
-            )
+            val selectedPoints = selectedSec?.let { sec ->
+                visibleSeries.mapNotNull { s -> s.points.minByOrNull { kotlin.math.abs(it.elapsedSec - sec) }?.takeIf { kotlin.math.abs(it.elapsedSec - sec) <= 2 } }
+            }
+            if (selectedPoints != null && selectedPoints.isNotEmpty()) {
+                val secStr = "${selectedSec}s"
+                val statsStr = selectedPoints.joinToString(" · ") { "${it.protocol.label} 活动${it.active} CPS${it.cps}" }
+                val failCount = selectedPoints.firstOrNull()?.failure ?: 0
+                val failStr = if (failCount > 0) " 失败$failCount" else ""
+                Text(
+                    "$secStr · $statsStr$failStr",
+                    color = Blue,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 10.sp,
+                    maxLines = 1
+                )
+            } else {
+                Text(
+                    latest?.let { "${it.elapsedSec}s 活动 ${it.active}｜失败 ${it.failure}" } ?: "",
+                    color = Muted,
+                    fontSize = 10.sp,
+                    maxLines = 1
+                )
+            }
         }
 
         Row(horizontalArrangement = Arrangement.spacedBy(9.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -8084,16 +8275,6 @@ private fun CombinedSessionGrowthChart(series: List<SessionChartSeries>) {
                     .padding(6.dp)
                     .onSizeChanged { chartWidthPx = it.width.toFloat().coerceAtLeast(1f) }
                     .chartGestureModifier(
-                        onHorizontalPan = { dragAmount ->
-                            val preciseDeltaX = dragAmount / chartWidthPx.coerceAtLeast(1f) * spanX + horizontalPanRemainderX[0]
-                            val deltaX = preciseDeltaX.toInt()
-                            horizontalPanRemainderX[0] = preciseDeltaX - deltaX
-                            if (deltaX != 0) {
-                                val nextEndX = (effectiveViewEndX - deltaX).coerceIn(minViewEndX, maxViewEndX)
-                                if (nextEndX == effectiveViewEndX) horizontalPanRemainderX[0] = 0f
-                                viewEndX = nextEndX
-                            }
-                        },
                         onPinchTransform = { centroidX, panX, zoom ->
                             horizontalPanRemainderX[0] = 0f
                             val width = chartWidthPx.coerceAtLeast(1f)
@@ -8103,6 +8284,14 @@ private fun CombinedSessionGrowthChart(series: List<SessionChartSeries>) {
                             zoomSpanX = newSpan
                             val newEnd = focalX + (newSpan * (1f - focalRatio)).toInt() - (panX / width * newSpan).toInt()
                             viewEndX = newEnd.coerceIn(fullMinX + newSpan, fullMaxX.coerceAtLeast(fullMinX + newSpan))
+                        },
+                        onScrub = { offset ->
+                            val ratio = (offset.x / chartWidthPx.coerceAtLeast(1f)).coerceIn(0f, 1f)
+                            selectedSec = (minX + ratio * (maxX - minX)).roundToInt()
+                        },
+                        onTap = { offset ->
+                            val ratio = (offset.x / chartWidthPx.coerceAtLeast(1f)).coerceIn(0f, 1f)
+                            selectedSec = (minX + ratio * (maxX - minX)).roundToInt()
                         },
                         onDoubleTap = {
                             zoomSpanX = null
@@ -8116,31 +8305,34 @@ private fun CombinedSessionGrowthChart(series: List<SessionChartSeries>) {
                 fun xOfSec(sec: Int): Float = w * ((sec - minX).toFloat() / (maxX - minX).toFloat()).coerceIn(0f, 1f)
                 fun ySession(value: Int): Float = h - h * (value.coerceIn(0, maxSessionY).toFloat() / maxSessionY.toFloat())
 
-                stageRanges.forEach { range ->
-                    val color = when (range.stage) {
-                        SessionChartStage.GROWTH -> Blue.copy(alpha = 0.055f)
-                        SessionChartStage.CONFIRM -> Orange.copy(alpha = 0.09f)
-                        SessionChartStage.RESULT -> Green.copy(alpha = 0.075f)
-                    }
-                    val left = xOfSec(range.startSec)
-                    val right = xOfSec(range.endSec).coerceAtLeast(left + 1f)
-                    drawRect(color = color, topLeft = Offset(left, 0f), size = androidx.compose.ui.geometry.Size(right - left, h))
-                }
-
-                repeat(4) { idx ->
-                    val y = h * (idx + 1) / 5f
-                    drawLine(Border.copy(alpha = 0.55f), Offset(0f, y), Offset(w, y), strokeWidth = 1f)
-                }
-
                 visibleSeries.forEach { item ->
                     val ordered = item.points
                     if (ordered.size > 1) {
                         val path = Path()
+                        val fillPath = Path()
                         ordered.forEachIndexed { index, point ->
                             val x = xOfSec(point.elapsedSec)
                             val y = ySession(point.active)
-                            if (index == 0) path.moveTo(x, y) else path.lineTo(x, y)
+                            if (index == 0) {
+                                path.moveTo(x, y)
+                                fillPath.moveTo(x, h)
+                                fillPath.lineTo(x, y)
+                            } else {
+                                path.lineTo(x, y)
+                                fillPath.lineTo(x, y)
+                            }
                         }
+                        fillPath.lineTo(xOfSec(ordered.last().elapsedSec), h)
+                        fillPath.close()
+
+                        drawPath(
+                            path = fillPath,
+                            brush = Brush.verticalGradient(
+                                colors = listOf(item.color.copy(alpha = 0.14f), Color.Transparent),
+                                startY = 0f,
+                                endY = h
+                            )
+                        )
                         drawPath(path, color = item.color, style = Stroke(width = 3.5f, cap = StrokeCap.Round))
                     }
                     ordered.forEach { point ->
@@ -8179,6 +8371,26 @@ private fun CombinedSessionGrowthChart(series: List<SessionChartSeries>) {
                         previousFailure = point.failure
                     }
                 }
+
+                selectedSec?.takeIf { it in minX..maxX }?.let { sec ->
+                    val x = xOfSec(sec)
+                    drawLine(
+                        color = Color(0xFF64748B).copy(alpha = 0.40f),
+                        start = Offset(x, 0f),
+                        end = Offset(x, h),
+                        strokeWidth = 1.2f,
+                        pathEffect = PathEffect.dashPathEffect(floatArrayOf(6f, 6f), 0f)
+                    )
+                    visibleSeries.forEach { item ->
+                        val pt = item.points.minByOrNull { kotlin.math.abs(it.elapsedSec - sec) }
+                        if (pt != null && kotlin.math.abs(pt.elapsedSec - sec) <= 2) {
+                            val y = ySession(pt.active)
+                            drawCircle(item.color.copy(alpha = 0.22f), radius = 8f, center = Offset(x, y))
+                            drawCircle(Color.White, radius = 5f, center = Offset(x, y))
+                            drawCircle(item.color, radius = 3.2f, center = Offset(x, y))
+                        }
+                    }
+                }
             }
         }
 
@@ -8189,7 +8401,7 @@ private fun CombinedSessionGrowthChart(series: List<SessionChartSeries>) {
             Text(failSummary, color = ErrorRed, fontSize = 10.sp, lineHeight = 13.sp, fontWeight = FontWeight.Bold)
         }
         Text(
-            "说明：折线为活动会话；阶段背景来自实际运行状态；红条表示相邻采样间新增失败。",
+            "说明：折线为活动会话；红条表示相邻采样间新增失败；滑动可查看对应秒数数值。",
             color = Muted,
             fontSize = 10.sp,
             lineHeight = 13.sp
@@ -8263,7 +8475,7 @@ private fun SessionStatsCard(
                     .height(72.dp)
                     .background(Color(0xFFF8FAFC), ShapeM),
                 contentAlignment = Alignment.Center
-            ) { Text("开始测试后显示本次曲线", color = Muted, fontSize = 12.sp) }
+            ) { Text("开始测试后显示本次折线", color = Muted, fontSize = 12.sp) }
         } else {
             if (chartMode == ChartMode.GROWTH) SessionGrowthChart(points) else SessionPeakChart(stats, points)
         }
@@ -8401,10 +8613,6 @@ private fun FailureMiniChart(points: List<ChartPoint>) {
         Canvas(modifier = Modifier.fillMaxWidth().height(48.dp).background(Color(0xFFF8FAFC), ShapeS).padding(6.dp)) {
             val w = size.width
             val h = size.height
-            repeat(2) { idx ->
-                val y = h * (idx + 1) / 3f
-                drawLine(Border.copy(alpha = 0.45f), Offset(0f, y), Offset(w, y), strokeWidth = 1f)
-            }
             fun xOf(p: ChartPoint) = w * ((p.elapsedSec - minX).toFloat() / (maxX - minX).toFloat())
             fun yFail(v: Int) = h - h * (v.coerceIn(0, maxFailure).toFloat() / maxFailure.toFloat())
             if (sorted.size > 1) {
@@ -8436,6 +8644,8 @@ private fun SessionGrowthChart(points: List<ChartPoint>) {
     val yLabels = remember(maxSessionY) { axisLabels(maxSessionY) }
     val xLabels = remember(minX, maxX, step) { timeLabels(minX, maxX, step) }
     val failSummary = remember(sorted) { failureIntervalSummary(sorted) }
+    var chartWidthPx by remember { mutableStateOf(1f) }
+    var selectedPoint by remember { mutableStateOf<ChartPoint?>(null) }
     Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("会话数", color = Muted, fontSize = 10.sp)
@@ -8446,32 +8656,83 @@ private fun SessionGrowthChart(points: List<ChartPoint>) {
                 Text("● 失败", color = ErrorRed, fontSize = 10.sp, fontWeight = FontWeight.Bold)
             }
             Spacer(Modifier.weight(1f))
-            Text(last?.let { "${it.elapsedSec}s 活动 ${it.active}｜失败 ${it.failure}" } ?: "", color = Muted, fontSize = 10.sp, maxLines = 1)
+            selectedPoint?.let {
+                Text("${it.elapsedSec}s 活动 ${it.active} · CPS ${it.cps} · 失败 ${it.failure}", color = Blue, fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+            } ?: Text(last?.let { "${it.elapsedSec}s 活动 ${it.active}｜失败 ${it.failure}" } ?: "", color = Muted, fontSize = 10.sp, maxLines = 1)
         }
         Row(modifier = Modifier.fillMaxWidth().height(158.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(modifier = Modifier.width(34.dp).height(145.dp), verticalArrangement = Arrangement.SpaceBetween) {
                 yLabels.forEach { Text(it.toString(), color = Muted, fontSize = 9.sp, maxLines = 1) }
             }
-            Canvas(modifier = Modifier.weight(1f).height(145.dp).background(Color(0xFFF8FAFC), ShapeS).padding(6.dp)) {
+            Canvas(
+                modifier = Modifier
+                    .weight(1f)
+                    .height(145.dp)
+                    .background(Color(0xFFF8FAFC), ShapeS)
+                    .padding(6.dp)
+                    .onSizeChanged { chartWidthPx = it.width.toFloat().coerceAtLeast(1f) }
+                    .chartGestureModifier(
+                        onScrub = { offset ->
+                            val ratio = (offset.x / chartWidthPx.coerceAtLeast(1f)).coerceIn(0f, 1f)
+                            val sec = minX + ratio * (maxX - minX)
+                            selectedPoint = sorted.minByOrNull { kotlin.math.abs(it.elapsedSec - sec) }
+                        },
+                        onTap = { offset ->
+                            val ratio = (offset.x / chartWidthPx.coerceAtLeast(1f)).coerceIn(0f, 1f)
+                            val sec = minX + ratio * (maxX - minX)
+                            selectedPoint = sorted.minByOrNull { kotlin.math.abs(it.elapsedSec - sec) }
+                        }
+                    )
+            ) {
                 val w = size.width
                 val h = size.height
-                repeat(4) { idx ->
-                    val y = h * (idx + 1) / 5f
-                    drawLine(Border.copy(alpha = 0.55f), Offset(0f, y), Offset(w, y), strokeWidth = 1f)
-                }
                 fun xOf(p: ChartPoint) = w * ((p.elapsedSec - minX).toFloat() / (maxX - minX).toFloat())
                 fun ySession(v: Int) = h - h * (v.coerceIn(0, maxSessionY).toFloat() / maxSessionY.toFloat())
                 if (sorted.size > 1) {
                     val path = Path()
+                    val fillPath = Path()
                     sorted.forEachIndexed { index, p ->
                         val x = xOf(p)
                         val y = ySession(p.active)
-                        if (index == 0) path.moveTo(x, y) else path.lineTo(x, y)
+                        if (index == 0) {
+                            path.moveTo(x, y)
+                            fillPath.moveTo(x, h)
+                            fillPath.lineTo(x, y)
+                        } else {
+                            path.lineTo(x, y)
+                            fillPath.lineTo(x, y)
+                        }
                     }
+                    fillPath.lineTo(xOf(sorted.last()), h)
+                    fillPath.close()
+
+                    drawPath(
+                        path = fillPath,
+                        brush = Brush.verticalGradient(
+                            colors = listOf(Blue.copy(alpha = 0.14f), Color.Transparent),
+                            startY = 0f,
+                            endY = h
+                        )
+                    )
                     drawPath(path, color = Blue, style = Stroke(width = 4f, cap = StrokeCap.Round))
                 }
                 sorted.forEach { p ->
                     drawCircle(Blue, radius = 2.6f, center = Offset(xOf(p), ySession(p.active)))
+                }
+
+                selectedPoint?.takeIf { it.elapsedSec in minX..maxX }?.let { p ->
+                    val x = xOf(p)
+                    val y = ySession(p.active)
+                    drawLine(
+                        color = Color(0xFF64748B).copy(alpha = 0.40f),
+                        start = Offset(x, 0f),
+                        end = Offset(x, h),
+                        strokeWidth = 1.2f,
+                        pathEffect = PathEffect.dashPathEffect(floatArrayOf(6f, 6f), 0f)
+                    )
+                    drawCircle(Blue.copy(alpha = 0.22f), radius = 8f, center = Offset(x, y))
+                    drawCircle(Color.White, radius = 5f, center = Offset(x, y))
+                    drawCircle(Blue, radius = 3.2f, center = Offset(x, y))
                 }
             }
         }
@@ -8481,7 +8742,7 @@ private fun SessionGrowthChart(points: List<ChartPoint>) {
         if (failSummary.isNotBlank()) {
             Text(failSummary, color = ErrorRed, fontSize = 10.sp, lineHeight = 13.sp, fontWeight = FontWeight.Bold)
         }
-        Text("说明：连接数测试已使用折线趋势；CPS在上方文字显示，失败仅显示区间文字。", color = Muted, fontSize = 10.sp, lineHeight = 13.sp)
+        Text("说明：连接数测试已使用折线趋势；滑动可查看对应秒数数值。", color = Muted, fontSize = 10.sp, lineHeight = 13.sp)
     }
 }
 
@@ -8493,7 +8754,7 @@ private fun SessionPeakChart(stats: ProtocolStats, points: List<ChartPoint>) {
         HistoryBarRow("活动峰值", peak, maxValue, Blue)
         HistoryBarRow("失败累计", stats.totalFailure, maxValue, ErrorRed)
         HistoryBarRow("总计尝试", stats.totalAttempts, maxValue, Navy)
-        Text("用于截图分享最高值；增长过程请切换到增长曲线。", color = Muted, fontSize = 10.sp)
+        Text("用于截图分享最高值；增长过程请切换到折线趋势。", color = Muted, fontSize = 10.sp)
     }
 }
 
@@ -8543,31 +8804,99 @@ private fun NatDiagnosticDialog(
                 }
             }
         },
-        title = { Text("NAT 类型检测", fontWeight = FontWeight.ExtraBold, color = TextDark) },
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("NAT 类型检测", fontWeight = FontWeight.ExtraBold, color = TextDark, modifier = Modifier.weight(1f))
+                Text("IPv4 · UDP", color = Muted, fontSize = 12.sp)
+            }
+        },
         text = {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(max = 560.dp)
+                    .heightIn(max = 580.dp)
                     .verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Text("手动检测 · IPv4 · UDP", color = Muted, fontSize = 12.sp)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                     NatModeChip("RFC5780", mode == ManualNatMode.RFC5780, Modifier.weight(1f)) { onModeChange(ManualNatMode.RFC5780) }
                     NatModeChip("RFC3489", mode == ManualNatMode.RFC3489, Modifier.weight(1f)) { onModeChange(ManualNatMode.RFC3489) }
                 }
+
+                if (result != null) {
+                    val r = result
+                    Column(
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(if (r.success) BlueSoft else RedSoft, ShapeM)
+                            .border(1.dp, (if (r.success) Blue else ErrorRed).copy(alpha = 0.25f), ShapeM)
+                            .padding(10.dp)
+                    ) {
+                        Text("测试结果", color = Muted, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        Text(
+                            r.natType,
+                            color = if (r.success) Blue else ErrorRed,
+                            fontSize = 17.sp,
+                            fontWeight = FontWeight.ExtraBold
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                            MiniResultTile("映射行为", standardMappingText(r.mappingBehavior), Modifier.weight(1f))
+                            MiniResultTile("过滤行为", standardFilteringText(r.filteringBehavior), Modifier.weight(1f))
+                        }
+                        if (mode == ManualNatMode.RFC5780 && r.success) {
+                            Text(
+                                "传统 NAT 类型为兼容换算；准确判断请以映射行为和过滤行为为准。",
+                                color = Muted,
+                                fontSize = 10.sp,
+                                lineHeight = 13.sp
+                            )
+                        }
+                        MiniResultLine("本地地址", r.localAddress)
+                        MiniResultLine("公网地址", r.publicAddress)
+                        MiniResultLine("测试方法", r.method)
+                        MiniResultLine("服务器", r.server)
+                        if (r.message.isNotBlank()) Text(r.message, color = Muted, fontSize = 10.sp, lineHeight = 14.sp)
+                    }
+                } else if (running || progressText.isNotBlank()) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(Color(0xFFF8FAFC), ShapeM)
+                            .border(1.dp, Blue.copy(alpha = 0.2f), ShapeM)
+                            .padding(10.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text("检测进度", color = Blue, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        Text(progressText.ifBlank { "正在发起探测..." }, color = TextDark, fontSize = 12.sp, lineHeight = 16.sp)
+                    }
+                }
+
                 Text(
                     if (mode == ManualNatMode.RFC5780) "RFC5780 会检测映射行为和过滤行为；若服务器不支持严格流程，会自动降级为 RFC8489 基础结果。" else "RFC3489 是经典兼容检测，结果可与老工具对比。",
                     color = Muted,
-                    fontSize = 12.sp,
-                    lineHeight = 16.sp,
-                    modifier = Modifier.background(Color(0xFFF8FAFC), ShapeM).padding(10.dp)
+                    fontSize = 11.sp,
+                    lineHeight = 15.sp,
+                    modifier = Modifier.background(Color(0xFFF8FAFC), ShapeM).padding(horizontal = 8.dp, vertical = 6.dp)
                 )
+
+                Spacer(Modifier.height(2.dp))
+
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("STUN服务器", color = TextDark, fontSize = 13.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-                    Text("未填写端口时默认 3478", color = Muted, fontSize = 10.sp)
+                    Text("STUN服务器", color = TextDark, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                    Text("未填端口默认 3478", color = Muted, fontSize = 10.sp)
+                    if (servers != listOf(defaultNatServer(mode))) {
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            "恢复默认",
+                            color = Blue,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.clickable { onServersChange(listOf(defaultNatServer(mode))) }
+                        )
+                    }
                 }
+
                 servers.forEachIndexed { index, item ->
                     SwipeDeleteToolBox(
                         onDelete = {
@@ -8590,6 +8919,26 @@ private fun NatDiagnosticDialog(
                             },
                             label = { Text("服务器 ${index + 1}/${servers.size}", fontSize = 11.sp) },
                             placeholder = { Text(defaultNatServer(mode), fontSize = 12.sp) },
+                            trailingIcon = {
+                                IconButton(
+                                    onClick = {
+                                        val next = if (servers.size > 1) {
+                                            servers.filterIndexed { i, _ -> i != index }
+                                        } else {
+                                            listOf("")
+                                        }
+                                        onServersChange(next)
+                                    },
+                                    modifier = Modifier.size(32.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Filled.DeleteOutline,
+                                        contentDescription = "删除服务器",
+                                        tint = if (item.isNotBlank() || servers.size > 1) TextDark.copy(alpha = 0.65f) else Color.Transparent,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                            },
                             singleLine = true,
                             shape = ShapeM,
                             modifier = Modifier
@@ -8604,57 +8953,22 @@ private fun NatDiagnosticDialog(
                         )
                     }
                 }
-                OutlinedButton(
-                    onClick = {
-                        val clean = servers.map { it.trim() }
-                        val next = if (clean.size >= 6) clean else clean + ""
-                        onServersChange(next)
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = ShapeM
-                ) { Text("+ 添加服务器", fontSize = 13.sp) }
-                if (running || progressText.isNotBlank()) {
-                    Column(
-                        modifier = Modifier.fillMaxWidth().background(Color(0xFFF8FAFC), ShapeM).padding(10.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        Text("检测进度", color = Muted, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                        Text(progressText.ifBlank { "等待开始" }, color = TextDark, fontSize = 12.sp, lineHeight = 16.sp)
-                    }
-                }
-                result?.let { r ->
-                    Column(
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                        modifier = Modifier.fillMaxWidth().background(if (r.success) BlueSoft else RedSoft, ShapeM).padding(12.dp)
-                    ) {
-                        Text("测试结果", color = Muted, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                        Text(
-                            r.natType,
-                            color = if (r.success) Blue else ErrorRed,
-                            fontSize = 18.sp,
-                            fontWeight = FontWeight.ExtraBold
-                        )
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                            MiniResultTile("映射行为", standardMappingText(r.mappingBehavior), Modifier.weight(1f))
-                            MiniResultTile("过滤行为", standardFilteringText(r.filteringBehavior), Modifier.weight(1f))
-                        }
-                        if (mode == ManualNatMode.RFC5780 && r.success) {
-                            Text(
-                                "传统 NAT 类型为兼容换算；准确判断请同时参考上方 RFC5780 映射行为和过滤行为。",
-                                color = Muted,
-                                fontSize = 10.sp,
-                                lineHeight = 14.sp
-                            )
-                        }
-                        MiniResultLine("本地地址", r.localAddress)
-                        MiniResultLine("公网地址", r.publicAddress)
-                        MiniResultLine("测试方法", r.method)
-                        MiniResultLine("服务器", r.server)
-                        if (r.message.isNotBlank()) Text(r.message, color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
-                    }
+
+                if (servers.size < 6) {
+                    OutlinedButton(
+                        onClick = {
+                            val clean = servers.map { it.trim() }
+                            val next = clean + ""
+                            onServersChange(next)
+                        },
+                        modifier = Modifier.fillMaxWidth().height(36.dp),
+                        shape = ShapeM,
+                        contentPadding = PaddingValues(0.dp)
+                    ) { Text("+ 添加服务器", fontSize = 12.sp) }
                 }
             }
-        }
+        },
+        shape = GlassPopupShape
     )
 }
 
@@ -9050,6 +9364,460 @@ private class NetToolHistoryStore(context: Context) {
             }
         }.toString()).apply()
     }
+
+    fun loadBufferbloat(): List<BufferbloatHistoryRecord> {
+        val cutoff = System.currentTimeMillis() - 7L * 24 * 3600 * 1000L
+        val arr = JSONArray(prefs.getString("bufferbloat_history", "[]") ?: "[]")
+        val list = buildList {
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                val ts = o.optLong("timestamp", 0L)
+                if (ts >= cutoff) {
+                    add(
+                        BufferbloatHistoryRecord(
+                            id = o.optLong("id", ts),
+                            timestamp = ts,
+                            timeText = o.optString("timeText"),
+                            targetHost = o.optString("targetHost"),
+                            unloadedRtt = o.optInt("unloadedRtt"),
+                            loadedRtt = o.optInt("loadedRtt"),
+                            deltaRtt = o.optInt("deltaRtt"),
+                            grade = o.optString("grade"),
+                            advice = o.optString("advice")
+                        )
+                    )
+                }
+            }
+        }
+        return list
+    }
+
+    fun addBufferbloat(record: BufferbloatHistoryRecord) {
+        val cutoff = System.currentTimeMillis() - 7L * 24 * 3600 * 1000L
+        val next = (listOf(record) + loadBufferbloat().filterNot { it.id == record.id }).filter { it.timestamp >= cutoff }
+        prefs.edit().putString("bufferbloat_history", JSONArray().apply {
+            next.forEach { r ->
+                put(JSONObject()
+                    .put("id", r.id)
+                    .put("timestamp", r.timestamp)
+                    .put("timeText", r.timeText)
+                    .put("targetHost", r.targetHost)
+                    .put("unloadedRtt", r.unloadedRtt)
+                    .put("loadedRtt", r.loadedRtt)
+                    .put("deltaRtt", r.deltaRtt)
+                    .put("grade", r.grade)
+                    .put("advice", r.advice))
+            }
+        }.toString()).apply()
+    }
+
+    fun deleteBufferbloat(id: Long) {
+        val next = loadBufferbloat().filterNot { it.id == id }
+        prefs.edit().putString("bufferbloat_history", JSONArray().apply {
+            next.forEach { r ->
+                put(JSONObject()
+                    .put("id", r.id)
+                    .put("timestamp", r.timestamp)
+                    .put("timeText", r.timeText)
+                    .put("targetHost", r.targetHost)
+                    .put("unloadedRtt", r.unloadedRtt)
+                    .put("loadedRtt", r.loadedRtt)
+                    .put("deltaRtt", r.deltaRtt)
+                    .put("grade", r.grade)
+                    .put("advice", r.advice))
+            }
+        }.toString()).apply()
+    }
+
+    fun bufferbloatSizeKb(): Double {
+        val raw = prefs.getString("bufferbloat_history", "[]") ?: "[]"
+        return raw.toByteArray(Charsets.UTF_8).size / 1024.0
+    }
+
+    fun loadIperf(): List<IperfHistoryRecord> {
+        val cutoff = System.currentTimeMillis() - 7L * 24 * 3600 * 1000L
+        val arr = JSONArray(prefs.getString("iperf_history", "[]") ?: "[]")
+        val list = buildList {
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                val ts = o.optLong("timestamp", 0L)
+                if (ts >= cutoff) {
+                    add(
+                        IperfHistoryRecord(
+                            id = o.optLong("id", ts),
+                            timestamp = ts,
+                            timeText = o.optString("timeText"),
+                            server = o.optString("server"),
+                            port = o.optInt("port", 5201),
+                            isReverse = o.optBoolean("isReverse", true),
+                            durationSec = o.optInt("durationSec", 10),
+                            avgMbps = o.optDouble("avgMbps", 0.0),
+                            peakMbps = o.optDouble("peakMbps", 0.0),
+                            totalBytes = o.optLong("totalBytes", 0L),
+                            gradeTitle = o.optString("gradeTitle")
+                        )
+                    )
+                }
+            }
+        }
+        return list
+    }
+
+    fun addIperf(record: IperfHistoryRecord) {
+        val cutoff = System.currentTimeMillis() - 7L * 24 * 3600 * 1000L
+        val next = (listOf(record) + loadIperf().filterNot { it.id == record.id }).filter { it.timestamp >= cutoff }
+        prefs.edit().putString("iperf_history", JSONArray().apply {
+            next.forEach { r ->
+                put(JSONObject()
+                    .put("id", r.id)
+                    .put("timestamp", r.timestamp)
+                    .put("timeText", r.timeText)
+                    .put("server", r.server)
+                    .put("port", r.port)
+                    .put("isReverse", r.isReverse)
+                    .put("durationSec", r.durationSec)
+                    .put("avgMbps", r.avgMbps)
+                    .put("peakMbps", r.peakMbps)
+                    .put("totalBytes", r.totalBytes)
+                    .put("gradeTitle", r.gradeTitle))
+            }
+        }.toString()).apply()
+    }
+
+    fun deleteIperf(id: Long) {
+        val next = loadIperf().filterNot { it.id == id }
+        prefs.edit().putString("iperf_history", JSONArray().apply {
+            next.forEach { r ->
+                put(JSONObject()
+                    .put("id", r.id)
+                    .put("timestamp", r.timestamp)
+                    .put("timeText", r.timeText)
+                    .put("server", r.server)
+                    .put("port", r.port)
+                    .put("isReverse", r.isReverse)
+                    .put("durationSec", r.durationSec)
+                    .put("avgMbps", r.avgMbps)
+                    .put("peakMbps", r.peakMbps)
+                    .put("totalBytes", r.totalBytes)
+                    .put("gradeTitle", r.gradeTitle))
+            }
+        }.toString()).apply()
+    }
+
+    fun iperfSizeKb(): Double {
+        val raw = prefs.getString("iperf_history", "[]") ?: "[]"
+        return raw.toByteArray(Charsets.UTF_8).size / 1024.0
+    }
+
+    fun loadCustomTargets(moduleKey: String): List<String> {
+        val arr = runCatching { JSONArray(prefs.getString("custom_targets_$moduleKey", "[]") ?: "[]") }.getOrDefault(JSONArray())
+        return buildList {
+            for (i in 0 until arr.length()) {
+                val s = arr.optString(i)
+                if (s.isNotBlank()) add(s)
+            }
+        }.take(5)
+    }
+
+    fun addCustomTarget(moduleKey: String, target: String): Boolean {
+        val trimmed = target.trim()
+        if (trimmed.isBlank()) return false
+        val current = loadCustomTargets(moduleKey).filterNot { it.equals(trimmed, ignoreCase = true) }
+        if (current.size >= 5) return false
+        val next = (listOf(trimmed) + current).take(5)
+        prefs.edit().putString("custom_targets_$moduleKey", JSONArray().apply {
+            next.forEach { put(it) }
+        }.toString()).apply()
+        return true
+    }
+
+    fun deleteCustomTarget(moduleKey: String, target: String) {
+        val next = loadCustomTargets(moduleKey).filterNot { it.equals(target.trim(), ignoreCase = true) }
+        prefs.edit().putString("custom_targets_$moduleKey", JSONArray().apply {
+            next.forEach { put(it) }
+        }.toString()).apply()
+    }
+}
+
+private data class BufferbloatHistoryRecord(
+    val id: Long,
+    val timestamp: Long,
+    val timeText: String,
+    val targetHost: String,
+    val unloadedRtt: Int,
+    val loadedRtt: Int,
+    val deltaRtt: Int,
+    val grade: String,
+    val advice: String
+)
+
+private data class IperfHistoryRecord(
+    val id: Long,
+    val timestamp: Long,
+    val timeText: String,
+    val server: String,
+    val port: Int,
+    val isReverse: Boolean,
+    val durationSec: Int,
+    val avgMbps: Double,
+    val peakMbps: Double,
+    val totalBytes: Long,
+    val gradeTitle: String
+)
+
+private fun formatHistoryDayKey(timestamp: Long): String {
+    return SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date(timestamp))
+}
+
+private fun formatHistoryDayLabel(dayKey: String): String {
+    val today = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
+    val yesterday = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date(System.currentTimeMillis() - 86400000L))
+    return when (dayKey) {
+        today -> "今天 ($dayKey)"
+        yesterday -> "昨天 ($dayKey)"
+        else -> dayKey
+    }
+}
+
+@Composable
+private fun <T> ToolHistorySection(
+    title: String,
+    records: List<T>,
+    sizeKb: Double,
+    timestampOf: (T) -> Long,
+    idOf: (T) -> Long,
+    onDelete: (Long) -> Unit,
+    itemContent: @Composable (T) -> Unit
+) {
+    var expandedDays by remember { mutableStateOf(setOf<String>()) }
+    val grouped = remember(records) {
+        records.groupBy { formatHistoryDayKey(timestampOf(it)) }
+    }
+
+    SoftCard {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            SectionTitle("log", title, Purple)
+            Spacer(Modifier.weight(1f))
+            Text(
+                "已保存 ${records.size} 条 · 占用 ${String.format(Locale.US, "%.1f", sizeKb)} KB",
+                color = Muted,
+                fontSize = 11.sp
+            )
+        }
+        Text("最多保留近 7 天测试记录，每日自动折叠，单条左滑可删除。", color = Muted, fontSize = 11.sp)
+
+        if (records.isEmpty()) {
+            Text("暂无测试历史记录。", color = Muted, fontSize = 12.sp, modifier = Modifier.padding(vertical = 6.dp))
+        } else {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                grouped.forEach { (dayKey, dayRecords) ->
+                    val isExpanded = dayKey in expandedDays
+                    Surface(
+                        modifier = Modifier.fillMaxWidth().clickable {
+                            expandedDays = if (isExpanded) expandedDays - dayKey else expandedDays + dayKey
+                        },
+                        color = Color(0xFFF8FAFC),
+                        shape = ShapeM,
+                        border = BorderStroke(0.5.dp, Color.White.copy(alpha = 0.85f))
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(formatHistoryDayLabel(dayKey), fontSize = 12.sp, fontWeight = FontWeight.Bold, color = TextDark)
+                            Spacer(Modifier.width(6.dp))
+                            StatusChip("${dayRecords.size}条", Color(0xFFF1F5F9), Muted, compact = true)
+                            Spacer(Modifier.weight(1f))
+                            Text(if (isExpanded) "收起 ⌃" else "展开 ⌄", fontSize = 11.sp, color = Blue, fontWeight = FontWeight.Bold)
+                        }
+                    }
+
+                    if (isExpanded) {
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(start = 4.dp)) {
+                            dayRecords.forEach { record ->
+                                val recId = idOf(record)
+                                SwipeDeleteToolBox(onDelete = { onDelete(recId) }, stateKey = recId) {
+                                    itemContent(record)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private data class ToolTargetPreset(val value: String, val note: String)
+
+@Composable
+private fun ToolTargetSelectorModal(
+    title: String = "选择目标",
+    presets: List<ToolTargetPreset>,
+    customTargets: List<String>,
+    onPick: (String) -> Unit,
+    onAddCustom: (String) -> Boolean,
+    onDeleteCustom: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var isAdding by remember { mutableStateOf(false) }
+    var newTargetInput by remember { mutableStateOf("") }
+    var addError by remember { mutableStateOf<String?>(null) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("关闭", fontSize = 13.sp)
+            }
+        },
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(title, fontWeight = FontWeight.Bold, color = TextDark, modifier = Modifier.weight(1f))
+                IconButton(onClick = onDismiss, modifier = Modifier.width(32.dp).height(32.dp)) {
+                    Icon(Icons.Filled.Close, contentDescription = "关闭", tint = Muted, modifier = Modifier.width(18.dp).height(18.dp))
+                }
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 500.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text("推荐目标 (点击快速使用)", color = Muted, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                presets.forEach { preset ->
+                    Surface(
+                        shape = ShapeM,
+                        color = Color(0xFFF8FAFC),
+                        border = BorderStroke(1.dp, Blue.copy(alpha = 0.18f)),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                onPick(preset.value)
+                                onDismiss()
+                            }
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(preset.value, color = TextDark, fontSize = 13.sp, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
+                            if (preset.note.isNotBlank()) {
+                                Text(preset.note, color = Blue, fontSize = 11.sp)
+                            }
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(4.dp))
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("自定义目标 (${customTargets.size}/5)", color = Muted, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                    if (!isAdding && customTargets.size < 5) {
+                        TextButton(
+                            onClick = {
+                                isAdding = true
+                                newTargetInput = ""
+                                addError = null
+                            },
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                        ) {
+                            Text("+ 添加", color = Blue, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+
+                if (isAdding) {
+                    Surface(
+                        shape = ShapeM,
+                        color = BlueSoft.copy(alpha = 0.5f),
+                        border = BorderStroke(1.dp, Blue.copy(alpha = 0.35f)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            OutlinedTextField(
+                                value = newTargetInput,
+                                onValueChange = {
+                                    newTargetInput = it
+                                    addError = null
+                                },
+                                placeholder = { Text("输入域名或IP地址", fontSize = 12.sp) },
+                                singleLine = true,
+                                shape = ShapeM,
+                                modifier = Modifier.fillMaxWidth().height(48.dp)
+                            )
+                            addError?.let { Text(it, color = ErrorRed, fontSize = 11.sp) }
+                            Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
+                                TextButton(onClick = { isAdding = false }) { Text("取消", fontSize = 12.sp) }
+                                Spacer(Modifier.width(4.dp))
+                                Button(
+                                    onClick = {
+                                        val clean = newTargetInput.trim()
+                                        if (clean.isBlank()) {
+                                            addError = "请输入有效的域名或IP"
+                                        } else {
+                                            val ok = onAddCustom(clean)
+                                            if (ok) {
+                                                isAdding = false
+                                            } else {
+                                                addError = "已达5个上限或目标已存在"
+                                            }
+                                        }
+                                    },
+                                    shape = ShapeM,
+                                    modifier = Modifier.height(34.dp),
+                                    contentPadding = PaddingValues(horizontal = 12.dp)
+                                ) {
+                                    Text("保存", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (customTargets.isEmpty()) {
+                    Text("暂无自定义目标，可点击上方「+ 添加」保存常用地址", color = Muted, fontSize = 11.sp, modifier = Modifier.padding(vertical = 4.dp))
+                } else {
+                    customTargets.forEach { item ->
+                        SwipeDeleteToolBox(
+                            onDelete = { onDeleteCustom(item) },
+                            stateKey = item,
+                            shape = ShapeM
+                        ) {
+                            Surface(
+                                shape = ShapeM,
+                                color = Color(0xFFF8FAFC),
+                                border = BorderStroke(1.dp, Blue.copy(alpha = 0.15f)),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        onPick(item)
+                                        onDismiss()
+                                    }
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(item, color = TextDark, fontSize = 13.sp, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
+                                    IconButton(
+                                        onClick = { onDeleteCustom(item) },
+                                        modifier = Modifier.width(28.dp).height(28.dp)
+                                    ) {
+                                        Icon(Icons.Filled.DeleteOutline, contentDescription = "删除", tint = Muted, modifier = Modifier.width(16.dp).height(16.dp))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        shape = GlassPopupShape
+    )
 }
 
 private fun JSONArray.toStringList(): List<String> = buildList {
@@ -9437,118 +10205,6 @@ private fun TracketToolRecord.copyText(): String {
             appendLine(hops.joinToString("\n").ifBlank { "无跳点结果" })
         }
     }.trim()
-}
-
-@Composable
-private fun NetworkToolShortcutRow(
-    onOpenNsLookup: () -> Unit,
-    onOpenTracket: () -> Unit,
-    onOpenMtu: () -> Unit,
-    onOpenRoaming: () -> Unit,
-    onOpenBufferbloat: () -> Unit,
-    onOpenCellularInfo: () -> Unit
-) {
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            NetworkToolShortcutCard(
-                title = "NSLookup",
-                subtitle = "DNS解析",
-                mark = "nslookup",
-                color = Blue,
-                bg = BlueSoft,
-                modifier = Modifier.weight(1f),
-                onClick = onOpenNsLookup
-            )
-            NetworkToolShortcutCard(
-                title = "Tracket",
-                subtitle = "路由追踪",
-                mark = "tracket",
-                color = Purple,
-                bg = Color(0xFFF3E8FF),
-                modifier = Modifier.weight(1f),
-                onClick = onOpenTracket
-            )
-        }
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            NetworkToolShortcutCard(
-                title = "MTU检测",
-                subtitle = "路径MTU",
-                mark = "mtu",
-                color = Orange,
-                bg = Color(0xFFFFF3E0),
-                modifier = Modifier.weight(1f),
-                onClick = onOpenMtu
-            )
-            NetworkToolShortcutCard(
-                title = "漫游测试",
-                subtitle = "WiFi漫游",
-                mark = "roaming",
-                color = Green,
-                bg = GreenSoft,
-                modifier = Modifier.weight(1f),
-                onClick = onOpenRoaming
-            )
-        }
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            NetworkToolShortcutCard(
-                title = "缓冲评级",
-                subtitle = "Bufferbloat",
-                mark = "bufferbloat",
-                color = Orange,
-                bg = Color(0xFFFFF3E0),
-                modifier = Modifier.weight(1f),
-                onClick = onOpenBufferbloat
-            )
-            NetworkToolShortcutCard(
-                title = "基站看板",
-                subtitle = "5G/4G射频",
-                mark = "cellular",
-                color = Blue,
-                bg = BlueSoft,
-                modifier = Modifier.weight(1f),
-                onClick = onOpenCellularInfo
-            )
-        }
-    }
-}
-
-@Composable
-private fun NetworkToolShortcutCard(
-    title: String,
-    subtitle: String,
-    mark: String,
-    color: Color,
-    bg: Color,
-    modifier: Modifier = Modifier,
-    onClick: () -> Unit
-) {
-    Surface(
-        modifier = modifier
-            .heightIn(min = 58.dp)
-            .clip(ShapeM)
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-                onClick = onClick
-            ),
-        shape = ShapeM,
-        color = Color(0xFFF8FAFC),
-        border = BorderStroke(1.dp, Border.copy(alpha = 0.46f)),
-        tonalElevation = 0.dp,
-        shadowElevation = 0.dp
-    ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.padding(9.dp)
-        ) {
-            MarkBox(mark, bg, color)
-            Spacer(Modifier.width(8.dp))
-            Column(Modifier.weight(1f)) {
-                Text(title, color = Muted, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(subtitle, color = TextDark, fontWeight = FontWeight.Bold, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            }
-        }
-    }
 }
 
 @Composable
@@ -10807,14 +11463,17 @@ private suspend fun probeMtuPath(
         }
     }
 
+    val isCappedMaxPass = best >= cappedMax || (best == 1500)
+    val confirmAttempts = if (isCappedMaxPass) 2 else 3
+    val confirmNeeded = if (isCappedMaxPass) 2 else 2
     val confirm = runMtuCandidate(
         address = address,
         ipv6 = ipv6,
         mtu = best,
         timeoutMs = timeoutMs,
         mode = effectiveMode,
-        attempts = 5,
-        requiredSuccess = 4,
+        attempts = confirmAttempts,
+        requiredSuccess = confirmNeeded,
         pauseRequested = pauseRequested
     )
     val confirmStep = MtuStep(best, confirm.first, "[$protocol 最终确认] ${confirm.second}")
@@ -10828,8 +11487,8 @@ private suspend fun probeMtuPath(
 
     val nextMtu = best + 1
     var nextFailed = true
-    if (nextMtu <= cappedMax) {
-        nextFailed = !testCandidate(nextMtu, "边界外", quick = false)
+    if (nextMtu <= cappedMax && !isCappedMaxPass) {
+        nextFailed = !testCandidate(nextMtu, "边界外", quick = true)
     }
 
     val sorted = observations.toSortedMap()
@@ -10860,11 +11519,11 @@ private suspend fun probeMtuPath(
 private fun analyzeMtu(mtu: Int?, ipv6: Boolean): String {
     if (mtu == null) return "没有测出有效路径 MTU，可能是目标不响应或网络限制了大包探测。"
     return when {
-        ipv6 && mtu < 1280 -> "结果低于 IPv6 的最低要求，建议更换目标后复测。"
-        mtu >= 1498 -> "接近常见的 1500 字节，当前路径表现正常。"
-        mtu in 1488..1497 -> "接近宽带拨号常见的 1492 字节。"
-        mtu in 1390..1487 -> "路径 MTU 低于常见值，可能经过 VPN、隧道或额外封装。"
-        else -> "路径 MTU 偏低，建议更换网络或目标复测。"
+        ipv6 && mtu < 1280 -> "结果低于 IPv6 最低规范(1280字节)，建议更换目标后复测。"
+        mtu >= 1498 -> "标准以太网满载(1500字节)。路径无封装切片瓶颈，适合高速下载与电竞联机。"
+        mtu in 1488..1497 -> "典型 PPPoE 宽带拨号($mtu 字节)。建议将路由器 WAN 口设为 1492，PS5 / Switch / PC 主机同步设为 1492，可消除二次分片造成的联机卡顿。"
+        mtu in 1410..1487 -> "路径 MTU 略受限($mtu 字节)。常见于 WireGuard/VPN 隧道、IPSec 或蜂窝移动核心网特定封装。"
+        else -> "路径 MTU 偏低($mtu 字节)。存在多层隧道封装或网络策略限包，长报文可能经历分片重组，建议排查路由器与虚拟网卡配置。"
     }
 }
 
@@ -12040,7 +12699,7 @@ private fun RoamingToolPage(onBack: () -> Unit) {
     }
 
     LazyColumn(modifier = Modifier.fillMaxSize().padding(horizontal = 14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        item { ToolPageHeader("漫游测试", "记录 RSSI、延迟、丢包、协商速率和 BSSID切换观测时间", onBack) }
+        item { ToolPageHeader("WiFi 漫游", "记录 RSSI、延迟、丢包、协商速率和 BSSID切换观测时间", onBack) }
         item {
             SoftCard {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
@@ -12451,7 +13110,7 @@ private fun RoamingPingChartCard(samples: List<RoamingPingSample>, durationMs: L
             Text("Ping表", color = TextDark, fontWeight = FontWeight.Bold, fontSize = 13.sp, modifier = Modifier.weight(1f))
             Text("折线=Ping · 红条=丢包", color = Muted, fontSize = 11.sp)
         }
-        RoamingPingCanvas(plot = plot, viewStartMs = viewStartMs, viewEndMs = viewEndMs, onSelect = { selected = it })
+        RoamingPingCanvas(plot = plot, viewStartMs = viewStartMs, viewEndMs = viewEndMs, selected = selected, onSelect = { selected = it })
         selected?.let { RoamingPingSampleDetailLine(it) }
     }
 }
@@ -12502,7 +13161,7 @@ private fun RoamingSignalChartCard(samples: List<RoamingWifiSample>, events: Lis
             Text("信号表", color = TextDark, fontWeight = FontWeight.Bold, fontSize = 13.sp, modifier = Modifier.weight(1f))
             Text("实线=同AP · 虚线=AP切换", color = Muted, fontSize = 11.sp)
         }
-        RoamingSignalCanvas(plot = plot, viewStartMs = viewStartMs, viewEndMs = viewEndMs, onSelect = { selected = it })
+        RoamingSignalCanvas(plot = plot, viewStartMs = viewStartMs, viewEndMs = viewEndMs, selected = selected, onSelect = { selected = it })
         selectedSwitch?.let { RoamingSwitchPopup(it) }
         selected?.let { RoamingWifiSampleDetailLine(it) }
     }
@@ -12513,6 +13172,7 @@ private fun RoamingPingCanvas(
     plot: List<RoamingPingSample>,
     viewStartMs: Long,
     viewEndMs: Long,
+    selected: RoamingPingSample? = null,
     onSelect: (RoamingPingSample) -> Unit
 ) {
     Canvas(
@@ -12522,13 +13182,38 @@ private fun RoamingPingCanvas(
             .clip(ShapeM)
             .background(Color.White, ShapeM)
             .pointerInput(plot, viewStartMs, viewEndMs) {
-                detectTapGestures { pos ->
-                    if (plot.isEmpty()) return@detectTapGestures
-                    val left = 64f
-                    val right = size.width - 24f
-                    val ratio = ((pos.x - left) / (right - left).coerceAtLeast(1f)).coerceIn(0f, 1f)
-                    val selectedMs = viewStartMs + ((viewEndMs - viewStartMs) * ratio).toLong()
-                    plot.minByOrNull { abs(it.startedElapsedMs - selectedMs) }?.let(onSelect)
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    fun selectAt(pos: Offset) {
+                        if (plot.isEmpty()) return
+                        val left = 64f
+                        val right = size.width - 24f
+                        val ratio = ((pos.x - left) / (right - left).coerceAtLeast(1f)).coerceIn(0f, 1f)
+                        val selectedMs = viewStartMs + ((viewEndMs - viewStartMs) * ratio).toLong()
+                        plot.minByOrNull { abs(it.startedElapsedMs - selectedMs) }?.let(onSelect)
+                    }
+                    selectAt(down.position)
+                    var lastPos = down.position
+                    var totalDx = 0f
+                    var totalDy = 0f
+                    var isHorizontal = false
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        val pressed = event.changes.filter { it.pressed }
+                        if (pressed.isEmpty()) break
+                        val change = pressed.first()
+                        val delta = change.position - lastPos
+                        lastPos = change.position
+                        totalDx += delta.x
+                        totalDy += delta.y
+                        if (!isHorizontal && (abs(totalDx) > viewConfiguration.touchSlop * 0.4f || abs(totalDy) > viewConfiguration.touchSlop * 0.4f)) {
+                            isHorizontal = abs(totalDx) > abs(totalDy) * 1.1f
+                        }
+                        if (isHorizontal) {
+                            change.consume()
+                            selectAt(change.position)
+                        }
+                    }
                 }
             }
     ) {
@@ -12544,7 +13229,6 @@ private fun RoamingPingCanvas(
         val yTicks = listOf(0, axisMax / 4, axisMax / 2, axisMax * 3 / 4, axisMax).distinct()
         yTicks.forEach { tick ->
             val yy = bottom - (tick / axisMax.toFloat()) * h
-            drawLine(Border.copy(alpha = 0.72f), Offset(left, yy), Offset(right, yy), strokeWidth = 1f)
             textPaint.textAlign = Paint.Align.RIGHT
             drawContext.canvas.nativeCanvas.drawText(tick.toString(), left - 10f, yy + 9f, textPaint)
             textPaint.textAlign = Paint.Align.LEFT
@@ -12554,7 +13238,6 @@ private fun RoamingPingCanvas(
         (0..4).forEach { idx ->
             val tickMs = viewStartMs + spanMs * idx / 4L
             val xx = x(tickMs)
-            drawLine(Border.copy(alpha = 0.45f), Offset(xx, top), Offset(xx, bottom), strokeWidth = 1f)
             val label = roamingTimeLabel((tickMs / 1000L).toInt())
             val labelWidth = textPaint.measureText(label)
             val tx = (xx - labelWidth / 2f).coerceIn(left, right - labelWidth)
@@ -12580,6 +13263,23 @@ private fun RoamingPingCanvas(
             val xx = x(sample.startedElapsedMs)
             drawLine(ErrorRed, Offset(xx, bottom - 13f), Offset(xx, bottom), strokeWidth = 4f, cap = StrokeCap.Round)
         }
+        selected?.let { s ->
+            val xx = x(s.startedElapsedMs)
+            drawLine(
+                color = Color(0xFF64748B).copy(alpha = 0.40f),
+                start = Offset(xx, top),
+                end = Offset(xx, bottom),
+                strokeWidth = 1.2f,
+                pathEffect = PathEffect.dashPathEffect(floatArrayOf(6f, 6f), 0f)
+            )
+            s.latencyMs?.let { lat ->
+                val yy = y(lat)
+                val dotColor = if (s.target == RoamingPingTarget.GATEWAY) Blue else Purple
+                drawCircle(dotColor.copy(alpha = 0.22f), radius = 8f, center = Offset(xx, yy))
+                drawCircle(Color.White, radius = 5f, center = Offset(xx, yy))
+                drawCircle(dotColor, radius = 3.2f, center = Offset(xx, yy))
+            }
+        }
     }
 }
 
@@ -12588,6 +13288,7 @@ private fun RoamingSignalCanvas(
     plot: List<RoamingWifiSample>,
     viewStartMs: Long,
     viewEndMs: Long,
+    selected: RoamingWifiSample? = null,
     onSelect: (RoamingWifiSample) -> Unit
 ) {
     Canvas(
@@ -12597,13 +13298,38 @@ private fun RoamingSignalCanvas(
             .clip(ShapeM)
             .background(Color.White, ShapeM)
             .pointerInput(plot, viewStartMs, viewEndMs) {
-                detectTapGestures { pos ->
-                    if (plot.isEmpty()) return@detectTapGestures
-                    val left = 64f
-                    val right = size.width - 24f
-                    val ratio = ((pos.x - left) / (right - left).coerceAtLeast(1f)).coerceIn(0f, 1f)
-                    val selectedMs = viewStartMs + ((viewEndMs - viewStartMs) * ratio).toLong()
-                    plot.minByOrNull { abs(it.elapsedMs - selectedMs) }?.let(onSelect)
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    fun selectAt(pos: Offset) {
+                        if (plot.isEmpty()) return
+                        val left = 64f
+                        val right = size.width - 24f
+                        val ratio = ((pos.x - left) / (right - left).coerceAtLeast(1f)).coerceIn(0f, 1f)
+                        val selectedMs = viewStartMs + ((viewEndMs - viewStartMs) * ratio).toLong()
+                        plot.minByOrNull { abs(it.elapsedMs - selectedMs) }?.let(onSelect)
+                    }
+                    selectAt(down.position)
+                    var lastPos = down.position
+                    var totalDx = 0f
+                    var totalDy = 0f
+                    var isHorizontal = false
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        val pressed = event.changes.filter { it.pressed }
+                        if (pressed.isEmpty()) break
+                        val change = pressed.first()
+                        val delta = change.position - lastPos
+                        lastPos = change.position
+                        totalDx += delta.x
+                        totalDy += delta.y
+                        if (!isHorizontal && (abs(totalDx) > viewConfiguration.touchSlop * 0.4f || abs(totalDy) > viewConfiguration.touchSlop * 0.4f)) {
+                            isHorizontal = abs(totalDx) > abs(totalDy) * 1.1f
+                        }
+                        if (isHorizontal) {
+                            change.consume()
+                            selectAt(change.position)
+                        }
+                    }
                 }
             }
     ) {
@@ -12636,7 +13362,6 @@ private fun RoamingSignalCanvas(
         val yTicks = (0..4).map { idx -> (axisBottom + (axisTop - axisBottom) * idx / 4f).roundToInt() }.distinct()
         yTicks.forEach { tick ->
             val yy = yRssi(tick)
-            drawLine(Border.copy(alpha = 0.72f), Offset(left, yy), Offset(right, yy), strokeWidth = 1f)
             textPaint.textAlign = Paint.Align.RIGHT
             drawContext.canvas.nativeCanvas.drawText(tick.toString(), left - 10f, yy + 9f, textPaint)
             textPaint.textAlign = Paint.Align.LEFT
@@ -12646,7 +13371,6 @@ private fun RoamingSignalCanvas(
         (0..4).forEach { idx ->
             val tickMs = viewStartMs + spanMs * idx / 4L
             val xx = x(tickMs)
-            drawLine(Border.copy(alpha = 0.45f), Offset(xx, top), Offset(xx, bottom), strokeWidth = 1f)
             val label = roamingTimeLabel((tickMs / 1000L).toInt())
             val labelWidth = textPaint.measureText(label)
             val tx = (xx - labelWidth / 2f).coerceIn(left, right - labelWidth)
@@ -12673,6 +13397,22 @@ private fun RoamingSignalCanvas(
                     pathEffect = if (switched) PathEffect.dashPathEffect(floatArrayOf(9f, 7f), 0f) else null
                 )
             )
+        }
+        selected?.let { s ->
+            val xx = x(s.elapsedMs)
+            drawLine(
+                color = Color(0xFF64748B).copy(alpha = 0.40f),
+                start = Offset(xx, top),
+                end = Offset(xx, bottom),
+                strokeWidth = 1.2f,
+                pathEffect = PathEffect.dashPathEffect(floatArrayOf(6f, 6f), 0f)
+            )
+            s.rssi?.let { r ->
+                val yy = yRssi(r)
+                drawCircle(Blue.copy(alpha = 0.22f), radius = 8f, center = Offset(xx, yy))
+                drawCircle(Color.White, radius = 5f, center = Offset(xx, yy))
+                drawCircle(Blue, radius = 3.2f, center = Offset(xx, yy))
+            }
         }
     }
 }
@@ -12914,8 +13654,23 @@ private data class BufferbloatResult(
 
 @Composable
 private fun BufferbloatToolPage(onBack: () -> Unit) {
+    val context = LocalContext.current
+    val store = remember { NetToolHistoryStore(context.applicationContext) }
+    var records by remember { mutableStateOf(store.loadBufferbloat()) }
+    var sizeKb by remember { mutableStateOf(store.bufferbloatSizeKb()) }
     val scope = rememberCoroutineScope()
     var host by remember { mutableStateOf("223.5.5.5") }
+    var showTargetModal by remember { mutableStateOf(false) }
+    var customTargets by remember { mutableStateOf(store.loadCustomTargets("bufferbloat")) }
+    val bufferbloatPresets = remember {
+        listOf(
+            ToolTargetPreset("223.5.5.5", "阿里DNS · 极速低延时"),
+            ToolTargetPreset("119.29.29.29", "腾讯DNS · 全国BGP基准"),
+            ToolTargetPreset("114.114.114.114", "经典公网DNS · 骨干直连"),
+            ToolTargetPreset("www.baidu.com", "百度搜索 · 极速并发"),
+            ToolTargetPreset("www.bilibili.com", "B站CDN · 富媒体视频节点")
+        )
+    }
     var phase by remember { mutableStateOf(BufferbloatPhase.IDLE) }
     var progressText by remember { mutableStateOf("") }
     var progressFraction by remember { mutableStateOf(0f) }
@@ -13043,6 +13798,22 @@ private fun BufferbloatToolPage(onBack: () -> Unit) {
                 lossPercent = lossPct,
                 grade = grade
             )
+            val now = System.currentTimeMillis()
+            val timeText = SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date(now))
+            val rec = BufferbloatHistoryRecord(
+                id = now,
+                timestamp = now,
+                timeText = timeText,
+                targetHost = host.ifBlank { "223.5.5.5" },
+                unloadedRtt = bAvg,
+                loadedRtt = lAvg,
+                deltaRtt = delta,
+                grade = "${grade.grade} (${grade.title})",
+                advice = grade.desc
+            )
+            store.addBufferbloat(rec)
+            records = store.loadBufferbloat()
+            sizeKb = store.bufferbloatSizeKb()
             progressText = "测试完成！综合评级：${grade.grade}（${grade.title}）"
             progressFraction = 1f
             phase = BufferbloatPhase.DONE
@@ -13060,7 +13831,18 @@ private fun BufferbloatToolPage(onBack: () -> Unit) {
         item {
             SoftCard {
                 ConfigLongRow("目标") {
-                    CleanField(host, { if (phase == BufferbloatPhase.IDLE || phase == BufferbloatPhase.DONE) host = it }, "223.5.5.5", leadingMark = "host")
+                    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Box(Modifier.weight(1f)) {
+                            CleanField(host, { if (phase == BufferbloatPhase.IDLE || phase == BufferbloatPhase.DONE) host = it }, "223.5.5.5", leadingMark = "host")
+                        }
+                        Spacer(Modifier.width(6.dp))
+                        SoftChoicePill(
+                            text = "选择 ⌄",
+                            selected = false,
+                            onClick = { if (phase == BufferbloatPhase.IDLE || phase == BufferbloatPhase.DONE) showTargetModal = true },
+                            compact = true
+                        )
+                    }
                 }
                 Spacer(Modifier.height(6.dp))
                 Button(
@@ -13167,6 +13949,64 @@ private fun BufferbloatToolPage(onBack: () -> Unit) {
                 }
             }
         }
+
+        item {
+            ToolHistorySection(
+                title = "缓冲评级历史",
+                records = records,
+                sizeKb = sizeKb,
+                timestampOf = { it.timestamp },
+                idOf = { it.id },
+                onDelete = { id ->
+                    store.deleteBufferbloat(id)
+                    records = store.loadBufferbloat()
+                    sizeKb = store.bufferbloatSizeKb()
+                }
+            ) { record ->
+                Surface(
+                    shape = ShapeM,
+                    color = Color.White,
+                    border = BorderStroke(0.5.dp, Color.White.copy(alpha = 0.85f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(Modifier.padding(10.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            StatusChip(record.grade, BlueSoft, Blue, compact = true)
+                            Spacer(Modifier.width(6.dp))
+                            Text(record.targetHost, fontSize = 13.sp, fontWeight = FontWeight.Bold, color = TextDark)
+                            Spacer(Modifier.weight(1f))
+                            Text(record.timeText, fontSize = 11.sp, color = Muted)
+                        }
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            "空载: ${record.unloadedRtt}ms · 满载: ${record.loadedRtt}ms · 排队膨胀: +${record.deltaRtt}ms",
+                            fontSize = 11.sp,
+                            color = Muted
+                        )
+                    }
+                }
+            }
+        }
+        item { Spacer(Modifier.height(18.dp)) }
+    }
+
+    if (showTargetModal) {
+        ToolTargetSelectorModal(
+            title = "选择缓冲评级目标",
+            presets = bufferbloatPresets,
+            customTargets = customTargets,
+            onPick = { host = it },
+            onAddCustom = {
+                val ok = store.addCustomTarget("bufferbloat", it)
+                if (ok) customTargets = store.loadCustomTargets("bufferbloat")
+                ok
+            },
+            onDeleteCustom = {
+                store.deleteCustomTarget("bufferbloat", it)
+                customTargets = store.loadCustomTargets("bufferbloat")
+            },
+            onDismiss = { showTargetModal = false }
+        )
     }
 }
 
@@ -13496,6 +14336,596 @@ private fun CellularInfoToolPage(onBack: () -> Unit) {
     }
 }
 
+private data class WinnerVerdict(
+    val title: String,
+    val color: Color,
+    val bg: Color,
+    val reason: String
+)
+
+private data class IperfIntervalLog(
+    val elapsedSeconds: Double,
+    val mbps: Double,
+    val bytes: Long
+)
+
+private data class IperfSummary(
+    val avgMbps: Double,
+    val peakMbps: Double,
+    val totalBytes: Long,
+    val durationSec: Int,
+    val isReverse: Boolean,
+    val gradeTitle: String,
+    val gradeColor: Color,
+    val gradeBg: Color,
+    val advice: String
+)
+
+@Composable
+private fun IperfSpeedChart(
+    logs: List<IperfIntervalLog>,
+    durationSeconds: Int,
+    averageMbps: Double,
+    modifier: Modifier = Modifier
+) {
+    var selectedSeconds by remember { mutableStateOf<Double?>(null) }
+    var chartWidth by remember { mutableStateOf(0) }
+    LaunchedEffect(logs.isEmpty()) { if (logs.isEmpty()) selectedSeconds = null }
+    val density = LocalDensity.current
+    val axisPaint = remember(density) {
+        Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Muted.toArgb()
+            textSize = with(density) { 10.sp.toPx() }
+        }
+    }
+    fun speed(value: Double): String = String.format(Locale.US, if (value >= 10) "%.0f" else "%.1f", value)
+    val rawMax = maxOf(logs.maxOfOrNull { it.mbps } ?: 0.0, averageMbps) * 1.15
+    val step = when {
+        rawMax <= 5 -> 1.0
+        rawMax <= 10 -> 2.0
+        rawMax <= 50 -> 10.0
+        rawMax <= 100 -> 20.0
+        rawMax <= 500 -> 100.0
+        rawMax <= 1000 -> 200.0
+        else -> 500.0
+    }
+    val maxMbps = (ceil(rawMax / step) * step).coerceAtLeast(1.0)
+    val endSeconds = durationSeconds.toDouble().coerceAtLeast(1.0)
+    val left = axisPaint.measureText(speed(maxMbps)) + with(density) { 8.dp.toPx() }
+    val rightPadding = with(density) { 12.dp.toPx() }
+    val selected = selectedSeconds?.let { time -> logs.minByOrNull { abs(it.elapsedSeconds - time) } }
+
+    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(
+            selected?.let { String.format(Locale.US, "%.1f 秒 · %.1f Mbps", it.elapsedSeconds, it.mbps) }
+                ?: if (logs.isEmpty()) "等待首个速率采样…" else "点击曲线查看采样值",
+            color = if (selected == null) Muted else Blue,
+            fontSize = 11.sp
+        )
+        Canvas(
+            modifier = Modifier.fillMaxWidth().weight(1f)
+                .onSizeChanged { chartWidth = it.width }
+                .pointerInput(logs, endSeconds, left) {
+                    detectTapGestures { position ->
+                        val width = (chartWidth - left - rightPadding).coerceAtLeast(1f)
+                        selectedSeconds = ((position.x - left) / width).coerceIn(0f, 1f) * endSeconds
+                    }
+                }
+        ) {
+            val right = size.width - rightPadding
+            val top = 10.dp.toPx()
+            val bottom = size.height - 24.dp.toPx()
+            if (right <= left || bottom <= top) return@Canvas
+            fun yFor(value: Double) = bottom - (value / maxMbps).toFloat().coerceIn(0f, 1f) * (bottom - top)
+            fun xFor(seconds: Double) = left + (seconds / endSeconds).toFloat().coerceIn(0f, 1f) * (right - left)
+            val baselineOffset = -(axisPaint.fontMetrics.ascent + axisPaint.fontMetrics.descent) / 2
+
+            for (index in 0..4) {
+                val value = maxMbps * index / 4
+                val y = yFor(value)
+                drawLine(Border.copy(alpha = 0.55f), Offset(left, y), Offset(right, y), strokeWidth = 1.dp.toPx())
+                val label = speed(value)
+                drawContext.canvas.nativeCanvas.drawText(label, left - 6.dp.toPx() - axisPaint.measureText(label), y + baselineOffset, axisPaint)
+                val seconds = endSeconds * index / 4
+                val time = String.format(Locale.US, if (abs(seconds - seconds.roundToInt()) < 0.01) "%.0fs" else "%.1fs", seconds)
+                val x = (xFor(seconds) - axisPaint.measureText(time) / 2).coerceIn(0f, (size.width - axisPaint.measureText(time)).coerceAtLeast(0f))
+                drawContext.canvas.nativeCanvas.drawText(time, x, size.height - 3.dp.toPx(), axisPaint)
+            }
+
+            if (logs.isNotEmpty()) {
+                // Start at the first real sample; never invent a zero/startup spike.
+                val line = Path()
+                logs.forEachIndexed { index, sample ->
+                    if (index == 0) line.moveTo(xFor(sample.elapsedSeconds), yFor(sample.mbps))
+                    else line.lineTo(xFor(sample.elapsedSeconds), yFor(sample.mbps))
+                }
+                if (logs.size > 1) {
+                    val fill = Path().apply {
+                        addPath(line)
+                        lineTo(xFor(logs.last().elapsedSeconds), bottom)
+                        lineTo(xFor(logs.first().elapsedSeconds), bottom)
+                        close()
+                    }
+                    drawPath(fill, Brush.verticalGradient(listOf(Blue.copy(alpha = 0.22f), Blue.copy(alpha = 0.02f)), top, bottom))
+                }
+                val averageY = yFor(averageMbps)
+                drawLine(Orange, Offset(left, averageY), Offset(right, averageY), strokeWidth = 1.5.dp.toPx(),
+                    pathEffect = PathEffect.dashPathEffect(floatArrayOf(5.dp.toPx(), 4.dp.toPx())))
+                drawPath(line, Blue, style = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round))
+                val point = selected ?: logs.last()
+                val position = Offset(xFor(point.elapsedSeconds), yFor(point.mbps))
+                if (selected != null) drawLine(Blue.copy(alpha = 0.3f), Offset(position.x, top), Offset(position.x, bottom))
+                drawCircle(Blue, radius = 4.dp.toPx(), center = position)
+                drawCircle(Color.White, radius = 2.dp.toPx(), center = position)
+            }
+        }
+    }
+}
+
+@Composable
+private fun IperfToolPage(onBack: () -> Unit) {
+    val context = LocalContext.current
+    val store = remember { NetToolHistoryStore(context.applicationContext) }
+    var records by remember { mutableStateOf(store.loadIperf()) }
+    var sizeKb by remember { mutableStateOf(store.iperfSizeKb()) }
+    val scope = rememberCoroutineScope()
+    var serverHost by remember { mutableStateOf("192.168.1.100") }
+    var showTargetModal by remember { mutableStateOf(false) }
+    var customTargets by remember { mutableStateOf(store.loadCustomTargets("iperf")) }
+    val iperfPresets = remember {
+        listOf(
+            ToolTargetPreset("192.168.1.100", "常用PC/NAS打流主机"),
+            ToolTargetPreset("192.168.31.1", "常见家庭主路由器/小米网关"),
+            ToolTargetPreset("192.168.0.100", "二级路由/局域网测速机"),
+            ToolTargetPreset("10.0.0.1", "企业/软路由常见网关"),
+            ToolTargetPreset("192.168.5.1", "常见局域网/软路由网关")
+        )
+    }
+    var serverPort by remember { mutableStateOf("5201") }
+    var showPortMenu by remember { mutableStateOf(false) }
+    var isReverse by remember { mutableStateOf(true) } // true: 下行 (Download), false: 上行 (Upload)
+    var durationSec by remember { mutableStateOf(30) }
+    var showDurationMenu by remember { mutableStateOf(false) }
+    var testedDurationSec by remember { mutableStateOf(30) }
+
+    var running by remember { mutableStateOf(false) }
+    var progressFraction by remember { mutableStateOf(0f) }
+    var progressText by remember { mutableStateOf("") }
+    var currentMbps by remember { mutableStateOf(0.0) }
+    var totalBytesTransferred by remember { mutableStateOf(0L) }
+    var logs by remember { mutableStateOf<List<IperfIntervalLog>>(emptyList()) }
+    var summary by remember { mutableStateOf<IperfSummary?>(null) }
+    var testJob by remember { mutableStateOf<Job?>(null) }
+    var activeClient by remember { mutableStateOf<Iperf3Client?>(null) }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            activeClient?.close()
+            testJob?.cancel()
+        }
+    }
+
+    fun stopTest() {
+        activeClient?.close()
+        activeClient = null
+        testJob?.cancel()
+        testJob = null
+        running = false
+        progressText = "测速已停止"
+    }
+
+    fun startTest() {
+        val host = serverHost.trim()
+        val portNum = serverPort.toIntOrNull()
+        if (host.isBlank() || portNum == null || portNum !in 1..65535) {
+            summary = null
+            progressText = "请输入有效服务器地址和 1–65535 范围内的端口"
+            return
+        }
+        val reverse = isReverse
+        val seconds = durationSec
+        testedDurationSec = seconds
+        val client = Iperf3Client()
+        activeClient = client
+        running = true
+        summary = null
+        logs = emptyList()
+        currentMbps = 0.0
+        totalBytesTransferred = 0L
+        progressFraction = 0f
+        progressText = "正在连接 iPerf3 服务器 $host:$portNum..."
+
+        testJob = scope.launch {
+            val intervalList = mutableListOf<IperfIntervalLog>()
+
+            try {
+                val result = withContext(Dispatchers.IO) {
+                    client.run(host, portNum, seconds, reverse) { sample ->
+                        scope.launch {
+                            if (activeClient === client && running) {
+                                intervalList.add(IperfIntervalLog(sample.elapsedSeconds, sample.mbps, sample.bytes))
+                                logs = intervalList.toList()
+                                currentMbps = sample.mbps
+                                totalBytesTransferred = sample.totalBytes
+                                progressFraction = (sample.elapsedSeconds / seconds).toFloat().coerceIn(0f, 1f)
+                                progressText = if (reverse) "正在进行下行吞吐测速..." else "正在进行上行吞吐压测..."
+                            }
+                        }
+                    }
+                }
+                ensureActive()
+                val avg = result.averageMbps
+                val peak = result.peakMbps
+                val totalBytes = result.totalBytes
+
+                val verdict = when {
+                    avg >= 500.0 ->
+                        WinnerVerdict(
+                            "千兆级极速吞吐 (Gigabit+)",
+                            Green,
+                            GreenSoft,
+                            "链路吞吐极高，已达到千兆内网极速水准，足以胜任局域网超大文件迁移、NAS 多路并发备份与极客流媒体应用。"
+                        )
+                    avg >= 100.0 ->
+                        WinnerVerdict(
+                            "百兆~千兆高速体验",
+                            Blue,
+                            BlueSoft,
+                            "达到常规百兆宽带/千兆内网优秀水准，满足全家 4K 在线观影、大型游戏高速下载及局域网多设备无缝调度。"
+                        )
+                    avg >= 30.0 ->
+                        WinnerVerdict(
+                            "家用常规宽带",
+                            Orange,
+                            Color(0xFFFFF3E0),
+                            "达到常规家庭宽带速率。若您处于千兆局域网内，建议检查网线是否只协商到百兆、或排查 Wi-Fi 频段是否处于 2.4GHz 干扰环境。"
+                        )
+                    else ->
+                        WinnerVerdict(
+                            "吞吐受阻与受限",
+                            ErrorRed,
+                            RedSoft,
+                            "吞吐量较低或测试期间出现严重降速。请检查路由器 CPU 负载、防火墙限速策略或 Wi-Fi 信号遮挡衰减。"
+                        )
+                }
+
+                summary = IperfSummary(
+                    avgMbps = avg,
+                    peakMbps = peak,
+                    totalBytes = totalBytes,
+                    durationSec = seconds,
+                    isReverse = reverse,
+                    gradeTitle = verdict.title,
+                    gradeColor = verdict.color,
+                    gradeBg = verdict.bg,
+                    advice = verdict.reason
+                )
+
+                val now = System.currentTimeMillis()
+                val timeText = SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date(now))
+                val rec = IperfHistoryRecord(
+                    id = now,
+                    timestamp = now,
+                    timeText = timeText,
+                    server = host,
+                    port = portNum,
+                    isReverse = reverse,
+                    durationSec = seconds,
+                    avgMbps = avg,
+                    peakMbps = peak,
+                    totalBytes = totalBytes,
+                    gradeTitle = verdict.title
+                )
+                store.addIperf(rec)
+                records = store.loadIperf()
+                sizeKb = store.iperfSizeKb()
+
+                progressText = "测速完成！平均速率：${String.format(java.util.Locale.US, "%.1f", avg)} Mbps"
+                progressFraction = 1f
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (activeClient === client) {
+                    progressText = "测速失败：${e.message ?: "连接失败"}。请确认服务端已运行 iperf3 -s -p $portNum，且防火墙允许该端口。"
+                }
+            } finally {
+                client.close()
+                if (activeClient === client) {
+                    activeClient = null
+                    running = false
+                }
+            }
+        }
+    }
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize().padding(horizontal = 14.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        item {
+            ToolPageHeader("iPerf3测速", "局域网与公网 TCP 吞吐测速", onBack)
+        }
+
+        item {
+            SoftCard {
+                ConfigLongRow("服务器") {
+                    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Box(Modifier.weight(1f)) {
+                            CleanField(serverHost, { if (!running) serverHost = it }, "192.168.1.100", leadingMark = "host")
+                        }
+                        Spacer(Modifier.width(6.dp))
+                        SoftChoicePill(
+                            text = "选择 ⌄",
+                            selected = false,
+                            onClick = { if (!running) showTargetModal = true },
+                            compact = true
+                        )
+                    }
+                }
+
+                Spacer(Modifier.height(6.dp))
+
+                ConfigLongRow("端口") {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        CleanField(serverPort, { if (!running) serverPort = it }, "5201", leadingMark = "port", modifier = Modifier.weight(1f))
+                        Box {
+                            SoftChoicePill(
+                                text = "预设 ⌄",
+                                selected = false,
+                                onClick = { if (!running) showPortMenu = true },
+                                compact = true
+                            )
+                            DropdownMenu(expanded = showPortMenu, onDismissRequest = { showPortMenu = false }) {
+                                listOf("5201", "5202", "5203").forEach { port ->
+                                    DropdownMenuItem(
+                                        text = { Text(port, color = if (serverPort == port) Blue else TextDark) },
+                                        onClick = { if (!running) serverPort = port; showPortMenu = false }
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(6.dp))
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("测试方向", color = TextDark, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(60.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.weight(1f)) {
+                        SoftChoicePill(
+                            text = "下行测速",
+                            selected = isReverse,
+                            onClick = { if (!running) isReverse = true },
+                            modifier = Modifier.weight(1f),
+                            compact = true
+                        )
+                        SoftChoicePill(
+                            text = "上行测速",
+                            selected = !isReverse,
+                            onClick = { if (!running) isReverse = false },
+                            modifier = Modifier.weight(1f),
+                            compact = true
+                        )
+                    }
+                }
+
+                Spacer(Modifier.height(6.dp))
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("持续时长", color = TextDark, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(60.dp))
+                    Box(Modifier.weight(1f)) {
+                        SoftChoicePill(
+                            text = "${durationSec} 秒 ⌄",
+                            selected = true,
+                            onClick = { if (!running) showDurationMenu = true },
+                            modifier = Modifier.fillMaxWidth(),
+                            compact = true
+                        )
+                        DropdownMenu(expanded = showDurationMenu, onDismissRequest = { showDurationMenu = false }) {
+                            listOf(10, 30, 60, 120).forEach { seconds ->
+                                DropdownMenuItem(
+                                    text = { Text("$seconds 秒${if (seconds == 30) "（推荐）" else ""}", color = if (durationSec == seconds) Blue else TextDark) },
+                                    onClick = { if (!running) durationSec = seconds; showDurationMenu = false }
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(8.dp))
+
+                Text("目标需运行 iPerf3 服务端（iperf3 -s），网关地址不一定提供测速服务。", color = Muted, fontSize = 11.sp)
+
+                Button(
+                    onClick = { if (running) stopTest() else startTest() },
+                    modifier = Modifier.fillMaxWidth().height(42.dp),
+                    shape = ShapeM,
+                    colors = ButtonDefaults.buttonColors(containerColor = if (running) ErrorRed else Green)
+                ) {
+                    Text(if (running) "停止测速" else "开始 iPerf3 测速", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                }
+            }
+        }
+
+        if (!running && progressText.isNotBlank()) {
+            item {
+                SoftCard {
+                    Text(progressText, color = if (summary == null) Muted else Green, fontSize = 12.sp)
+                }
+            }
+        }
+
+        if (running) {
+            item {
+                SoftCard {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        SectionTitle("iperf", "打流测速中", Green)
+                        Spacer(Modifier.weight(1f))
+                        Text(
+                            "${String.format(java.util.Locale.US, "%.1f", currentMbps)} Mbps",
+                            color = Green,
+                            fontWeight = FontWeight.Black,
+                            fontSize = 18.sp
+                        )
+                    }
+                    LinearProgressIndicator(
+                        progress = { progressFraction },
+                        modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)),
+                        color = Green,
+                        trackColor = GreenSoft
+                    )
+                    Text(progressText, color = Muted, fontSize = 12.sp)
+                }
+            }
+        }
+
+        if (running || logs.isNotEmpty()) {
+            item {
+                SoftCard {
+                    SectionTitle("chart", "吞吐速率走势", Blue)
+                    val elapsed = logs.lastOrNull()?.elapsedSeconds ?: 0.0
+                    val average = summary?.avgMbps ?: if (elapsed > 0) logs.sumOf { it.bytes } * 8.0 / elapsed / 1_000_000 else 0.0
+                    val peak = summary?.peakMbps ?: logs.maxOfOrNull { it.mbps } ?: 0.0
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(String.format(Locale.US, "蓝线：每秒速率 · %.1f Mbps", logs.lastOrNull()?.mbps ?: 0.0), color = Blue, fontSize = 11.sp)
+                        Text(String.format(Locale.US, "橙色虚线：平均 %.1f Mbps", average), color = Orange, fontSize = 11.sp)
+                        Text(String.format(Locale.US, "峰值 %.1f Mbps", peak), color = Muted, fontSize = 11.sp)
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    IperfSpeedChart(
+                        logs = logs,
+                        durationSeconds = testedDurationSec,
+                        averageMbps = average,
+                        modifier = Modifier.fillMaxWidth().height(220.dp).background(Color(0xFFF8FAFC), ShapeM).padding(8.dp)
+                    )
+                }
+            }
+        }
+
+        summary?.let { res ->
+            item {
+                SoftCard {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Surface(
+                            shape = RoundedCornerShape(16.dp),
+                            color = res.gradeBg,
+                            border = BorderStroke(1.5.dp, res.gradeColor.copy(alpha = 0.5f)),
+                            modifier = Modifier.width(64.dp).height(64.dp)
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                MarkBox("iperf", Color.Transparent, res.gradeColor)
+                            }
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        Column(Modifier.weight(1f)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(res.gradeTitle, color = TextDark, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                                Spacer(Modifier.width(6.dp))
+                                StatusChip(
+                                    if (res.isReverse) "下行" else "上行",
+                                    if (res.isReverse) BlueSoft else Orange.copy(alpha = 0.15f),
+                                    if (res.isReverse) Blue else Orange,
+                                    compact = true
+                                )
+                            }
+                            Spacer(Modifier.height(2.dp))
+                            Text(res.advice, color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
+                        }
+                    }
+                }
+            }
+
+            item {
+                SoftCard {
+                    SectionTitle("latency", "测速统计结果", Blue)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        InfoMetricTile("hourglass", "平均速率", "${String.format(java.util.Locale.US, "%.1f", res.avgMbps)} Mbps", BlueSoft, Blue, Modifier.weight(1f))
+                        InfoMetricTile("tune", "峰值速率", "${String.format(java.util.Locale.US, "%.1f", res.peakMbps)} Mbps", GreenSoft, Green, Modifier.weight(1f))
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        val mb = (res.totalBytes / (1024.0 * 1024.0))
+                        InfoMetricTile("download", "传输总量", "${String.format(java.util.Locale.US, "%.1f", mb)} MB", Color(0xFFF3E8FF), Purple, Modifier.weight(1f))
+                        InfoMetricTile("time", "测试时长", "${res.durationSec} 秒", Color(0xFFF8FAFC), TextDark, Modifier.weight(1f))
+                    }
+                }
+            }
+        }
+
+        item {
+            ToolHistorySection(
+                title = "iPerf3 测速历史",
+                records = records,
+                sizeKb = sizeKb,
+                timestampOf = { it.timestamp },
+                idOf = { it.id },
+                onDelete = { id ->
+                    store.deleteIperf(id)
+                    records = store.loadIperf()
+                    sizeKb = store.iperfSizeKb()
+                }
+            ) { record ->
+                Surface(
+                    shape = ShapeM,
+                    color = Color.White,
+                    border = BorderStroke(0.5.dp, Color.White.copy(alpha = 0.85f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(Modifier.padding(10.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            StatusChip(
+                                if (record.isReverse) "下行" else "上行",
+                                if (record.isReverse) BlueSoft else Orange.copy(alpha = 0.15f),
+                                if (record.isReverse) Blue else Orange,
+                                compact = true
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                "${String.format(Locale.US, "%.1f", record.avgMbps)} Mbps",
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Black,
+                                color = Green
+                            )
+                            Spacer(Modifier.weight(1f))
+                            Text(record.timeText, fontSize = 11.sp, color = Muted)
+                        }
+                        Spacer(Modifier.height(4.dp))
+                        val mb = record.totalBytes / (1024.0 * 1024.0)
+                        Text(
+                            "${record.server}:${record.port} · ${record.durationSec}秒 · 总计 ${String.format(Locale.US, "%.1f", mb)} MB · ${record.gradeTitle}",
+                            fontSize = 11.sp,
+                            color = Muted
+                        )
+                    }
+                }
+            }
+        }
+        item { Spacer(Modifier.height(18.dp)) }
+    }
+
+    if (showTargetModal) {
+        ToolTargetSelectorModal(
+            title = "选择 iPerf3 服务器",
+            presets = iperfPresets,
+            customTargets = customTargets,
+            onPick = { serverHost = it },
+            onAddCustom = {
+                val ok = store.addCustomTarget("iperf", it)
+                if (ok) customTargets = store.loadCustomTargets("iperf")
+                ok
+            },
+            onDeleteCustom = {
+                store.deleteCustomTarget("iperf", it)
+                customTargets = store.loadCustomTargets("iperf")
+            },
+            onDismiss = { showTargetModal = false }
+        )
+    }
+}
+
 @Composable
 private fun ConfigLongRow(label: String, content: @Composable () -> Unit) {
     Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -13808,7 +15238,7 @@ private fun SoftCompactToolCard(modifier: Modifier = Modifier, content: @Composa
             .fillMaxWidth()
             .clip(shape)
             .background(GlassCompactBrush)
-            .border(1.dp, GlassBorderBrush, shape)
+            .border(0.5.dp, GlassBorderBrush, shape)
             .then(modifier)
             .padding(horizontal = 10.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp),
@@ -13844,15 +15274,7 @@ private fun NetworkEnvironmentSettingsCard(
     onCopyPublicIpv4: () -> Unit,
     onCopyPublicIpv6: () -> Unit,
     onOpenNatDiagnostics: () -> Unit,
-    onOpenNsLookup: () -> Unit,
-    onOpenTracket: () -> Unit,
-    onOpenMtu: () -> Unit,
-    onOpenRoaming: () -> Unit,
-    onOpenIpv6Diagnostics: () -> Unit,
-    onOpenBufferbloat: () -> Unit,
-    onOpenCellularInfo: () -> Unit,
-    expanded: Boolean,
-    onExpandedChange: (Boolean) -> Unit
+    onOpenIpv6Diagnostics: () -> Unit
 ) {
     SoftCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -13860,31 +15282,6 @@ private fun NetworkEnvironmentSettingsCard(
             Spacer(Modifier.weight(1f))
             TextButton(onClick = onOpenNatDiagnostics) { Text("NAT诊断", fontSize = 12.sp) }
             TextButton(onClick = onRefresh) { Text("刷新", fontSize = 12.sp) }
-            IconButton(onClick = { onExpandedChange(!expanded) }, modifier = Modifier.width(32.dp).height(32.dp)) {
-                Text(if (expanded) "⌃" else "⌄", color = TextDark, fontSize = 19.sp, fontWeight = FontWeight.Bold)
-            }
-        }
-        if (!expanded) {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                val ipv4Text = if (maskPrivacy) maskIpText(publicIpResult.ipv4) else publicIpResult.ipv4
-                val ipv6Text = if (maskPrivacy) maskIpText(publicIpResult.ipv6) else publicIpResult.ipv6
-                InfoMetricTile("ipv4", "IPv4", ipv4Text, BlueSoft, Blue, Modifier.weight(1f), onClick = onCopyPublicIpv4)
-                InfoMetricTile(
-                    icon = "ipv6",
-                    label = "IPv6",
-                    value = ipv6Text,
-                    iconBg = GreenSoft,
-                    iconColor = Green,
-                    modifier = Modifier.weight(1f),
-                    onIconClick = onOpenIpv6Diagnostics,
-                    onValueClick = if (isUsableIpv6(publicIpResult.ipv6)) onCopyPublicIpv6 else onOpenIpv6Diagnostics
-                )
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                InfoMetricTile("nat", "NAT", probeInfo.natType, Color(0xFFFFE4E6), ErrorRed, Modifier.weight(1f), onClick = onOpenNatDiagnostics)
-                InfoMetricTile("carrier", "运营商", probeInfo.carrier, Color(0xFFF3E8FF), Purple, Modifier.weight(1f))
-            }
-            return@SoftCard
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
             InfoMetricTile("local_ip", "本地IP", if (maskPrivacy) maskIpText(probeInfo.localIp) else probeInfo.localIp, Color(0xFFE0F7FA), Color(0xFF00A7C6), Modifier.weight(1f))
@@ -13906,8 +15303,9 @@ private fun NetworkEnvironmentSettingsCard(
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
             val mapped = if (publicIpResult.ipv4.isUsableIpText() && probeInfo.portText != "不可用" && probeInfo.portText != "待检测") "${publicIpResult.ipv4}:${probeInfo.portText}" else probeInfo.portText
+            val (natBg, natFg) = natColorTheme(probeInfo.natType)
             InfoMetricTile("mapping", "公网映射", if (maskPrivacy) maskIpText(mapped) else mapped, Color(0xFFE0F2FE), Blue, Modifier.weight(1f))
-            InfoMetricTile("nat", "NAT类型", probeInfo.natType, Color(0xFFFFE4E6), ErrorRed, Modifier.weight(1f), onClick = onOpenNatDiagnostics)
+            InfoMetricTile("nat", "NAT类型", probeInfo.natType, natBg, natFg, Modifier.weight(1f), onClick = onOpenNatDiagnostics)
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
             InfoMetricTile("priority", "优先级", probeInfo.priority, Color(0xFFFFF3E0), Orange, Modifier.weight(1f))
@@ -13921,14 +15319,6 @@ private fun NetworkEnvironmentSettingsCard(
             InfoMetricTile("confidence", "NAT置信度", probeInfo.confidence, Color(0xFFF8FAFC), Muted, Modifier.weight(1f))
             InfoMetricTile("carrier", "运营商", probeInfo.carrier, Color(0xFFF3E8FF), Purple, Modifier.weight(1f))
         }
-        NetworkToolShortcutRow(
-            onOpenNsLookup = onOpenNsLookup,
-            onOpenTracket = onOpenTracket,
-            onOpenMtu = onOpenMtu,
-            onOpenRoaming = onOpenRoaming,
-            onOpenBufferbloat = onOpenBufferbloat,
-            onOpenCellularInfo = onOpenCellularInfo
-        )
         Text(
             probeInfo.diagnosis,
             color = if (probeInfo.proxyNotice.isNotBlank()) Purple else Muted,
@@ -13945,6 +15335,16 @@ private fun NetworkEnvironmentSettingsCard(
     }
 }
 
+
+private fun natColorTheme(value: String): Pair<Color, Color> = when {
+    value.startsWith("NAT1") -> GreenSoft to Green
+    value.startsWith("NAT2") -> Color(0xFFE0F2FE) to Blue
+    value.startsWith("NAT3") -> Color(0xFFFFF3E0) to Orange
+    value.startsWith("NAT4") || value.contains("受限") -> Color(0xFFFFE4E6) to ErrorRed
+    value.contains("代理") -> Color(0xFFF3E8FF) to Purple
+    value == "待检测" -> BlueSoft to Blue
+    else -> Color(0xFFF1F5F9) to Muted
+}
 
 private fun natIconMark(value: String): String {
     val match = Regex("NAT\\s*([1-4])|NAT([1-4])", RegexOption.IGNORE_CASE).find(value)
@@ -14037,15 +15437,17 @@ private fun InfoMetricTile(
 private enum class ChartGestureMode { Undecided, VerticalScroll, HorizontalPan, PinchZoom, Finished }
 
 private fun Modifier.chartGestureModifier(
-    onHorizontalPan: (Float) -> Unit,
-    onPinchTransform: (centroidX: Float, panX: Float, zoom: Float) -> Unit,
+    onHorizontalPan: ((Float) -> Unit)? = null,
+    onPinchTransform: ((centroidX: Float, panX: Float, zoom: Float) -> Unit)? = null,
     onTap: ((Offset) -> Unit)? = null,
-    onDoubleTap: (() -> Unit)? = null
+    onDoubleTap: (() -> Unit)? = null,
+    onScrub: ((Offset) -> Unit)? = null
 ): Modifier = composed {
     val currentHorizontalPan by rememberUpdatedState(onHorizontalPan)
     val currentPinchTransform by rememberUpdatedState(onPinchTransform)
     val currentTap by rememberUpdatedState(onTap)
     val currentDoubleTap by rememberUpdatedState(onDoubleTap)
+    val currentScrub by rememberUpdatedState(onScrub)
 
     pointerInput(Unit) {
         var lastTapAt = 0L
@@ -14063,6 +15465,8 @@ private fun Modifier.chartGestureModifier(
             var mode = ChartGestureMode.Undecided
             var hadMultiplePointers = false
 
+            currentScrub?.invoke(downPosition)
+
             while (event.changes.any { it.pressed }) {
                 val pressed = event.changes.filter { it.pressed }
                 if (pressed.size >= 2) {
@@ -14072,7 +15476,7 @@ private fun Modifier.chartGestureModifier(
                     val pan = event.calculatePan()
                     val centroid = event.calculateCentroid(useCurrent = true)
                     if (zoom != 1f || pan.x != 0f) {
-                        currentPinchTransform(centroid.x, pan.x, zoom)
+                        currentPinchTransform?.invoke(centroid.x, pan.x, zoom)
                     }
                     event.changes.forEach { change ->
                         if (change.pressed) change.consume()
@@ -14089,17 +15493,20 @@ private fun Modifier.chartGestureModifier(
                         totalDx += delta.x
                         totalDy += delta.y
                         if (mode == ChartGestureMode.Undecided &&
-                            kotlin.math.hypot(totalDx.toDouble(), totalDy.toDouble()) > viewConfiguration.touchSlop.toDouble()
+                            kotlin.math.hypot(totalDx.toDouble(), totalDy.toDouble()) > (viewConfiguration.touchSlop.toDouble() * 0.4)
                         ) {
-                            mode = if (kotlin.math.abs(totalDx) > kotlin.math.abs(totalDy) * 1.2f) {
+                            mode = if (kotlin.math.abs(totalDx) > kotlin.math.abs(totalDy) * 1.1f) {
                                 ChartGestureMode.HorizontalPan
                             } else {
                                 ChartGestureMode.VerticalScroll
                             }
                         }
                         if (mode == ChartGestureMode.HorizontalPan) {
-                            currentHorizontalPan(delta.x)
+                            currentHorizontalPan?.invoke(delta.x)
+                            currentScrub?.invoke(change.position)
                             change.consume()
+                        } else if (mode == ChartGestureMode.Undecided) {
+                            currentScrub?.invoke(change.position)
                         }
                     }
                 }
@@ -14117,6 +15524,7 @@ private fun Modifier.chartGestureModifier(
                     lastTapPosition = Offset.Unspecified
                 } else {
                     currentTap?.invoke(upPosition)
+                    currentScrub?.invoke(upPosition)
                     lastTapAt = tapAt
                     lastTapPosition = upPosition
                 }
@@ -14352,14 +15760,6 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
                     .fillMaxSize()
                     .onSizeChanged { chartWidthPx = it.width.toFloat().coerceAtLeast(1f) }
                     .chartGestureModifier(
-                        onHorizontalPan = { dragAmount ->
-                            val plotW = (chartWidthPx - 82f - 34f).coerceAtLeast(1f)
-                            val deltaMs = (dragAmount / plotW * windowSpanMs).toLong()
-                            autoFollow = false
-                            val minEnd = (earliestMs + windowSpanMs).coerceAtLeast(windowSpanMs)
-                            val maxEnd = latestMs.coerceAtLeast(minEnd)
-                            viewEndMs = (viewEndMs - deltaMs).coerceIn(minEnd, maxEnd)
-                        },
                         onPinchTransform = { centroidX, panX, zoom ->
                             val plotW = (chartWidthPx - 82f - 34f).coerceAtLeast(1f)
                             val focalRatio = ((centroidX - 82f) / plotW).coerceIn(0f, 1f)
@@ -14371,6 +15771,14 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
                             val maxEnd = latestMs.coerceAtLeast(minEnd)
                             viewEndMs = newEnd.coerceIn(minEnd, maxEnd)
                             autoFollow = false
+                        },
+                        onScrub = { offset ->
+                            val left = 82f
+                            val right = chartWidthPx - 34f
+                            val plotW = (right - left).coerceAtLeast(1f)
+                            val x = offset.x.coerceIn(left, right)
+                            val targetMs = viewStartMs + (((x - left) / plotW) * windowSpanMs).toLong()
+                            selectedPoint = visible.minByOrNull { kotlin.math.abs(it.elapsedMs - targetMs) }
                         },
                         onTap = { offset ->
                             val left = 82f
@@ -14418,7 +15826,6 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
 
                 axisLabels.forEach { tick ->
                     val y = yOf(tick)
-                    drawLine(Border.copy(alpha = 0.45f), Offset(left, y), Offset(right, y), strokeWidth = 1f)
                     val label = tick.toString()
                     val tw = axisPaint.measureText(label)
                     drawContext.canvas.nativeCanvas.drawText(label, (left - 12f - tw).coerceAtLeast(12f), (y + 7f).coerceIn(top + 10f, bottom - 3f), axisPaint)
@@ -14426,7 +15833,6 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
 
                 axisTicks.forEach { tickMs ->
                     val x = xOf(tickMs)
-                    drawLine(Border.copy(alpha = 0.25f), Offset(x, top), Offset(x, bottom), strokeWidth = 1f)
                     val label = formatPingAxisTime(tickMs)
                     val tw = axisPaint.measureText(label)
                     val tx = (x - tw / 2f).coerceIn(left + 2f, right - tw - 2f)
@@ -14443,6 +15849,49 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
                     // 高延迟是一次成功响应，不是断点；聚合点里如果有峰值，用峰值参与主折线，避免橙点悬空。
                     return if (highPoint && peak > latency) peak else latency
                 }
+
+                // 连续成功线段区域添加半透明微光渐变，消除网格后的空洞感
+                val solidGroups = mutableListOf<MutableList<PingPoint>>()
+                var currentGroup = mutableListOf<PingPoint>()
+                successSegments.forEach { seg ->
+                    if (!seg.dashed) {
+                        if (currentGroup.isEmpty()) currentGroup.add(seg.from)
+                        currentGroup.add(seg.to)
+                    } else {
+                        if (currentGroup.isNotEmpty()) {
+                            solidGroups.add(currentGroup)
+                            currentGroup = mutableListOf()
+                        }
+                    }
+                }
+                if (currentGroup.isNotEmpty()) solidGroups.add(currentGroup)
+
+                solidGroups.forEach { group ->
+                    if (group.size > 1) {
+                        val fillPath = Path()
+                        group.forEachIndexed { idx, p ->
+                            val x = xOf(p.elapsedMs)
+                            val y = yOf(chartLatencyOf(p) ?: p.latencyMs!!)
+                            if (idx == 0) {
+                                fillPath.moveTo(x, bottom)
+                                fillPath.lineTo(x, y)
+                            } else {
+                                fillPath.lineTo(x, y)
+                            }
+                        }
+                        fillPath.lineTo(xOf(group.last().elapsedMs), bottom)
+                        fillPath.close()
+                        drawPath(
+                            path = fillPath,
+                            brush = Brush.verticalGradient(
+                                colors = listOf(Blue.copy(alpha = 0.12f), Color.Transparent),
+                                startY = top,
+                                endY = bottom
+                            )
+                        )
+                    }
+                }
+
                 fun drawSegment(a: PingPoint, b: PingPoint, dashed: Boolean) {
                     val la = chartLatencyOf(a) ?: return
                     val lb = chartLatencyOf(b) ?: return
@@ -14487,11 +15936,59 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
 
                 selected?.takeIf { it.elapsedMs in viewStartMs..effectiveViewEndMs }?.let { p ->
                     val x = xOf(p.elapsedMs)
-                    val anchorY = p.latencyMs?.let { yOf(it) } ?: (bottom - 10f)
-                    val lineTop = (anchorY - 32f).coerceAtLeast(top)
-                    val lineBottom = (anchorY + 32f).coerceAtMost(bottom)
-                    drawLine(Color(0xFF334155).copy(alpha = 0.45f), Offset(x, lineTop), Offset(x, lineBottom), strokeWidth = 1.5f, cap = StrokeCap.Round)
-                    p.latencyMs?.let { drawCircle(Navy, radius = 4.5f, center = Offset(x, yOf(it))) }
+                    val hasLatency = p.latencyMs != null
+                    val anchorY = p.latencyMs?.let { yOf(it) } ?: (bottom - 12f)
+
+                    // 1. 全高度虚线探针定位线
+                    drawLine(
+                        color = Color(0xFF64748B).copy(alpha = 0.40f),
+                        start = Offset(x, top),
+                        end = Offset(x, bottom),
+                        strokeWidth = 1.2f,
+                        pathEffect = PathEffect.dashPathEffect(floatArrayOf(6f, 6f), 0f)
+                    )
+
+                    // 2. 探针锚点发光双层圆圈
+                    if (hasLatency) {
+                        val dotColor = if (p.highLatency) Orange else Blue
+                        drawCircle(dotColor.copy(alpha = 0.22f), radius = 8.5f, center = Offset(x, anchorY))
+                        drawCircle(Color.White, radius = 5f, center = Offset(x, anchorY))
+                        drawCircle(dotColor, radius = 3.2f, center = Offset(x, anchorY))
+                    } else {
+                        drawCircle(ErrorRed.copy(alpha = 0.25f), radius = 8f, center = Offset(x, anchorY))
+                        drawCircle(Color.White, radius = 4.5f, center = Offset(x, anchorY))
+                        drawCircle(ErrorRed, radius = 2.8f, center = Offset(x, anchorY))
+                    }
+
+                    // 3. 画布内悬浮数据气泡 (跟随手指滑动实时显示)
+                    val badgeText = if (hasLatency) {
+                        if (p.sampleCount > 1) "${p.latencyMs}ms (${p.sampleCount}次)" else "${p.latencyMs}ms"
+                    } else {
+                        "丢包/超时"
+                    }
+                    val badgePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                        color = AndroidColor.WHITE
+                        textSize = 24f
+                        typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+                    }
+                    val textW = badgePaint.measureText(badgeText)
+                    val badgeH = 34f
+                    val badgeW = textW + 20f
+                    val badgeX = (x - badgeW / 2f).coerceIn(left + 2f, right - badgeW - 2f)
+                    val badgeY = if (anchorY - badgeH - 12f >= top) anchorY - badgeH - 10f else anchorY + 14f
+
+                    drawRoundRect(
+                        color = Color(0xEE1E293B),
+                        topLeft = Offset(badgeX, badgeY),
+                        size = androidx.compose.ui.geometry.Size(badgeW, badgeH),
+                        cornerRadius = androidx.compose.ui.geometry.CornerRadius(10f, 10f)
+                    )
+                    drawContext.canvas.nativeCanvas.drawText(
+                        badgeText,
+                        badgeX + 10f,
+                        badgeY + badgeH - 10f,
+                        badgePaint
+                    )
                 }
             }
         }
@@ -14504,13 +16001,28 @@ private fun PingLineChart(points: List<PingPoint>, activeTargetLabel: String = "
             } else {
                 "$time · ${p.latencyMs?.let { "延迟 ${it}ms" } ?: "丢包/超时"} · 丢包${p.lossCount}"
             }
-            Text(text, color = TextDark, fontSize = 11.sp, fontWeight = FontWeight.Bold, lineHeight = 15.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Surface(
+                color = Blue.copy(alpha = 0.08f),
+                shape = ShapeS,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    text,
+                    color = Blue,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    lineHeight = 15.sp,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                )
+            }
         } ?: Text(
             when {
-                running && autoFollow -> "$rangeText · 红色=丢包，橙色=高延迟；拖动查看历史，双击回实时"
-                running -> "$rangeText · 红色=丢包，橙色=高延迟；双击回实时"
-                windowSpanMs < fullSpanMs -> "$rangeText · 双指缩放/左右拖动查看细节，双击回全局"
-                else -> "$rangeText · 双指放大查看细节"
+                running && autoFollow -> "$rangeText · 滑动查看各点数值，双击回实时"
+                running -> "$rangeText · 滑动查看各点数值，双击回实时"
+                windowSpanMs < fullSpanMs -> "$rangeText · 滑动查看数值，双指缩放拖动，双击回全局"
+                else -> "$rangeText · 滑动查看各点数值，双指放大细节"
             },
             color = Muted,
             fontSize = 10.sp,
@@ -14611,9 +16123,26 @@ private fun DiagnosisAdviceInlineCard(mode: TestMode, ipv4Stats: ProtocolStats, 
             MetricTile("IPv6峰值", if (hasV6) v6Peak.toString() else "—", if (v6Peak >= 5000) Green else Blue, Modifier.weight(1f))
         }
         advice.take(3).forEachIndexed { index, line ->
-            Row(verticalAlignment = Alignment.Top) {
-                Text("${index + 1}.", color = Blue, fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(18.dp))
-                Text(line, color = Muted, fontSize = 11.sp, lineHeight = 15.sp, modifier = Modifier.weight(1f))
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                verticalAlignment = Alignment.Top
+            ) {
+                Text(
+                    text = "${index + 1}.",
+                    color = Blue,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace,
+                    lineHeight = 17.sp,
+                    modifier = Modifier.width(22.dp)
+                )
+                Text(
+                    text = line,
+                    color = Muted,
+                    fontSize = 12.sp,
+                    lineHeight = 17.sp,
+                    modifier = Modifier.weight(1f)
+                )
             }
         }
     }
@@ -14678,10 +16207,9 @@ private fun RecentLogCard(logs: List<LogLine>, maskPrivacy: Boolean, onMore: () 
             Text("暂无日志", color = Muted, fontSize = 12.sp)
         } else {
             val visibleLogs = logs.takeLast(4).asReversed()
-            visibleLogs.forEachIndexed { index, line ->
-                CompactLogLine(line, maskPrivacy)
-                if (index != visibleLogs.lastIndex) {
-                    HorizontalDivider(color = Border.copy(alpha = 0.65f), thickness = 0.6.dp)
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                visibleLogs.forEach { line ->
+                    CompactLogLine(line, maskPrivacy)
                 }
             }
         }
@@ -15012,34 +16540,47 @@ private fun PublicExitLine(
 
 @Composable
 private fun BottomNav(selectedTab: MainTab, onSelect: (MainTab) -> Unit) {
+    val edgeToEdgeNavigation = Build.VERSION.SDK_INT >= Build.VERSION_CODES.VANILLA_ICE_CREAM
+    val navBarModifier = if (edgeToEdgeNavigation) {
+        // Keep the surface behind the system navigation area while the inset
+        // padding moves the buttons above the gesture/three-button controls.
+        Modifier
+            .background(GlassNavSurface)
+            .navigationBarsPadding()
+            .height(64.dp)
+    } else {
+        Modifier
+            .height(64.dp)
+            .background(GlassNavSurface)
+    }
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .height(58.dp)
-            .background(GlassNavSurface)
-            .padding(horizontal = 18.dp, vertical = 4.dp),
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
+            .then(navBarModifier)
+            .border(width = 0.5.dp, brush = GlassBorderBrush, shape = RoundedCornerShape(0.dp))
+            .padding(horizontal = 16.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         MainTab.entries.forEach { tab ->
             val selected = selectedTab == tab
             val image = when (tab) {
-                MainTab.SETTINGS -> Icons.Filled.Settings
                 MainTab.TEST -> Icons.Filled.PlayArrow
+                MainTab.TOOLS -> Icons.Filled.Build
                 MainTab.LOGS -> Icons.Filled.Article
+                MainTab.SETTINGS -> Icons.Filled.Settings
             }
-            val shape = RoundedCornerShape(24.dp)
+            val shape = RoundedCornerShape(16.dp)
             val interactionSource = remember(tab) { MutableInteractionSource() }
             val selectionModifier = if (selected) {
-                Modifier
-                    .background(GlassNavSelectionSurface, shape)
+                Modifier.background(GlassNavSelectionSurface, shape)
             } else {
                 Modifier
             }
             Column(
                 modifier = Modifier
                     .weight(1f)
-                    .height(50.dp)
+                    .height(52.dp)
                     .clip(shape)
                     .then(selectionModifier)
                     .clickable(
@@ -15047,7 +16588,7 @@ private fun BottomNav(selectedTab: MainTab, onSelect: (MainTab) -> Unit) {
                         indication = null,
                         onClick = { onSelect(tab) }
                     )
-                    .padding(top = 5.dp, bottom = 4.dp),
+                    .padding(vertical = 4.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Center
             ) {
@@ -15055,13 +16596,14 @@ private fun BottomNav(selectedTab: MainTab, onSelect: (MainTab) -> Unit) {
                     image,
                     contentDescription = tab.label,
                     tint = if (selected) Blue else Muted,
-                    modifier = Modifier.width(19.dp).height(19.dp)
+                    modifier = Modifier.width(20.dp).height(20.dp)
                 )
-                Spacer(Modifier.height(2.dp))
+                Spacer(Modifier.height(3.dp))
                 Text(
                     tab.label,
-                    color = TextDark,
+                    color = if (selected) Blue else Muted,
                     fontSize = 11.sp,
+                    fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
                     lineHeight = 12.sp,
                     maxLines = 1,
                     overflow = TextOverflow.Clip
@@ -15162,42 +16704,41 @@ private fun String.onlyDigits(): String = filter { it.isDigit() }
 private val IPV4_REGEX = Regex("""\b(?:\d{1,3}\.){3}\d{1,3}\b""")
 private val IPV6_REGEX = Regex("""(?i)(?<![\w.])(?:[0-9a-f]{1,4}:){2,}[0-9a-f]{0,4}(?:%[\w.]+)?(?![\w.])""")
 
-private val TextDark = Color(0xFF111827)
-private val Muted = Color(0xFF64748B)
-private val Border = Color(0xFFE5E7EB)
-private val Blue = Color(0xFF2563EB)
-private val BlueSoft = Color(0xFFEFF6FF)
-private val Green = Color(0xFF16A34A)
-private val GreenSoft = Color(0xFFEAFBF0)
-private val ErrorRed = Color(0xFFEF4444)
-private val RedSoft = Color(0xFFFFF1F2)
-private val Orange = Color(0xFFF97316)
-private val Purple = Color(0xFF7C3AED)
-private val Navy = Color(0xFF0F2F6E)
-private val ShapeL = RoundedCornerShape(20.dp)
-private val ShapeM = RoundedCornerShape(14.dp)
-private val ShapeS = RoundedCornerShape(10.dp)
+private val TextDark = Color(0xFF000000)
+private val Muted = Color(0x993C3C43) // 60% secondary label
+private val Border = Color(0x1F3C3C43) // 12% hairline border
+private val Blue = Color(0xFF007AFF) // Apple System Blue
+private val BlueSoft = Color(0xFFE5F1FF)
+private val Green = Color(0xFF34C759) // Apple System Green
+private val GreenSoft = Color(0xFFEAF9ED)
+private val ErrorRed = Color(0xFFFF3B30) // Apple System Red
+private val RedSoft = Color(0xFFFFECEB)
+private val Orange = Color(0xFFFF9500) // Apple System Orange
+private val Purple = Color(0xFF5856D6) // Apple System Indigo
+private val Navy = Color(0xFF003F8A)
+private val ShapeL = RoundedCornerShape(20.dp) // Apple RadiusLarge
+private val ShapeM = RoundedCornerShape(14.dp) // Apple RadiusMedium
+private val ShapeS = RoundedCornerShape(8.dp)  // Apple RadiusSmall (8pt grid)
 
-// Apple-inspired glass tokens. A single page background plus translucent
-// surfaces keeps the visual depth without stacking multiple blur render layers.
-private val GlassBackgroundTop = Color(0xFFF4F8FF)
-private val GlassBackgroundMid = Color(0xFFF8F7FF)
-private val GlassBackgroundBottom = Color(0xFFF7F9FF)
-private val GlassBlueGlow = Color(0x5960A5FA)
-private val GlassPurpleGlow = Color(0x4FBEA7FF)
+// Apple HIG - iOS 26 / macOS Tahoe 精密微量液态玻璃与极低色散材质规范
+private val GlassBackgroundTop = Color(0xFFF2F2F7)
+private val GlassBackgroundMid = Color(0xFFF6F6F9)
+private val GlassBackgroundBottom = Color(0xFFF2F2F7)
+private val GlassBlueGlow = Color(0x1F007AFF)   // 极低色散冷调微光 (<0.02)
+private val GlassPurpleGlow = Color(0x145856D6) // 极低色散微光，杜绝彩虹眩光与塑料感
 private val GlassCardBrush = Brush.verticalGradient(
-    listOf(Color.White.copy(alpha = 0.86f), Color(0xFFF8FBFF).copy(alpha = 0.68f))
+    listOf(Color.White.copy(alpha = 0.92f), Color.White.copy(alpha = 0.82f))
 )
 private val GlassCompactBrush = Brush.verticalGradient(
-    listOf(Color.White.copy(alpha = 0.90f), Color(0xFFF8FBFF).copy(alpha = 0.74f))
+    listOf(Color.White.copy(alpha = 0.94f), Color.White.copy(alpha = 0.86f))
 )
-private val GlassBorderBrush = Brush.linearGradient(
-    listOf(Color.White.copy(alpha = 0.96f), Color(0xFFCBDCF4).copy(alpha = 0.58f))
+private val GlassBorderBrush = Brush.verticalGradient(
+    listOf(Color.White.copy(alpha = 0.85f), Color.White.copy(alpha = 0.40f))
 )
-private val GlassSwipeSurface = Color(0xFFF8FBFF)
-private val DeleteActionSurface = Color(0xFFE5484D)
-private val GlassNavSurface = Color(0xFFF8FBFF)
-private val GlassNavSelectionSurface = Color(0xFFE7ECFF)
-private val GlassPopupSurface = Color(0xFFF8FBFF)
-private val GlassPopupBorder = Color(0xFFD8E3F1)
-private val GlassPopupShape = RoundedCornerShape(26.dp)
+private val GlassSwipeSurface = Color(0xFFF8F8FA)
+private val DeleteActionSurface = Color(0xFFFF3B30)
+private val GlassNavSurface = Color(0xE6FFFFFF)
+private val GlassNavSelectionSurface = Color(0x1F007AFF)
+private val GlassPopupSurface = Color(0xF5FFFFFF)
+private val GlassPopupBorder = Color.White.copy(alpha = 0.70f)
+private val GlassPopupShape = RoundedCornerShape(28.dp) // Apple RadiusModal

@@ -1,0 +1,243 @@
+name: Multiplatform Matrix Build (Android / iOS / macOS / Windows)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - 'feature/**'
+      - 'feat/**'
+
+jobs:
+  build-android:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.11.1
+
+      - name: Build Android App & Shared
+        run: |
+          gradle :app:assembleDebug --no-daemon
+
+      - name: Upload Android APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: NetSessionTester-Android.apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+
+  build-ios:
+    name: Build iOS Multiplatform Package
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode for native Liquid Glass
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '26.0'
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.11.1
+
+      - name: Compile iOS Framework
+        run: |
+          gradle :shared:linkReleaseFrameworkIosArm64 --no-daemon
+
+      - name: Package Unsigned iOS IPA
+        run: |
+          mkdir -p build/Payload/NetSessionTester.app/Frameworks
+          cp -R shared/build/bin/iosArm64/releaseFramework/shared.framework build/Payload/NetSessionTester.app/Frameworks/
+          cp desktop/assets/icon.png build/Payload/NetSessionTester.app/AppIcon60x60@2x.png
+          cp desktop/assets/icon.png build/Payload/NetSessionTester.app/AppIcon60x60@3x.png
+
+          cat << 'EOF' > build/Payload/NetSessionTester.app/Info.plist
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleExecutable</key>
+              <string>NetSessionTester</string>
+              <key>CFBundleIdentifier</key>
+              <string>com.demonv.netsessiontester</string>
+              <key>CFBundleName</key>
+              <string>NetSessionTester</string>
+              <key>CFBundleDisplayName</key>
+              <string>NetSessionTester</string>
+              <key>CFBundlePackageType</key>
+              <string>APPL</string>
+              <key>CFBundleShortVersionString</key>
+              <string>1.0.22</string>
+              <key>CFBundleVersion</key>
+              <string>1</string>
+              <key>LSRequiresIPhoneOS</key>
+              <true/>
+              <key>MinimumOSVersion</key>
+              <string>15.0</string>
+              <key>UIApplicationSceneManifest</key>
+              <dict>
+                  <key>UIApplicationSupportsMultipleScenes</key>
+                  <false/>
+                  <key>UISceneConfigurations</key>
+                  <dict>
+                      <key>UIWindowSceneSessionRoleApplication</key>
+                      <array>
+                          <dict>
+                              <key>UISceneConfigurationName</key>
+                              <string>Default</string>
+                              <key>UISceneDelegateClassName</key>
+                              <string>SceneDelegate</string>
+                          </dict>
+                      </array>
+                  </dict>
+              </dict>
+              <key>UIRequiredDeviceCapabilities</key>
+              <array>
+                  <string>arm64</string>
+              </array>
+              <key>UISupportedInterfaceOrientations</key>
+              <array>
+                  <string>UIInterfaceOrientationPortrait</string>
+                  <string>UIInterfaceOrientationLandscapeLeft</string>
+                  <string>UIInterfaceOrientationLandscapeRight</string>
+              </array>
+              <key>UIViewControllerBasedStatusBarAppearance</key>
+              <true/>
+              <key>NSLocalNetworkUsageDescription</key>
+              <string>NetSessionTester 需要访问本地网络设备以执行网络连通性和性能诊断。</string>
+          </dict>
+          </plist>
+          EOF
+
+          # Compile real native iOS ARM64 executable linking shared.framework
+          xcrun --sdk iphoneos clang -isysroot $(xcrun --sdk iphoneos --show-sdk-path) -arch arm64 -miphoneos-version-min=15.0 \
+            -F shared/build/bin/iosArm64/releaseFramework \
+            -framework shared -framework UIKit -framework Foundation \
+            -Xlinker -rpath -Xlinker @executable_path/Frameworks \
+            -fobjc-arc \
+            desktop/launcher/ios_main.m -o build/Payload/NetSessionTester.app/NetSessionTester
+
+          chmod +x build/Payload/NetSessionTester.app/NetSessionTester
+          codesign -s - --force build/Payload/NetSessionTester.app/Frameworks/shared.framework
+          codesign -s - --force build/Payload/NetSessionTester.app
+          cd build && zip -r ../NetSessionTester-iOS-unsigned.ipa Payload
+
+      - name: Upload iOS IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: NetSessionTester-iOS-unsigned.ipa
+          path: NetSessionTester-iOS-unsigned.ipa
+
+  build-macos:
+    name: Build macOS Desktop
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.11.1
+
+      - name: Build self-contained macOS application
+        run: |
+          gradle :shared:packageDmg --no-daemon
+
+      - name: Rename macOS distribution
+        run: |
+          cp shared/build/compose/binaries/main/dmg/*.dmg NetSessionTester-macOS.dmg
+
+      - name: Upload macOS DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: NetSessionTester-macOS.dmg
+          path: NetSessionTester-macOS.dmg
+
+  build-windows:
+    name: Build Windows Desktop
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.11.1
+
+      - name: Build self-contained Windows app image
+        run: |
+          gradle :shared:createDistributable --no-daemon
+
+      - name: Package Windows distributions
+        shell: pwsh
+        run: |
+          $appImage = Get-ChildItem shared\build\compose\binaries\main\app -Directory | Select-Object -First 1
+          if (-not $appImage) { throw "Compose app image not found" }
+          New-Item -ItemType Directory -Force -Path package-windows | Out-Null
+          Copy-Item "$($appImage.FullName)\*" package-windows -Recurse -Force
+          Copy-Item desktop\assets\icon.ico package-windows\icon.ico -Force
+          Compress-Archive -Path package-windows\* -DestinationPath NetSessionTester-Windows-x64-Portable.zip
+
+      - name: Build Windows Installer (Inno Setup)
+        shell: pwsh
+        run: |
+          choco install innosetup --no-progress -y
+          $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+          $iscc = (Get-Command iscc.exe -ErrorAction SilentlyContinue)?.Source
+          if (-not $iscc) {
+              if (Test-Path "C:\Program Files (x86)\Inno Setup 6\ISCC.exe") {
+                  $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+              } elseif (Test-Path "C:\Program Files\Inno Setup 6\ISCC.exe") {
+                  $iscc = "C:\Program Files\Inno Setup 6\ISCC.exe"
+              } else {
+                  throw "ISCC compiler not found!"
+              }
+          }
+          Write-Host "Compiling installer using: $iscc"
+          & "$iscc" installer.iss
+
+      - name: Upload Windows Portable Edition
+        uses: actions/upload-artifact@v4
+        with:
+          name: NetSessionTester-Windows-x64-Portable.zip
+          path: NetSessionTester-Windows-x64-Portable.zip
+
+      - name: Upload Windows Installer Setup
+        uses: actions/upload-artifact@v4
+        with:
+          name: NetSessionTester-Windows-x64-Setup.exe
+          path: NetSessionTester-Windows-x64-Setup.exe

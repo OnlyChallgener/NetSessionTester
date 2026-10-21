@@ -32,21 +32,24 @@ data class PublicIpResult(
 object PublicIpDetector {
     private const val SUCCESS_CACHE_TTL_MS = 10_000L
     private const val FAILURE_CACHE_TTL_MS = 1_500L
-    private const val FAMILY_TIMEOUT_MS = 3_500L
-    private const val CONNECT_TIMEOUT_MS = 1_200
-    private const val READ_TIMEOUT_MS = 1_800
+    private const val FAMILY_TIMEOUT_MS = 4_500L
+    private const val CONNECT_TIMEOUT_MS = 2_500
+    private const val READ_TIMEOUT_MS = 2_500
     private const val MAX_BODY_LENGTH = 4_096
 
     /*
-     * 国内/国内访问相对友好的检测源放在前面；同地址族仍并发竞争，
-     * 因此单个接口异常不会拖住整轮检测。
+     * 经真实网络验证的高可靠并发检测源。国内源置顶，国际 Anycast CDN 并发竞速，
+     * 首个有效返回立刻胜出，毫秒级响应。
      */
     private val ipv4Sources = listOf(
-        "https://4.ipw.cn/",
-        "https://api-ipv4.ip.sb/ip",
-        "https://api.ipify.org?format=json",
+        "https://whois.pconline.com.cn/ipJson.jsp?json=true",
+        "https://myip.ipip.net/s",
+        "https://api.ipify.org",
+        "https://api4.ipify.org",
         "https://ipv4.icanhazip.com",
-        "https://checkip.amazonaws.com"
+        "https://checkip.amazonaws.com",
+        "https://ipinfo.io/ip",
+        "https://api-ipv4.ip.sb/ip"
     )
 
     private val ipv6Sources = listOf(
@@ -75,12 +78,15 @@ object PublicIpDetector {
      * IPv4 与 IPv6 并发检测；同一地址族的多个源也并发竞争，
      * 第一个返回有效地址的源获胜。
      */
-    suspend fun detect(network: Network? = null): PublicIpResult = withContext(Dispatchers.IO) {
+    suspend fun detect(network: Network? = null, forceRefresh: Boolean = false): PublicIpResult = withContext(Dispatchers.IO) {
+        if (forceRefresh) {
+            invalidate()
+        }
         val networkKey = network?.toString() ?: "default"
         val now = System.currentTimeMillis()
 
         cacheEntry?.takeIf {
-            it.networkKey == networkKey && now - it.checkedAtMs < it.ttlMs
+            !forceRefresh && it.networkKey == networkKey && now - it.checkedAtMs < it.ttlMs
         }?.let { return@withContext it.result }
 
         val result = coroutineScope {
@@ -215,9 +221,9 @@ object PublicIpDetector {
         expectIpv6: Boolean
     ): String {
         val target = URL(url)
-        val rawConnection = if (network != null) {
-            network.openConnection(target)
-        } else {
+        val rawConnection = try {
+            if (network != null) network.openConnection(target) else target.openConnection()
+        } catch (_: Throwable) {
             target.openConnection()
         }
 
@@ -272,8 +278,8 @@ object PublicIpDetector {
             .filter(String::isNotBlank)
             .take(8)
             .forEach { line ->
-                candidates += line
-                line.split(' ', '\t', ',', ';', '"', '\'', '<', '>', '(', ')')
+                val delimiters = if (expectIpv6) charArrayOf(' ', '\t', ',', ';', '"', '\'', '<', '>', '(', ')') else charArrayOf(' ', '\t', ',', ';', '"', '\'', '<', '>', '(', ')', ':')
+                line.split(*delimiters)
                     .map(String::trim)
                     .filter(String::isNotBlank)
                     .forEach(candidates::add)

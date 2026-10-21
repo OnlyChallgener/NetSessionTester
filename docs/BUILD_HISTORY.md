@@ -3,8 +3,21 @@
 This file keeps short historical notes for local self-test and release-fix builds.
 Formal user-facing release notes stay in `CHANGELOG.md`; current validation notes stay in `TEST_NOTES_current.md`.
 
+## v1.0.22 release line
+
+- build157: multiplatform unification and Compose Desktop overhaul. Implemented desktop 4-Tab top navigation (Concurrent Session Hold, Standalone TCP Ping, Underload Ping, Test History), dual-axis tight auto-range charts with zoom and pan gestures, follow-cursor tooltip with dynamic viewport boundary clamping, 8-metric dashboard grid, DesktopUpdateDialog with changelog modal, default failure limit adjusted to 200 across platforms, animated connection release progress, WAF/anti-DDoS detection heuristics, iOS Liquid Glass native tab bar via Apple UIKit, and robust lifecycle cancellation handling.
+
+## v1.0.21 release line
+
+- build156: uncap 2,000 CPS limitation (broadened to 20,000 CPS), expanded IO dispatcher parallelism from 256 to 512, scaled maxPending window to 20,000, and adapted in-flight failure guard for high-CPS launching. Archived self-test items: 5000 CPS target launch verification, smooth token issuance without early in-flight drop, connection trend charts, 4-Tab bottom navigation, independent tools center (Bufferbloat, iPerf3, WiFi roaming), RFC5780 NAT manual diagnosis, secondary clear confirmations with 10s undo, Tracket pause/resume/cancel, and Android 10~16 permission behavior.
+- build155: official release of v1.0.21. Stabilized 4-Tab architecture with dedicated Tools center, recalibrated WiFi roaming under Performance, removed redundant Dual-Net, updated iPerf3 default targets to 192.168.5.1, fixed connection test crash/stall and missing chart line when failing/finishing, fortified stop button lifecycle, and unified line chart terminology.
+- build154: beta4 testing build with 4-Tab bottom navigation, Tools center layout, public IPv4 detection overhaul, and modal target selectors.
+
 ## v1.0.21 beta line
 
+- build153: 4-Tab bottom navigation with dedicated Tools center, slimmed-down Settings, accelerated domestic public IPv4 detection, manual NAT STUN presets, and target selection modals for Bufferbloat, DualNet, and iPerf3.
+- build152: added 7-day history storage for Bufferbloat, Dual Network, and iPerf3 with daily folding and swipe-to-delete; fixed iPerf3 layout truncation; optimized NAT with domestic STUN pool and Double NAT/CGNAT/UPnP detection; optimized MTU with heuristic fast search, TCP MSS cross-validation, and gaming console advice.
+- build151: added Dual Network (5G vs WiFi) concurrent real-time comparison test with Network.bindSocket and built-in iPerf3 bandwidth throughput testing client.
 - build150: introduced Bufferbloat rating diagnostic with unloaded/loaded queue delay evaluation and 5G/4G cellular RF diagnostics for base station frequency bands and signal parameters.
 
 ## v1.0.20 release line
