@@ -1,4 +1,15 @@
-# 当前多平台分支测试说明 (v1.0.22-beta1 build157)
+# 当前正式版验证说明 (v1.0.22 build158)
+
+## build158 验证范围
+
+- 本地仅运行 Python 校验，不再本地编译应用；Android、iOS、macOS、Windows 均使用 GitHub Actions 构建。
+- Python 44 项检查通过；Android iPerf3 的 8 项协议回归由 Android 构建工作流执行。
+- 发布工作流只接受同一源码提交且全部成功的 Android 签名构建和多平台矩阵构建，上传完整附件后再公开正式版。
+- Issue #9 的代码修复仅作用于 API 35 及以上 BottomNav Insets；未改 Scaffold 或业务逻辑。
+- 待真机确认：Android 16 手势/三键导航及横屏、Android 14 原布局回归；iPerf3 上下行长时间测速和图表交互。
+- iOS IPA 未使用 Apple 分发证书签名，需要自行签名；不代表 App Store 或 TestFlight 发布。
+
+## build157 验证清单归档
 
 本轮完成桌面端 (Windows/macOS) 4-Tab 导航重构、动态自适应图表缩放与平移、光标吸附 Tooltip、8 指标仪表盘网格及检查更新弹窗；完善 iOS 核心工具迁移与原生 Liquid Glass 标签栏接入；优化日志机制与并发释放。
 
@@ -8,7 +19,7 @@
 
 ## 本地契约与自动化检查
 
-本地 43 项 Python 源契约、协议样例、生命周期与配置检查通过：
+本地 44 项 Python 源契约、协议样例、生命周期与配置检查通过：
 ```bash
 python -m unittest discover -s docs/validation -p 'test_*.py' -v
 ```

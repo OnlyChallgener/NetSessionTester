@@ -5,6 +5,7 @@ Formal user-facing release notes stay in `CHANGELOG.md`; current validation note
 
 ## v1.0.22 release line
 
+- build158: stable v1.0.22 release. Android API 35+ bottom navigation insets (Issue #9), complete TCP iPerf3 control/data protocol, error/cancel handling, port/duration dropdowns, equal-width direction buttons, actual-time throughput chart and 10/30/60/120-second presets. Includes the desktop/iOS changes from build157. Platform compilation and protocol fixtures do not replace physical-device validation.
 - build157: multiplatform unification and Compose Desktop overhaul. Implemented desktop 4-Tab top navigation (Concurrent Session Hold, Standalone TCP Ping, Underload Ping, Test History), dual-axis tight auto-range charts with zoom and pan gestures, follow-cursor tooltip with dynamic viewport boundary clamping, 8-metric dashboard grid, DesktopUpdateDialog with changelog modal, default failure limit adjusted to 200 across platforms, animated connection release progress, WAF/anti-DDoS detection heuristics, iOS Liquid Glass native tab bar via Apple UIKit, and robust lifecycle cancellation handling.
 
 ## v1.0.21 release line

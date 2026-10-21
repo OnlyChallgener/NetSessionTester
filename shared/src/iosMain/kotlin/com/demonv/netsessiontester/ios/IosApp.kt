@@ -456,7 +456,7 @@ private fun IosHeaderBar(
                         .padding(horizontal = 6.dp, vertical = 2.dp)
                 ) {
                     Text(
-                        text = "iOS v1.0.22-beta1",
+                        text = "iOS v1.0.22",
                         fontSize = 11.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = appleBlue

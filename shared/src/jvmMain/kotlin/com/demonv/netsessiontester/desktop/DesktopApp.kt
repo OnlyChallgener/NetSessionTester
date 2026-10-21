@@ -75,7 +75,7 @@ internal val TextSecondary = Color(0xFF8E8E93)
 internal val InputBg = Color(0xFFF6F6F8)
 internal val InputBorder = Color(0xFFDCDCE2)
 
-const val CURRENT_APP_VERSION = "v1.0.22-beta1"
+const val CURRENT_APP_VERSION = "v1.0.22"
 const val GITHUB_REPO_URL = "https://github.com/OnlyChallgener/NetSessionTester/releases"
 
 enum class DesktopTab(val label: String, val appMode: AppMode? = null, val isHistory: Boolean = false) {
@@ -1934,7 +1934,7 @@ private fun DesktopUpdateDialog(
                     Spacer(Modifier.width(10.dp))
                     Column {
                         Text("NetSessionTester 版本更新", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
-                        Text("当前版本: $CURRENT_APP_VERSION · 状态: 已是最新预发行版", fontSize = 11.sp, color = TextSecondary)
+                        Text("当前版本: $CURRENT_APP_VERSION · 正式版", fontSize = 11.sp, color = TextSecondary)
                     }
                 }
 

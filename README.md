@@ -10,9 +10,9 @@
 [![Platform](https://img.shields.io/badge/Platform-Android%20%7C%20Windows%20%7C%20macOS%20%7C%20iOS-007ACC.svg?style=flat-square)](https://github.com/OnlyChallgener/NetSessionTester)
 [![Kotlin](https://img.shields.io/badge/Kotlin-2.2.21-7F52FF.svg?style=flat-square&logo=kotlin&logoColor=white)](https://kotlinlang.org/)
 [![Compose Multiplatform](https://img.shields.io/badge/Compose%20Multiplatform-1.9.3-4285F4.svg?style=flat-square&logo=jetpackcompose&logoColor=white)](https://www.jetbrains.com/lp/compose-multiplatform/)
-[![Release](https://img.shields.io/badge/Release-v1.0.21%20build156-34A853.svg?style=flat-square)](CHANGELOG.md)
-[![Beta](https://img.shields.io/badge/Beta-v1.0.22--beta1%20build157-FBBC05.svg?style=flat-square)](TEST_NOTES_current.md)
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg?style=flat-square)](LICENSE)
+[![Release](https://img.shields.io/badge/Release-v1.0.22%20build158-34A853.svg?style=flat-square)](https://github.com/OnlyChallgener/NetSessionTester/releases/tag/v1.0.22)
+[![Validation](https://img.shields.io/badge/Validation-build158-FBBC05.svg?style=flat-square)](TEST_NOTES_current.md)
+[![License](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)](LICENSE)
 
 </div>
 
@@ -148,7 +148,7 @@ gradle :shared:linkReleaseFrameworkIosArm64 --no-daemon
 为保证项目的版本可追溯性与结构整洁，请遵循以下规范：
 
 - `CHANGELOG.md`：针对已发布或发布候选版本的正式变更日志。
-- `TEST_NOTES_current.md`：当前构建版本（build157）的活跃验证清单。
+- `TEST_NOTES_current.md`：当前构建版本（build158）的活跃验证清单。
 - `docs/BUILD_HISTORY.md`：过往本地自测及发布修复构建版本的简要时间线归档。
 - `docs/RELEASE_TEMPLATE.md`：用于未来发版准备的标准化模板。
 - `design.md`：遵循 Apple HIG 与现代化设计语言的设计规范文档。

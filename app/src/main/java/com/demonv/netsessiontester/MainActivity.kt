@@ -675,8 +675,8 @@ private fun currentAppVersionCode(context: Context): Long = runCatching {
 private fun currentAppVersionName(context: Context): String {
     return runCatching {
         val pkg = context.packageManager.getPackageInfo(context.packageName, 0)
-        pkg.versionName?.takeIf { it.isNotBlank() } ?: "v1.0.22-beta1"
-    }.getOrDefault("v1.0.22-beta1")
+        pkg.versionName?.takeIf { it.isNotBlank() } ?: "v1.0.22"
+    }.getOrDefault("v1.0.22")
 }
 
 private fun displayVersionName(raw: String): String {
@@ -6360,7 +6360,7 @@ private fun VersionInfoDialog(
                     Text("当前版本", color = Muted, fontSize = 12.sp, modifier = Modifier.weight(1f))
                     StatusChip(displayVersionName(currentAppVersionName(LocalContext.current)), BlueSoft, Blue, compact = true)
                 }
-                VersionLine(displayVersionName(currentAppVersionName(LocalContext.current)), "正式版发布：全新独立「工具」中心、校准WiFi漫游、修复测试卡死与折线同步、精简网络看板。")
+                VersionLine(displayVersionName(currentAppVersionName(LocalContext.current)), "修复Android 15及以上底栏适配与iPerf3测速，新增实时速率图表及120秒测试；完善桌面与iOS多平台支持。")
                 VersionLine("v1.0.21-beta4", "重构4-Tab底栏与独立「工具」中心，大幅精简设置页，极速公网IPv4抢占，强化手动NAT，新增目标选择器。")
                 VersionLine("v1.0.21-beta3", "新增缓冲评级/双网/iPerf3三大模块7天历史与折叠删除，修复iPerf3排版，深度优化NAT与MTU。")
                 VersionLine("v1.0.21-beta2", "新增双网并发(5G vs WiFi)同屏对测与内置iPerf3吞吐测速客户端，快捷矩阵升级4行2列。")
