@@ -1,18 +1,19 @@
 {
-  "versionCode": 157,
-  "versionName": "v1.0.22-beta1",
-  "build": 157,
-  "status": "beta",
+  "versionCode": 158,
+  "versionName": "v1.0.22",
+  "build": 158,
+  "status": "ready",
   "minReadyFileSize": 3000000,
-  "title": "NetSessionTester 测试版 v1.0.22-beta1 build157",
+  "title": "NetSessionTester 正式版 v1.0.22 build158",
   "content": [
-    "修复 Windows/macOS 连接数、独立 TCP Ping 和联动诊断的采样、失败统计与连接释放",
-    "新增桌面历史记录：保存测试参数、真实曲线和运行日志，支持筛选、删除和 CSV 导出",
-    "iOS 接入核心网络工具、历史和设置，并使用系统标签栏承载 Liquid Glass",
-    "清理已移除的双网对测残余和旧版外部 Java 桌面启动器",
-    "本版只完成 Python 源契约与协议样例检查，未完成平台编译和真机验收"
+    "修复 Android 15 及以上底部导航栏适配，避免系统导航区域遮挡按钮",
+    "修复 iPerf3 TCP 上下行测速协议、错误提示及停止后的连接释放",
+    "iPerf3 增加真实时间轴、平均线、峰值及点击查看采样值",
+    "端口与时长采用下拉选择，上下行按钮等宽；支持 10/30/60/120 秒，默认 30 秒",
+    "版本信息仅保留最近五条正式版本记录，移除过时内容"
   ],
-  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.0.22-beta1/NetSessionTester-v1.0.22-beta1-build157-signed.apk",
-  "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/tag/v1.0.22-beta1",
+  "apkUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/download/v1.0.22/NetSessionTester-v1.0.22-build158-signed.apk",
+  "githubUrl": "https://github.com/OnlyChallgener/NetSessionTester/releases/tag/v1.0.22",
+  "sha256": "2fb80fa867ca3f791dcaf64d096d65d76bc3e4c83e0a7c953008277c2d5271cb",
   "force": false
 }
